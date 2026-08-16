@@ -12,6 +12,8 @@ pub struct Loader {
     pub ctx: Context,
     pub tree: Rc<EntryTree>,
     pub name: &'static str,
+    /// `CORDIS_SHARED` env data (mirrors `loader.envData`).
+    pub env_data: serde_json::Value,
 }
 
 impl Service for Loader {
@@ -30,11 +32,21 @@ impl Loader {
     /// Creates a loader on `ctx`, provides `ctx.loader` and registers the
     /// internal hooks (write-back, reload log, self-dispose).
     pub fn new(ctx: &Context) -> Rc<Self> {
+        let shared = std::env::var("CORDIS_SHARED").ok();
+        Self::with_shared(ctx, shared)
+    }
+
+    /// Creates a loader with explicit `CORDIS_SHARED` data.
+    pub fn with_shared(ctx: &Context, shared: Option<String>) -> Rc<Self> {
+        let env_data = shared
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .unwrap_or(serde_json::json!({}));
         let tree = EntryTree::new(ctx);
         let loader = Rc::new(Loader {
             ctx: ctx.clone(),
             tree,
             name: "loader",
+            env_data,
         });
         let group_plugin = loader.group_plugin();
         loader
@@ -80,6 +92,33 @@ impl Loader {
                     }),
                     EventOptions {
                         prepend: true,
+                        global: true,
+                    },
+                )
+                .unwrap(),
+        );
+
+        // Reload log hook (global, non-prepend).
+        let loader = self.clone();
+        drop(
+            self.ctx
+                .on(
+                    "internal/update",
+                    Rc::new(move |args| {
+                        let no_save = args[1].downcast_ref::<bool>().copied().unwrap_or(false);
+                        let fiber = args[2].clone().downcast::<Fiber>().ok();
+                        let next = &args[3].downcast_ref::<AnyNext>().expect("next").0;
+                        if !no_save
+                            && let Some(fiber) = fiber
+                            && let Some(entry) = loader.find_entry_for_fiber(&fiber)
+                        {
+                            loader.show_log("reload", &entry);
+                        }
+                        next();
+                        Ok(None)
+                    }),
+                    EventOptions {
+                        prepend: false,
                         global: true,
                     },
                 )
@@ -306,5 +345,62 @@ impl Loader {
             .iter()
             .map(|entry| entry.options.borrow().clone())
             .collect()
+    }
+
+    /// Locates the entry id owning `fiber` (mirrors `loader.locate`).
+    pub fn locate(&self, fiber: &Rc<Fiber>) -> Option<String> {
+        self.tree.entries().into_iter().find_map(|entry| {
+            let matches = entry
+                .fiber
+                .borrow()
+                .as_ref()
+                .map(|candidate| Rc::ptr_eq(candidate, fiber))
+                .unwrap_or(false);
+            if matches { Some(entry.id()) } else { None }
+        })
+    }
+
+    /// The loader's service check: unavailable while tasks are pending when
+    /// the `await` intercept is enabled (mirrors `Loader.check`).
+    pub fn check(&self) -> bool {
+        let await_config = self
+            .ctx
+            .resolve_config::<LoaderIntercept>("loader", None, None)
+            .await_enabled;
+        !(await_config && self.tree.get_tasks() > 0)
+    }
+
+    /// Logs an apply/reload message when logs are enabled.
+    pub fn show_log(&self, r#type: &str, entry: &Entry) {
+        if entry.options.borrow().group == Some(true) || !self.enable_logs {
+            return;
+        }
+        self.ctx
+            .logger()
+            .named("loader")
+            .info(format!("{type} plugin {}", entry.options.borrow().name));
+    }
+}
+
+/// The `loader` intercept config (mirrors `Loader.Intercept`).
+#[derive(Clone, Debug, Default)]
+pub struct LoaderIntercept {
+    await_enabled: bool,
+}
+
+impl LoaderIntercept {
+    /// An intercept that makes the loader unavailable while tasks are pending.
+    pub fn awaiting() -> Self {
+        LoaderIntercept {
+            await_enabled: true,
+        }
+    }
+}
+
+impl cordis_core::Config for LoaderIntercept {
+    fn merge(&self, other: &Self) -> Self {
+        LoaderIntercept {
+            await_enabled: other.await_enabled || self.await_enabled,
+        }
     }
 }

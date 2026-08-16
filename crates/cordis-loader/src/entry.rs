@@ -606,6 +606,9 @@ impl Entry {
             .ctx
             .registry_plugin(&plugin, self.resolve_config_value());
         *self.fiber.borrow_mut() = Some(fiber.clone());
+        if let Some(loader) = self.ctx.get::<crate::Loader>() {
+            loader.show_log("apply", self);
+        }
         let result = fiber.wait().await.map_err(|error| error.to_string());
         self.tree.tasks.set(self.tree.tasks.get().saturating_sub(1));
         result

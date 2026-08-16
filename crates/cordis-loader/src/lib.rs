@@ -11,4 +11,4 @@ pub use entry::{Entry, EntryGroup, EntryOptions, EntryTree, IsolateValue, Partia
 pub use evaluator::{
     ConfigEvaluator, EvalEnv, EvalError, MinijinjaEvaluator, evaluate_config, reject_exprs,
 };
-pub use loader::Loader;
+pub use loader::{Loader, LoaderIntercept};
