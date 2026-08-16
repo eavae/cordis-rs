@@ -1,31 +1,695 @@
-//! Logger service.
-//!
-//! Story card B2 provides an error sink used by the fiber lifecycle; story
-//! card B7 implements levels, formatting, colors and exporters.
+//! Logger service: levels, formatting, colors, exporters and explicit
+//! naming (story card B7).
 
-use std::cell::RefCell;
+use std::any::Any;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::error::Error;
 use std::fmt;
+use std::rc::Rc;
 
-use crate::service::Service;
+use crate::context::Context;
+use crate::fiber::EffectHandle;
+use crate::service::{Config, Effect, Service, sync_disposer};
 
-/// Logger service, available on every context as `ctx.logger`.
-#[derive(Default)]
-pub struct LoggerService {
-    errors: RefCell<Vec<String>>,
+/// Log level (mirrors `LoggerLevel` in logger.ts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum LoggerLevel {
+    Error = 0,
+    Warn = 1,
+    Info = 2,
+    Debug = 3,
 }
 
-impl LoggerService {
-    /// Records an error (B7 replaces this with exporter dispatch).
-    pub fn error(&self, message: impl fmt::Display) {
-        self.errors.borrow_mut().push(message.to_string());
+/// Log type (mirrors `LoggerType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoggerType {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+impl LoggerType {
+    fn level(self) -> LoggerLevel {
+        match self {
+            LoggerType::Error => LoggerLevel::Error,
+            LoggerType::Warn => LoggerLevel::Warn,
+            LoggerType::Info => LoggerLevel::Info,
+            LoggerType::Debug => LoggerLevel::Debug,
+        }
+    }
+}
+
+/// A custom formatter (`%x`).
+pub type LogFormatter = Rc<dyn Fn(&LogValue) -> String>;
+
+/// Formatter table.
+pub type FormatterTable = Rc<HashMap<char, LogFormatter>>;
+
+/// A log argument value before formatting.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogValue {
+    /// A string value (`%s`).
+    Str(String),
+    /// A number (`%d`/`%i`/`%f`).
+    Num(f64),
+    /// A pre-serialized object (`%o`/`%O`).
+    Object(String),
+    /// An error (`%s` → stack).
+    Error(String),
+    /// A null-ish value (`%c` → empty).
+    Empty,
+}
+
+impl From<&str> for LogValue {
+    fn from(value: &str) -> Self {
+        LogValue::Str(value.to_string())
+    }
+}
+
+impl From<String> for LogValue {
+    fn from(value: String) -> Self {
+        LogValue::Str(value)
+    }
+}
+
+impl From<i64> for LogValue {
+    fn from(value: i64) -> Self {
+        LogValue::Num(value as f64)
+    }
+}
+
+impl LogValue {
+    /// The string used by the `%o` formatter (JSON-ish inspection).
+    pub fn inspect(&self) -> String {
+        match self {
+            LogValue::Str(value) => value.clone(),
+            LogValue::Num(value) => format!("{value}"),
+            LogValue::Object(value) => value.clone(),
+            LogValue::Error(value) => value.clone(),
+            LogValue::Empty => String::new(),
+        }
+    }
+}
+
+/// A single log message (mirrors `Message` in logger.ts).
+#[derive(Debug, Clone)]
+pub struct Message {
+    /// Monotonic message id.
+    pub sn: u64,
+    /// Timestamp (milliseconds).
+    pub ts: u64,
+    /// Resolved logger name.
+    pub name: String,
+    /// Log type.
+    pub r#type: LoggerType,
+    /// Log level.
+    pub level: LoggerLevel,
+    /// Format string plus arguments.
+    pub args: Vec<LogValue>,
+}
+
+/// A log exporter (mirrors `Exporter` in logger.ts).
+pub trait LoggerExporter {
+    /// Color mode: `None`/`0` = disabled, `1` = 16 colors, `2+` = 256.
+    fn colors(&self) -> u8 {
+        0
     }
 
-    /// Number of recorded errors (used by B2 tests to assert error counts).
-    pub fn error_count(&self) -> usize {
-        self.errors.borrow().len()
+    /// Maximum line length.
+    fn max_length(&self) -> usize {
+        10240
+    }
+
+    /// Per-name level overrides plus `default`.
+    fn levels(&self) -> Option<Rc<HashMap<String, LoggerLevel>>> {
+        None
+    }
+
+    /// Custom formatters (`%x`).
+    fn formatters(&self) -> Option<FormatterTable> {
+        None
+    }
+
+    /// Receives every message that passes the level filter.
+    fn export(&self, message: &Message);
+}
+
+/// A closure-based exporter for tests and simple use.
+pub struct SimpleExporter {
+    pub colors: u8,
+    pub max_length: usize,
+    pub levels: Option<Rc<HashMap<String, LoggerLevel>>>,
+    pub formatters: Option<FormatterTable>,
+    pub handler: Rc<dyn Fn(&Message)>,
+}
+
+impl SimpleExporter {
+    /// Creates an exporter that records messages into a shared vector.
+    pub fn capturing(captured: Rc<RefCell<Vec<Message>>>) -> Rc<Self> {
+        Rc::new(SimpleExporter {
+            colors: 0,
+            max_length: 10240,
+            levels: None,
+            formatters: None,
+            handler: Rc::new(move |message| captured.borrow_mut().push(message.clone())),
+        })
+    }
+}
+
+impl LoggerExporter for SimpleExporter {
+    fn colors(&self) -> u8 {
+        self.colors
+    }
+
+    fn max_length(&self) -> usize {
+        self.max_length
+    }
+
+    fn levels(&self) -> Option<Rc<HashMap<String, LoggerLevel>>> {
+        self.levels.clone()
+    }
+
+    fn formatters(&self) -> Option<FormatterTable> {
+        self.formatters.clone()
+    }
+
+    fn export(&self, message: &Message) {
+        (self.handler)(message);
+    }
+}
+
+/// The `logger` intercept config (mirrors `LoggerService.Intercept`).
+#[derive(Clone, Debug, Default)]
+pub struct LoggerIntercept {
+    pub name: Option<String>,
+    pub level: Option<LoggerLevel>,
+}
+
+impl Config for LoggerIntercept {
+    fn merge(&self, other: &Self) -> Self {
+        LoggerIntercept {
+            name: other.name.clone().or_else(|| self.name.clone()),
+            level: other.level.or(self.level),
+        }
+    }
+}
+
+/// Logger service, available on every context as `ctx.logger`.
+pub struct LoggerService {
+    pub(crate) buffer: Rc<RefCell<Vec<Message>>>,
+    pub(crate) buffer_size: Rc<Cell<usize>>,
+    exporters: Rc<RefCell<HashMap<u64, Rc<dyn LoggerExporter>>>>,
+    sn_message: Cell<u64>,
+    sn_exporter: Cell<u64>,
+}
+
+impl Default for LoggerService {
+    fn default() -> Self {
+        let service = LoggerService {
+            buffer: Rc::new(RefCell::new(Vec::new())),
+            buffer_size: Rc::new(Cell::new(1000)),
+            exporters: Rc::new(RefCell::new(HashMap::new())),
+            sn_message: Cell::new(0),
+            sn_exporter: Cell::new(0),
+        };
+        // The default exporter keeps the bounded in-memory buffer (mirrors
+        // the `LoggerService` constructor).
+        let buffer = Rc::clone(&service.buffer);
+        let buffer_size = Rc::clone(&service.buffer_size);
+        service.exporters.borrow_mut().insert(
+            0,
+            Rc::new(BufferExporter {
+                buffer,
+                buffer_size,
+            }) as Rc<dyn LoggerExporter>,
+        );
+        service
     }
 }
 
 impl Service for LoggerService {
     const NAME: &'static str = "logger";
 }
+
+impl LoggerService {
+    /// Registers an exporter, managed by the fiber of `ctx`.
+    pub fn exporter(
+        &self,
+        ctx: &Context,
+        exporter: Rc<dyn LoggerExporter>,
+    ) -> Result<Rc<EffectHandle>, crate::fiber::CordisError> {
+        let id = {
+            let next = self.sn_exporter.get() + 1;
+            self.sn_exporter.set(next);
+            next
+        };
+        let exporters = Rc::clone(&self.exporters);
+        ctx.fiber().effect(
+            move || {
+                exporters.borrow_mut().insert(id, exporter.clone());
+                let exporters = Rc::clone(&exporters);
+                Effect::Disposer(sync_disposer(move || {
+                    exporters.borrow_mut().remove(&id);
+                }))
+            },
+            "ctx.logger.exporter()",
+        )
+    }
+
+    /// The exporter count (used by tests).
+    pub fn exporter_count(&self) -> usize {
+        self.exporters.borrow().len()
+    }
+
+    /// Resolves the effective name: intercept config → explicit name →
+    /// fiber name (hyphenated).
+    pub(crate) fn resolve_name(&self, ctx: &Context, explicit: Option<&str>) -> String {
+        let intercept = self.intercept_config(ctx);
+        if let Some(name) = intercept.name {
+            return name;
+        }
+        if let Some(name) = explicit {
+            return name.to_string();
+        }
+        hyphenate(&ctx.fiber().name())
+    }
+
+    /// Resolves the effective level from the intercept config.
+    pub(crate) fn intercept_config(&self, ctx: &Context) -> LoggerIntercept {
+        let mut configs: Vec<Rc<dyn Any>> = Vec::new();
+        let mut layer = Some(ctx.inner.intercept.clone());
+        while let Some(current) = layer {
+            if let Some(config) = current.entries.borrow().get("logger") {
+                configs.push(config.clone());
+            }
+            layer = current.parent.clone();
+        }
+        configs.reverse();
+        let mut result = LoggerIntercept::default();
+        for config in configs {
+            let config = config
+                .downcast_ref::<LoggerIntercept>()
+                .expect("logger intercept config type mismatch");
+            if config.name.is_some() {
+                result.name = config.name.clone();
+            }
+            if config.level.is_some() {
+                result.level = config.level;
+            }
+        }
+        result
+    }
+
+    /// Emits a message to all exporters that pass the level filter.
+    pub(crate) fn log(&self, _ctx: &Context, r#type: LoggerType, name: &str, args: Vec<LogValue>) {
+        let level = r#type.level();
+        let sn = {
+            let next = self.sn_message.get() + 1;
+            self.sn_message.set(next);
+            next
+        };
+        let ts = now_millis();
+        let exporters = self.exporters.borrow();
+        for exporter in exporters.values() {
+            let target = exporter
+                .levels()
+                .and_then(|levels| levels.get(name).cloned())
+                .or_else(|| {
+                    exporter
+                        .levels()
+                        .and_then(|levels| levels.get("default").cloned())
+                })
+                .unwrap_or(LoggerLevel::Info);
+            if target < level {
+                continue;
+            }
+            let message = Message {
+                sn,
+                ts,
+                name: name.to_string(),
+                r#type,
+                level,
+                args: args.clone(),
+            };
+            exporter.export(&message);
+        }
+    }
+
+    fn push_buffer(&self, message: Message) {
+        let size = self.buffer_size.get();
+        let mut buffer = self.buffer.borrow_mut();
+        buffer.push(message);
+        let overflow = buffer.len().saturating_sub(size);
+        if overflow > 0 {
+            buffer.drain(..overflow);
+        }
+    }
+
+    /// The current message buffer.
+    pub fn buffer(&self) -> Vec<Message> {
+        self.buffer.borrow().clone()
+    }
+
+    /// Adjusts the buffer size.
+    pub fn set_buffer_size(&self, size: usize) {
+        self.buffer_size.set(size);
+        let mut buffer = self.buffer.borrow_mut();
+        let overflow = buffer.len().saturating_sub(size);
+        if overflow > 0 {
+            buffer.drain(..overflow);
+        }
+    }
+}
+
+/// The built-in exporter that maintains the bounded message buffer.
+struct BufferExporter {
+    buffer: Rc<RefCell<Vec<Message>>>,
+    buffer_size: Rc<Cell<usize>>,
+}
+
+impl LoggerExporter for BufferExporter {
+    fn export(&self, message: &Message) {
+        let size = self.buffer_size.get();
+        let mut buffer = self.buffer.borrow_mut();
+        buffer.push(message.clone());
+        let overflow = buffer.len().saturating_sub(size);
+        if overflow > 0 {
+            buffer.drain(..overflow);
+        }
+    }
+}
+
+/// A logger bound to a context (mirrors the callable `ctx.logger(name)`).
+#[derive(Clone)]
+pub struct Logger {
+    service: Rc<LoggerService>,
+    ctx: Context,
+    pub name: String,
+    explicit: Option<String>,
+}
+
+impl Logger {
+    /// Creates a logger for `ctx` with an explicit name.
+    pub fn new(ctx: &Context, explicit: Option<&str>) -> Logger {
+        let service = ctx
+            .get::<LoggerService>()
+            .expect("logger service must be present");
+        let name = service.resolve_name(ctx, explicit);
+        Logger {
+            service,
+            ctx: ctx.clone(),
+            name,
+            explicit: explicit.map(|name| name.to_string()),
+        }
+    }
+
+    /// Returns a logger with an explicit name (story card B7's explicit
+    /// naming API).
+    pub fn named(&self, name: &str) -> Logger {
+        let mut logger = self.clone();
+        logger.explicit = Some(name.to_string());
+        logger.name = self.service.resolve_name(&self.ctx, Some(name));
+        logger
+    }
+
+    /// Registers an exporter through this logger's context.
+    pub fn exporter(
+        &self,
+        exporter: Rc<dyn LoggerExporter>,
+    ) -> Result<Rc<EffectHandle>, crate::fiber::CordisError> {
+        self.service.exporter(&self.ctx, exporter)
+    }
+
+    /// The current message buffer.
+    pub fn buffer(&self) -> Vec<Message> {
+        self.service.buffer()
+    }
+
+    /// Adjusts the buffer size.
+    pub fn set_buffer_size(&self, size: usize) {
+        self.service.set_buffer_size(size);
+    }
+
+    /// Re-resolves the name from intercepts (used after ctx changes).
+    pub fn resolved_name(&self) -> String {
+        self.service
+            .resolve_name(&self.ctx, self.explicit.as_deref())
+    }
+
+    /// Logs an error.
+    pub fn error(&self, format: impl Into<LogValue>) {
+        self.log(LoggerType::Error, vec![format.into()]);
+    }
+
+    /// Logs a warning.
+    pub fn warn(&self, format: impl Into<LogValue>) {
+        self.log(LoggerType::Warn, vec![format.into()]);
+    }
+
+    /// Logs an info message.
+    pub fn info(&self, format: impl Into<LogValue>) {
+        self.log(LoggerType::Info, vec![format.into()]);
+    }
+
+    /// Logs a debug message.
+    pub fn debug(&self, format: impl Into<LogValue>) {
+        self.log(LoggerType::Debug, vec![format.into()]);
+    }
+
+    /// Logs with a format string and arguments.
+    pub fn log_args(&self, r#type: LoggerType, format: &str, args: Vec<LogValue>) {
+        let mut all = vec![LogValue::Str(format.to_string())];
+        all.extend(args);
+        self.log(r#type, all);
+    }
+
+    fn log(&self, r#type: LoggerType, args: Vec<LogValue>) {
+        let name = self.resolved_name();
+        self.service.log(&self.ctx, r#type, &name, args);
+    }
+}
+
+impl fmt::Debug for Logger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Logger").field("name", &self.name).finish()
+    }
+}
+
+/// Formats a message the same way as `Logger.format` in logger.ts.
+pub fn format_message(
+    message: &Message,
+    exporter: &dyn LoggerExporter,
+    formatters: &HashMap<char, LogFormatter>,
+) -> String {
+    let mut args = message.args.clone();
+    let format = match args.first() {
+        Some(LogValue::Error(_)) => {
+            let stack = match args.remove(0) {
+                LogValue::Error(stack) => stack,
+                _ => unreachable!(),
+            };
+            args.insert(0, LogValue::Str(stack));
+            "%s".to_string()
+        }
+        Some(LogValue::Str(_)) => match args.remove(0) {
+            LogValue::Str(format) => format,
+            _ => unreachable!(),
+        },
+        _ => {
+            args.insert(0, LogValue::Empty);
+            "%o".to_string()
+        }
+    };
+
+    let mut output = String::new();
+    let mut chars = format.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '%'
+            && let Some(&next) = chars.peek()
+        {
+            chars.next();
+            if next == '%' {
+                output.push('%');
+                continue;
+            }
+            if next.is_ascii_alphabetic() {
+                let value = args.first().cloned();
+                let (rendered, consumed) = match (next, value) {
+                    ('s', Some(value)) => (
+                        match value {
+                            LogValue::Str(s) => s,
+                            other => other.inspect(),
+                        },
+                        true,
+                    ),
+                    ('d', Some(LogValue::Num(n))) | ('i', Some(LogValue::Num(n))) => {
+                        (format!("{}", n.trunc() as i64), true)
+                    }
+                    ('f', Some(LogValue::Num(n))) => (format!("{n}"), true),
+                    ('o', Some(value)) | ('O', Some(value)) => (value.inspect(), true),
+                    ('c', _) => (String::new(), true),
+                    ('C', Some(value)) => {
+                        let code = LoggerService::code(
+                            &message.name,
+                            if exporter.colors() >= 2 {
+                                2
+                            } else {
+                                exporter.colors()
+                            },
+                        );
+                        (
+                            LoggerService::color(exporter.colors(), code, &value.inspect(), ""),
+                            true,
+                        )
+                    }
+                    (other, Some(value)) => {
+                        if let Some(custom) = formatters.get(&other) {
+                            (custom(&value), true)
+                        } else {
+                            (format!("%{other}"), false)
+                        }
+                    }
+                    (other, None) => (format!("%{other}"), false),
+                };
+                if consumed && !args.is_empty() {
+                    args.remove(0);
+                }
+                output.push_str(&rendered);
+                continue;
+            }
+        }
+        output.push(ch);
+    }
+
+    // Remaining arguments are appended with a leading space; objects use `%o`.
+    for mut arg in args {
+        if matches!(arg, LogValue::Object(_)) {
+            arg = LogValue::Str(arg.inspect());
+        }
+        output.push(' ');
+        output.push_str(&arg.inspect());
+    }
+
+    let max_length = exporter.max_length();
+    output
+        .split('\n')
+        .map(|line| {
+            if line.chars().count() > max_length {
+                format!("{}...", line.chars().take(max_length).collect::<String>())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The 16-color table (mirrors `c16`).
+pub const C16: [u8; 6] = [6, 2, 3, 4, 5, 1];
+
+/// The 256-color table (mirrors `c256`).
+pub const C256: [u8; 75] = [
+    20, 21, 26, 27, 32, 33, 38, 39, 40, 41, 42, 43, 44, 45, 56, 57, 62, 63, 68, 69, 74, 75, 76, 77,
+    78, 79, 80, 81, 92, 93, 98, 99, 112, 113, 129, 134, 135, 148, 149, 160, 161, 162, 163, 164,
+    165, 166, 167, 168, 169, 170, 171, 172, 173, 178, 179, 184, 185, 196, 197, 198, 199, 200, 201,
+    202, 203, 204, 205, 206, 207, 208, 209, 214, 215, 220, 221,
+];
+
+impl LoggerService {
+    /// Computes the color code for a name (mirrors `Logger.code`).
+    pub fn code(name: &str, level: u8) -> u8 {
+        let mut hash: i32 = 0;
+        for ch in name.chars() {
+            hash = ((hash << 3).wrapping_sub(hash))
+                .wrapping_add(ch as i32)
+                .wrapping_add(13);
+        }
+        let colors = if level == 0 {
+            &[][..]
+        } else if level >= 2 {
+            &C256[..]
+        } else {
+            &C16[..]
+        };
+        if colors.is_empty() {
+            0
+        } else {
+            colors[hash.unsigned_abs() as usize % colors.len()]
+        }
+    }
+
+    /// Renders an ANSI-colored value (mirrors `Logger.color`).
+    pub fn color(colors: u8, code: u8, value: &str, decoration: &str) -> String {
+        if colors == 0 {
+            return value.to_string();
+        }
+        let code_part = if code < 8 {
+            format!("{code}")
+        } else {
+            format!("8;5;{code}")
+        };
+        let decoration_part = if colors >= 2 { decoration } else { "" };
+        format!("\u{1b}[3{code_part}{decoration_part}m{value}\u{1b}[0m")
+    }
+}
+
+/// Hyphenates a camelCase/PascalCase name (mirrors `cosmokit.hyphenate`).
+pub fn hyphenate(name: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() {
+            if index > 0 {
+                out.push('-');
+            }
+            out.extend(ch.to_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn now_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Records an error for B2-style error sinks (kept for compatibility).
+impl LoggerService {
+    /// Records an error directly into the buffer (kept for the fiber error
+    /// sink; B7 exporters supersede it for user-facing logs).
+    pub fn error(&self, message: impl fmt::Display) {
+        let sn = {
+            let next = self.sn_message.get() + 1;
+            self.sn_message.set(next);
+            next
+        };
+        self.push_buffer(Message {
+            sn,
+            ts: now_millis(),
+            name: "root".to_string(),
+            r#type: LoggerType::Error,
+            level: LoggerLevel::Error,
+            args: vec![LogValue::Str(message.to_string())],
+        });
+    }
+
+    /// Number of recorded errors (B2 stub behavior; exporters supersede it).
+    pub fn error_count(&self) -> usize {
+        self.buffer
+            .borrow()
+            .iter()
+            .filter(|message| message.r#type == LoggerType::Error)
+            .count()
+    }
+}
+
+// Keep `Error` import used by trait objects in public signatures.
+#[allow(unused_imports)]
+use Error as _;

@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::events::{EventCallback, EventFilter, EventOptions, ParallelError};
 use crate::fiber::{CordisError, EffectHandle, Fiber, FiberState};
+use crate::logger::Logger;
 use crate::registry::{Plugin, RegistryService};
 use crate::service::{ApplyFn, Config, Effect, Service};
 use crate::{EventsService, LoggerService, ReflectService};
@@ -404,6 +405,11 @@ impl Context {
         self.get::<EventsService>()
             .expect("events service")
             .on(self, event, callback, options)
+    }
+
+    /// Returns a logger bound to this context (mirrors `ctx.logger()`).
+    pub fn logger(&self) -> Logger {
+        Logger::new(self, None)
     }
 
     /// Registers a listener with an attached filter.

@@ -19,7 +19,10 @@ pub use events::{
     ParallelError, WaterfallNext, event_listener,
 };
 pub use fiber::{CordisError, EffectHandle, EffectMeta, Fiber, FiberError, FiberState, disposer};
-pub use logger::LoggerService;
+pub use logger::{
+    C16, C256, LogValue, Logger, LoggerExporter, LoggerIntercept, LoggerLevel, LoggerService,
+    LoggerType, Message, SimpleExporter, format_message, hyphenate,
+};
 pub use reflect::ReflectService;
 pub use registry::{Plugin, RegistryService};
 pub use service::{

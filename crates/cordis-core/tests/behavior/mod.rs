@@ -14,6 +14,7 @@ pub mod dispose;
 pub mod events;
 pub mod fiber;
 pub mod isolate;
+pub mod logger;
 pub mod plugin;
 pub mod service;
 
