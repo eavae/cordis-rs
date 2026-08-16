@@ -1,14 +1,217 @@
-//! Registry service (shell).
+//! Plugin registration and runtime management.
 //!
-//! Story card B4 implements plugin registration and runtime management. This
-//! card only provides the service identity so that `ctx.registry` resolves.
+//! Story card B2 provides the minimal registration machinery needed by the
+//! fiber lifecycle; story card B4 formalizes the full plugin contract
+//! (invalid-plugin errors, inject declaration forms, registry queries).
 
-use crate::service::Service;
+use std::any::Any;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::{Rc, Weak};
+
+use crate::context::{Context, ContextInner, InterceptLayer};
+use crate::fiber::{Epoch, Fiber, FiberState};
+use crate::service::{ApplyFn, Effect, Service};
+
+/// A plugin declaration (minimal form; B4 extends it).
+pub struct Plugin {
+    /// Optional plugin name used for fiber naming.
+    pub name: Option<String>,
+    /// Declared inject dependencies.
+    pub inject: Vec<String>,
+    /// The apply callback.
+    pub apply: ApplyFn,
+}
+
+/// A plugin runtime shared by all fibers of the same plugin.
+pub(crate) struct Runtime {
+    pub name: Option<String>,
+    pub callback: ApplyFn,
+    pub fibers: RefCell<Vec<Rc<Fiber>>>,
+    pub registry: RefCell<Option<Weak<RegistryService>>>,
+}
 
 /// Registry service, available on every context as `ctx.registry`.
-#[derive(Debug)]
-pub struct RegistryService;
+#[derive(Default)]
+pub struct RegistryService {
+    counter: Cell<u64>,
+    runtimes: RefCell<HashMap<usize, Rc<Runtime>>>,
+}
 
 impl Service for RegistryService {
     const NAME: &'static str = "registry";
+}
+
+impl std::fmt::Debug for RegistryService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryService")
+            .field("size", &self.runtimes.borrow().len())
+            .finish()
+    }
+}
+
+impl RegistryService {
+    /// Allocates the next fiber id.
+    pub(crate) fn next_counter(&self) -> u64 {
+        let next = self.counter.get() + 1;
+        self.counter.set(next);
+        next
+    }
+
+    /// Registers a plugin on `parent` and returns its fiber.
+    ///
+    /// The fiber is pushed into the runtime's fiber list and its injects are
+    /// resolved synchronously; the apply callback runs through the reload
+    /// state machine (see [`Fiber::wait`](crate::Fiber::wait)).
+    pub fn plugin(
+        &self,
+        parent: &Context,
+        plugin: &Plugin,
+        config: Option<Rc<dyn Any>>,
+    ) -> Rc<Fiber> {
+        parent
+            .fiber()
+            .assert_active()
+            .expect("cannot register plugin on inactive context");
+
+        let callback = plugin.apply.clone();
+        let key = Rc::as_ptr(&callback) as *const () as usize;
+        let registry_rc = parent.get::<RegistryService>().expect("registry service");
+        let mut runtimes = self.runtimes.borrow_mut();
+        let runtime = runtimes
+            .entry(key)
+            .or_insert_with(|| {
+                Rc::new(Runtime {
+                    name: plugin.name.clone(),
+                    callback: callback.clone(),
+                    fibers: RefCell::new(Vec::new()),
+                    registry: RefCell::new(Some(Rc::downgrade(&registry_rc))),
+                })
+            })
+            .clone();
+        drop(runtimes);
+
+        let uid = self.next_counter();
+        let child_inner = build_child_inner(parent, &plugin.inject);
+        let fiber = Rc::new(Fiber {
+            uid: Cell::new(Some(uid)),
+            ctx: child_inner,
+            parent: Some(parent.clone()),
+            config: RefCell::new(config),
+            state: Cell::new(FiberState::Pending),
+            inject: RefCell::new(plugin.inject.iter().map(|n| (n.clone(), None)).collect()),
+            runtime: RefCell::new(Some(runtime.clone())),
+            error: RefCell::new(None),
+            epoch: RefCell::new(Epoch::Inactive),
+            resolved: RefCell::new(HashMap::new()),
+            disposables: RefCell::new(Vec::new()),
+            inertia: RefCell::new(Default::default()),
+            dispose: RefCell::new(None),
+        });
+
+        // Mirror `parent.fiber.effect(...)` in fiber.ts: the registration
+        // effect runs synchronously, and its disposer unregisters the fiber.
+        let fiber_for_effect = fiber.clone();
+        let handle = parent
+            .fiber()
+            .effect(
+                move || {
+                    runtime.fibers.borrow_mut().push(fiber_for_effect.clone());
+                    for name in fiber_for_effect.inject.borrow().keys() {
+                        fiber_for_effect.check_impl(name);
+                    }
+                    fiber_for_effect.refresh();
+                    let fiber = fiber_for_effect.clone();
+                    Effect::Disposer(Box::new(move || {
+                        let fiber = fiber.clone();
+                        Box::pin(async move {
+                            unregister_dispose(fiber).await;
+                            Ok(())
+                        })
+                    }))
+                },
+                "ctx.plugin()",
+            )
+            .expect("parent fiber must be active");
+        *fiber.dispose.borrow_mut() = Some(handle);
+        fiber
+    }
+
+    /// Re-checks every fiber that injects `name` and applies the same-label
+    /// filter (mirrors `ReflectService.notify`).
+    pub(crate) fn notify(&self, name: &str, provider: &Context) -> Vec<Rc<Fiber>> {
+        let provider_label = provider.inner.isolate_label(name);
+        let runtimes = self.runtimes.borrow();
+        let mut affected = Vec::new();
+        for runtime in runtimes.values() {
+            for fiber in runtime.fibers.borrow().iter() {
+                if !fiber.inject.borrow().contains_key(name) {
+                    continue;
+                }
+                if provider_label != fiber.ctx.isolate_label(name) {
+                    continue;
+                }
+                fiber.check_impl(name);
+                fiber.refresh();
+                affected.push(fiber.clone());
+            }
+        }
+        affected
+    }
+
+    /// Removes a runtime once its last fiber is disposed.
+    pub(crate) fn remove_runtime(&self, fiber: &Rc<Fiber>) {
+        if let Some(runtime) = &*fiber.runtime.borrow() {
+            let key = Rc::as_ptr(&runtime.callback) as *const () as usize;
+            self.runtimes.borrow_mut().remove(&key);
+        }
+    }
+}
+
+fn build_child_inner(parent: &Context, inject: &[String]) -> Rc<ContextInner> {
+    let intercept = if inject.is_empty() {
+        parent.inner.intercept.clone()
+    } else {
+        let entries = inject
+            .iter()
+            .filter_map(|name| {
+                parent
+                    .inner
+                    .intercept
+                    .entries
+                    .borrow()
+                    .get(name)
+                    .map(|config| (name.clone(), config.clone()))
+            })
+            .collect();
+        Rc::new(InterceptLayer {
+            entries: RefCell::new(entries),
+            parent: Some(parent.inner.intercept.clone()),
+        })
+    };
+    Rc::new(ContextInner {
+        isolate: parent.inner.isolate.clone(),
+        intercept,
+        store: parent.inner.store.clone(),
+        meta: RefCell::new(parent.inner.meta.borrow().clone()),
+    })
+}
+
+async fn unregister_dispose(fiber: Rc<Fiber>) {
+    if fiber.uid.replace(None).is_none() {
+        return;
+    }
+    if let Some(runtime) = &*fiber.runtime.borrow() {
+        let mut fibers = runtime.fibers.borrow_mut();
+        if let Some(position) = fibers.iter().position(|f| Rc::ptr_eq(f, &fiber)) {
+            fibers.remove(position);
+        }
+        if fibers.is_empty()
+            && let Some(registry) = runtime.registry.borrow().as_ref().and_then(Weak::upgrade)
+        {
+            registry.remove_runtime(&fiber);
+        }
+    }
+    fiber.set_epoch(Epoch::Inactive);
+    let _ = fiber.wait().await;
 }

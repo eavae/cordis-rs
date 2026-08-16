@@ -14,8 +14,8 @@ impl Service for Foo {
     const NAME: &'static str = "foo";
 }
 
-#[test]
-fn isolation_isolated_context() {
+#[tokio::test]
+async fn isolation_isolated_context() {
     let root = Context::new();
     let ctx1 = root.isolate("foo", Rc::from("symbol-1"));
     let ctx2 = root.isolate("foo", Rc::from("symbol-2"));
@@ -30,7 +30,7 @@ fn isolation_isolated_context() {
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert!(ctx2.get::<Foo>().is_none());
 
-    dispose0();
+    dispose0.dispose().await;
     assert!(root.get::<Foo>().is_none());
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert!(ctx2.get::<Foo>().is_none());
@@ -40,12 +40,12 @@ fn isolation_isolated_context() {
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert_eq!(ctx2.get::<Foo>().unwrap().bar, 300);
 
-    dispose1();
-    dispose2();
+    dispose1.dispose().await;
+    dispose2.dispose().await;
 }
 
-#[test]
-fn isolation_shared_label() {
+#[tokio::test]
+async fn isolation_shared_label() {
     let root = Context::new();
     let label = Rc::<str>::from("test");
     let ctx1 = root.isolate("foo", label.clone());
@@ -61,10 +61,10 @@ fn isolation_shared_label() {
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert_eq!(ctx2.get::<Foo>().unwrap().bar, 200);
 
-    dispose12();
+    dispose12.dispose().await;
     assert_eq!(root.get::<Foo>().unwrap().bar, 100);
     assert!(ctx1.get::<Foo>().is_none());
     assert!(ctx2.get::<Foo>().is_none());
 
-    dispose0();
+    dispose0.dispose().await;
 }

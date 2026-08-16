@@ -36,11 +36,11 @@ impl Config for FooConfig {
 #[derive(Debug)]
 struct MetaValue(String);
 
-#[test]
-fn root_construction_provides_four_services() {
+#[tokio::test]
+async fn root_construction_provides_four_services() {
     let root = Context::new();
     assert_eq!(root.fiber().state.get(), FiberState::Active);
-    assert_eq!(root.fiber().name, "root");
+    assert_eq!(root.fiber().name(), "root");
 
     assert!(root.get::<EventsService>().is_some());
     assert!(root.get::<LoggerService>().is_some());
@@ -49,23 +49,23 @@ fn root_construction_provides_four_services() {
     assert!(root.get_str("events").is_some());
 }
 
-#[test]
-fn get_and_provide_roundtrip() {
+#[tokio::test]
+async fn get_and_provide_roundtrip() {
     let root = Context::new();
     assert!(root.get::<Foo>().is_none());
     // Missing names resolve to None without panicking.
     assert!(root.get_str("missing").is_none());
 
-    let disposer = root.provide::<Foo>(Rc::new(Foo { bar: 100 })).unwrap();
+    let handle = root.provide::<Foo>(Rc::new(Foo { bar: 100 })).unwrap();
     let foo = root.get::<Foo>().expect("foo must be visible");
     assert_eq!(foo.bar, 100);
 
-    disposer();
+    handle.dispose().await;
     assert!(root.get::<Foo>().is_none());
 }
 
-#[test]
-fn duplicate_provide_reports_error() {
+#[tokio::test]
+async fn duplicate_provide_reports_error() {
     let root = Context::new();
     drop(root.provide::<Foo>(Rc::new(Foo { bar: 1 })).unwrap());
     let err = match root.provide::<Foo>(Rc::new(Foo { bar: 2 })) {
@@ -75,8 +75,8 @@ fn duplicate_provide_reports_error() {
     assert!(err.contains("service \"foo\" has been registered"), "{err}");
 }
 
-#[test]
-fn isolate_hides_isolated_services_from_parent() {
+#[tokio::test]
+async fn isolate_hides_isolated_services_from_parent() {
     let root = Context::new();
     let ctx1 = root.isolate("foo", Rc::from("label-1"));
     let ctx2 = root.isolate("foo", Rc::from("label-2"));
@@ -92,7 +92,7 @@ fn isolate_hides_isolated_services_from_parent() {
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert!(ctx2.get::<Foo>().is_none());
 
-    dispose0();
+    dispose0.dispose().await;
     assert!(root.get::<Foo>().is_none());
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert!(ctx2.get::<Foo>().is_none());
@@ -102,12 +102,12 @@ fn isolate_hides_isolated_services_from_parent() {
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert_eq!(ctx2.get::<Foo>().unwrap().bar, 300);
 
-    dispose1();
-    dispose2();
+    dispose1.dispose().await;
+    dispose2.dispose().await;
 }
 
-#[test]
-fn shared_label_shares_service_instance() {
+#[tokio::test]
+async fn shared_label_shares_service_instance() {
     let root = Context::new();
     let label = Rc::<str>::from("test");
     let ctx1 = root.isolate("foo", label.clone());
@@ -123,16 +123,16 @@ fn shared_label_shares_service_instance() {
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert_eq!(ctx2.get::<Foo>().unwrap().bar, 200);
 
-    dispose12();
+    dispose12.dispose().await;
     assert_eq!(root.get::<Foo>().unwrap().bar, 100);
     assert!(ctx1.get::<Foo>().is_none());
     assert!(ctx2.get::<Foo>().is_none());
 
-    dispose0();
+    dispose0.dispose().await;
 }
 
-#[test]
-fn unisolated_child_sees_parent_services() {
+#[tokio::test]
+async fn unisolated_child_sees_parent_services() {
     let root = Context::new();
     drop(root.provide::<Foo>(Rc::new(Foo { bar: 100 })).unwrap());
 
@@ -140,8 +140,8 @@ fn unisolated_child_sees_parent_services() {
     assert_eq!(child.get::<Foo>().unwrap().bar, 100);
 }
 
-#[test]
-fn intercept_merges_along_chain() {
+#[tokio::test]
+async fn intercept_merges_along_chain() {
     let root = Context::new();
     let ctx1 = root.intercept(
         "foo",
@@ -211,8 +211,8 @@ fn intercept_merges_along_chain() {
     );
 }
 
-#[test]
-fn extend_carries_metadata() {
+#[tokio::test]
+async fn extend_carries_metadata() {
     let root = Context::new();
     let child = root.extend(&[(
         "loader/entry-init",

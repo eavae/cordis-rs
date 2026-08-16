@@ -14,8 +14,8 @@ pub mod service;
 
 pub use context::Context;
 pub use events::EventsService;
-pub use fiber::{Fiber, FiberState};
+pub use fiber::{CordisError, EffectHandle, Fiber, FiberError, FiberState, disposer};
 pub use logger::LoggerService;
 pub use reflect::ReflectService;
-pub use registry::RegistryService;
-pub use service::{Config, Disposer, Service};
+pub use registry::{Plugin, RegistryService};
+pub use service::{Config, Disposer, Effect, Service, async_disposer, sync_disposer};
