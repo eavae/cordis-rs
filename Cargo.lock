@@ -104,6 +104,10 @@ dependencies = [
 [[package]]
 name = "cordis-utils"
 version = "0.1.0"
+dependencies = [
+ "cordis-core",
+ "tokio",
+]
 
 [[package]]
 name = "equivalent"
