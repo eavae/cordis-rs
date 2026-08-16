@@ -12,7 +12,7 @@ pub mod reflect;
 pub mod registry;
 pub mod service;
 
-pub use context::Context;
+pub use context::{Context, MixinAccessor, MixinGet, MixinSet};
 pub use cordis_macros::{inject, service};
 pub use events::{
     AnyNext, EventCallback, EventFilter, EventOptions, EventsService, ListenerFilter,

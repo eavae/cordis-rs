@@ -10,6 +10,7 @@ use std::future::{Future, poll_fn};
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 
+pub mod associate;
 pub mod dispose;
 pub mod events;
 pub mod fiber;

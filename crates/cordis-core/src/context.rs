@@ -26,6 +26,20 @@ static NEXT_LABEL_ID: AtomicU64 = AtomicU64::new(1);
 /// A service availability check (`Service::check` in the TS reference).
 pub type ServiceCheck = Rc<dyn Fn(&Context) -> bool>;
 
+/// A mixin getter: resolves the associated value for the source service.
+pub type MixinGet = Rc<dyn Fn(&Context) -> Option<Rc<dyn Any>>>;
+
+/// A mixin setter.
+pub type MixinSet = Rc<dyn Fn(&Context, Rc<dyn Any>)>;
+
+/// A registered accessor (`Property.Accessor` in reflect.ts).
+pub struct MixinAccessor {
+    /// Resolves the value.
+    pub get: MixinGet,
+    /// Optionally writes the value.
+    pub set: Option<MixinSet>,
+}
+
 /// A service label. Labels compare by value: contexts isolated with the same
 /// label share the same service instance (mirrors `Symbol('name')` equality
 /// in the TS reference).
@@ -91,12 +105,23 @@ pub(crate) struct Store {
 }
 
 /// Shared inner state of a [`Context`].
-#[derive(Debug)]
 pub(crate) struct ContextInner {
     pub isolate: Rc<IsolateLayer>,
     pub intercept: Rc<InterceptLayer>,
     pub store: Rc<RefCell<Store>>,
     pub meta: RefCell<Vec<(String, Rc<dyn Any>)>>,
+    pub props: RefCell<HashMap<String, Rc<MixinAccessor>>>,
+}
+
+impl std::fmt::Debug for ContextInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextInner")
+            .field("isolate", &self.isolate)
+            .field("intercept", &self.intercept)
+            .field("store", &self.store)
+            .field("meta", &self.meta)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ContextInner {
@@ -155,6 +180,7 @@ impl Context {
             intercept,
             store,
             meta: RefCell::new(Vec::new()),
+            props: RefCell::new(HashMap::new()),
         });
         let fiber = Fiber::root(inner.clone());
         let ctx = Context { inner, fiber };
@@ -213,6 +239,12 @@ impl Context {
         check: Option<ServiceCheck>,
     ) -> Result<Rc<EffectHandle>, String> {
         self.fiber.assert_active().map_err(|e| e.message)?;
+        {
+            let props = self.inner.props.borrow();
+            if props.contains_key(name) {
+                return Err(format!("property \"{name}\" is already declared"));
+            }
+        }
         let label = self.ensure_label(name);
         {
             let store = self.inner.store.borrow();
@@ -369,6 +401,82 @@ impl Context {
         result
     }
 
+    /// Registers mixin accessors (mirrors `ctx.mixin(source, map)`).
+    ///
+    /// Each `(key, target_name)` entry makes `ctx.resolve_assoc(source, key)`
+    /// resolve the target service or value.
+    pub fn mixin(&self, source: &str, entries: &[(&str, &str)]) -> Result<(), String> {
+        let accessors: Vec<(String, Rc<MixinAccessor>)> = entries
+            .iter()
+            .map(|(key, target_name)| {
+                let target_name = target_name.to_string();
+                let get: MixinGet = Rc::new(move |ctx| ctx.get_str(&target_name));
+                (key.to_string(), Rc::new(MixinAccessor { get, set: None }))
+            })
+            .collect();
+        self.register_accessors(source, accessors)
+    }
+
+    /// Registers mixin accessors with custom get/set closures.
+    pub fn mixin_with(
+        &self,
+        source: &str,
+        entries: &[(&str, MixinAccessor)],
+    ) -> Result<(), String> {
+        let accessors = entries
+            .iter()
+            .map(|(key, accessor)| {
+                let get = accessor.get.clone();
+                let set = accessor.set.clone();
+                (key.to_string(), Rc::new(MixinAccessor { get, set }))
+            })
+            .collect();
+        self.register_accessors(source, accessors)
+    }
+
+    fn register_accessors(
+        &self,
+        source: &str,
+        entries: Vec<(String, Rc<MixinAccessor>)>,
+    ) -> Result<(), String> {
+        let mut props = self.inner.props.borrow_mut();
+        for (key, accessor) in entries {
+            let full = format!("{source}.{key}");
+            if props.contains_key(&full) {
+                return Err(format!("property \"{full}\" is already declared"));
+            }
+            props.insert(full, accessor);
+        }
+        Ok(())
+    }
+
+    /// Resolves an associated value `source.key` (mirrors the property
+    /// access `ctx[source].key` in the TS reference).
+    pub fn resolve_assoc(&self, source: &str, key: &str) -> Option<Rc<dyn Any>> {
+        let full = format!("{source}.{key}");
+        let accessor = self.inner.props.borrow().get(&full)?.clone();
+        (accessor.get)(self)
+    }
+
+    /// Sets an associated value `source.key`.
+    pub fn set_assoc(&self, source: &str, key: &str, value: Rc<dyn Any>) -> Result<(), String> {
+        let full = format!("{source}.{key}");
+        let accessor = {
+            let props = self.inner.props.borrow();
+            props
+                .get(&full)
+                .cloned()
+                .ok_or_else(|| format!("cannot set property \"{full}\" without provide"))?
+        };
+        match &accessor.set {
+            Some(set) => {
+                set(self, value);
+                Ok(())
+            }
+            None => Err(format!("cannot set property \"{full}\" without provide")),
+        }
+    }
+
     /// Registers a plugin on this context (see [`RegistryService::plugin`]).
     pub fn plugin(&self, plugin: &Plugin, config: Option<Rc<dyn Any>>) -> Rc<Fiber> {
         let registry = self
@@ -521,6 +629,7 @@ impl Context {
                 intercept,
                 store: self.inner.store.clone(),
                 meta: RefCell::new(self.inner.meta.borrow().clone()),
+                props: self.inner.props.clone(),
             }),
             fiber: self.fiber.clone(),
         }

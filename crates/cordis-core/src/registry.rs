@@ -256,6 +256,7 @@ fn build_child_inner(
         intercept,
         store: parent.inner.store.clone(),
         meta: RefCell::new(parent.inner.meta.borrow().clone()),
+        props: parent.inner.props.clone(),
     })
 }
 
