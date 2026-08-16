@@ -1,6 +1,6 @@
 //! Story card C3: EntryGroup 与 Group 插件.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cordis_core::{Context, Effect, sync_disposer};
@@ -267,6 +267,47 @@ async fn user_plugin_overrides_builtin_group_alias() {
             assert!(
                 entry.subgroup.borrow().is_none(),
                 "a user-registered plugin must shadow the builtin group alias"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn group_config_stays_raw_and_children_evaluate() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let loader = Loader::new(&root);
+            let sink = Rc::new(RefCell::new(None));
+            let sink_apply = sink.clone();
+            loader.mock(
+                "foo",
+                Rc::new(move |_ctx: &Context, config: &Rc<dyn std::any::Any>| {
+                    if let Some(value) = config.downcast_ref::<serde_yaml_ng::Value>() {
+                        *sink_apply.borrow_mut() = value.as_str().map(|s| s.to_string());
+                    }
+                    Effect::None
+                }),
+            );
+            let tree = loader.tree_handle();
+            let child = EntryOptions {
+                name: "foo".to_string(),
+                config: Some(
+                    serde_yaml_ng::from_str("!expr env(\"CORDIS_LOADER_TEST_MISSING\") or \"Hi\"")
+                        .unwrap(),
+                ),
+                ..foo_opts()
+            };
+            let outer = tree.create(group_opts("", vec![child]), None, 0);
+            tree.await_tree().await;
+            // The group's own config is passed through raw (it is a list of
+            // entry options), while each child entry evaluates `!expr` when it
+            // applies.
+            assert_eq!(sink.borrow().as_deref(), Some("Hi"));
+            assert!(
+                outer.subgroup.borrow().is_some(),
+                "the group builtin must still apply"
             );
         })
         .await;

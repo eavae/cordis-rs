@@ -1,11 +1,13 @@
 //! The Loader service (story cards C1/C6).
 
+use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
 
 use cordis_core::{AnyNext, ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service};
 
 use crate::entry::{Entry, EntryGroup, EntryOptions, EntryTree, PartialEntryOptions};
+use crate::evaluator::EvalEnv;
 use crate::so::SoPlugin;
 
 /// The plugin loader service (mirrors `Loader` in loader/index.ts).
@@ -15,6 +17,9 @@ pub struct Loader {
     pub name: &'static str,
     /// `CORDIS_SHARED` env data (mirrors `loader.envData`).
     pub env_data: serde_json::Value,
+    /// The base url exposed to `!expr` as `base_url()` (defaults to the
+    /// current working directory; mirrors `ctx.baseUrl` in the TS loader).
+    base_url: RefCell<String>,
 }
 
 impl Service for Loader {
@@ -48,6 +53,11 @@ impl Loader {
             tree,
             name: "loader",
             env_data,
+            base_url: RefCell::new(
+                std::env::current_dir()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| ".".to_string()),
+            ),
         });
         let group_plugin = group_plugin(&loader);
         loader
@@ -59,6 +69,21 @@ impl Loader {
         drop(ctx.provide::<Loader>(loader.clone()).unwrap());
         loader.register_internal_hooks();
         loader
+    }
+
+    /// The evaluation environment for `!expr` config expressions: the host
+    /// platform, the loader's base url and the process environment.
+    pub fn eval_env(&self) -> EvalEnv {
+        EvalEnv {
+            platform: platform_name(),
+            base_url: self.base_url.borrow().clone(),
+            env_vars: std::env::vars().collect(),
+        }
+    }
+
+    /// Overrides the base url used by `!expr` `base_url()`.
+    pub fn set_base_url(&self, base_url: impl Into<String>) {
+        *self.base_url.borrow_mut() = base_url.into();
     }
 
     /// Returns the underlying tree handle.
@@ -482,6 +507,15 @@ impl Loader {
 /// `cordis-plugin-group`, mirroring the TS `@cordisjs/plugin-group` package.
 pub fn group_plugin(loader: &Rc<Loader>) -> Plugin {
     loader.group_plugin_inner()
+}
+
+/// The TS-compatible platform name used by `!expr` (`darwin`/`win32`/`linux`).
+fn platform_name() -> String {
+    match std::env::consts::OS {
+        "macos" => "darwin".to_string(),
+        "windows" => "win32".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// The `loader` intercept config (mirrors `Loader.Intercept`).

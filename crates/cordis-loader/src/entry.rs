@@ -7,6 +7,8 @@ use std::rc::Rc;
 use cordis_core::{Context, Fiber, Plugin};
 use serde::{Deserialize, Serialize};
 
+use crate::evaluator::{MinijinjaEvaluator, evaluate_config};
+
 /// The tree's write callback (config write-back).
 pub type WriteCallback = Rc<dyn Fn()>;
 
@@ -578,21 +580,39 @@ impl Entry {
     /// raw config when the plugin cannot be re-imported.
     fn resolve_applied_config(&self) -> Option<Rc<dyn std::any::Any>> {
         match self.tree.import(&self.options.borrow().name) {
-            Ok(plugin) => self.resolve_config_value(&plugin),
+            Ok(plugin) => match self.resolve_config_value(&plugin) {
+                Ok(config) => config,
+                Err(error) => {
+                    // Re-evaluation failed mid-lifecycle: keep the previous
+                    // config and surface the error through the logger.
+                    self.tree.ctx.logger().error(error);
+                    self.raw_config()
+                }
+            },
             Err(_) => self.raw_config(),
         }
     }
 
-    fn resolve_config_value(&self, plugin: &Plugin) -> Option<Rc<dyn std::any::Any>> {
-        match plugin.is_group {
-            // Group plugins receive their config list as-is (mirrors the TS
-            // `_resolveConfig` check against `EntryGroup.key`).
-            true => self.raw_config(),
-            // Non-group plugins also receive the raw config for now; `!expr`
-            // interpolation will be wired here once the config evaluator is
-            // applied during entry apply.
-            false => self.raw_config(),
+    fn resolve_config_value(
+        &self,
+        plugin: &Plugin,
+    ) -> Result<Option<Rc<dyn std::any::Any>>, String> {
+        // Group plugins receive their config list as-is (mirrors the TS
+        // `_resolveConfig` check against `EntryGroup.key`).
+        if plugin.is_group {
+            return Ok(self.raw_config());
         }
+        // Non-group plugins: evaluate `!expr` in the config (mirrors the TS
+        // `_resolveConfig` interpolation).
+        let Some(config) = self.options.borrow().config.clone() else {
+            return Ok(None);
+        };
+        let Some(loader) = self.tree.ctx.get::<crate::Loader>() else {
+            return Ok(Some(Rc::new(config) as Rc<dyn std::any::Any>));
+        };
+        evaluate_config(&config, &MinijinjaEvaluator, &loader.eval_env())
+            .map(|value| Some(Rc::new(value) as Rc<dyn std::any::Any>))
+            .map_err(|error| format!("config evaluation failed: {error}"))
     }
 
     fn raw_config(&self) -> Option<Rc<dyn std::any::Any>> {
@@ -654,10 +674,9 @@ impl Entry {
         // `entry._init`, which imports `this.options.name`). `group: true`
         // only carries the lifecycle semantics of being a group container.
         let plugin = self.tree.import(&self.options.borrow().name)?;
+        let config = self.resolve_config_value(&plugin)?;
         self.tree.tasks.set(self.tree.tasks.get() + 1);
-        let fiber = self
-            .ctx
-            .registry_plugin(&plugin, self.resolve_config_value(&plugin));
+        let fiber = self.ctx.registry_plugin(&plugin, config);
         *self.fiber.borrow_mut() = Some(fiber.clone());
         if let Some(loader) = self.ctx.get::<crate::Loader>() {
             loader.show_log("apply", self);

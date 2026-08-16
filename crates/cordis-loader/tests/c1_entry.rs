@@ -1,6 +1,6 @@
 //! Story card C1: Entry 与 EntryOptions (loader 基础用例).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cordis_core::{Context, Effect};
@@ -24,6 +24,79 @@ fn counter_plugin(count: Rc<Cell<u32>>) -> cordis_core::ApplyFn {
         count.set(count.get() + 1);
         Effect::None
     })
+}
+
+fn capture_plugin(sink: Rc<RefCell<Option<String>>>) -> cordis_core::ApplyFn {
+    Rc::new(move |_ctx: &Context, config: &Rc<dyn std::any::Any>| {
+        if let Some(value) = config.downcast_ref::<serde_yaml_ng::Value>() {
+            *sink.borrow_mut() = value.as_str().map(|s| s.to_string());
+        }
+        Effect::None
+    })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn config_expr_is_evaluated_at_apply() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let loader = Loader::new(&root);
+            let sink = Rc::new(RefCell::new(None));
+            loader.mock("greeter", capture_plugin(sink.clone()));
+
+            loader
+                .read(vec![EntryOptions {
+                    id: "1".to_string(),
+                    name: "greeter".to_string(),
+                    config: Some(
+                        serde_yaml_ng::from_str(
+                            "!expr env(\"CORDIS_LOADER_TEST_MISSING\") or \"Hello\"",
+                        )
+                        .unwrap(),
+                    ),
+                    ..opts("", "greeter", false)
+                }])
+                .await;
+            assert_eq!(sink.borrow().as_deref(), Some("Hello"));
+
+            // `base_url()` comes from the loader's base url.
+            loader.set_base_url("https://example.com");
+            *sink.borrow_mut() = None;
+            loader
+                .read(vec![EntryOptions {
+                    id: "2".to_string(),
+                    name: "greeter".to_string(),
+                    config: Some(serde_yaml_ng::from_str("!expr base_url() ~ \"/data\"").unwrap()),
+                    ..opts("", "greeter", false)
+                }])
+                .await;
+            assert_eq!(sink.borrow().as_deref(), Some("https://example.com/data"));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn config_expr_error_fails_entry_apply() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let loader = Loader::new(&root);
+            let applied = Rc::new(Cell::new(0u32));
+            loader.mock("greeter", counter_plugin(applied.clone()));
+
+            loader
+                .read(vec![EntryOptions {
+                    id: "1".to_string(),
+                    name: "greeter".to_string(),
+                    config: Some(serde_yaml_ng::from_str("!expr unknown_function()").unwrap()),
+                    ..opts("", "greeter", false)
+                }])
+                .await;
+            assert_eq!(applied.get(), 0);
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]

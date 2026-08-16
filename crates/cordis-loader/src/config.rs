@@ -7,19 +7,29 @@ use std::path::Path;
 use serde_yaml_ng::{Mapping, Value};
 
 use crate::entry::EntryOptions;
+use crate::evaluator::reject_exprs;
 
 /// Reads a yaml/json config file into entry options.
 pub fn parse_config(path: &Path) -> Result<Vec<EntryOptions>, String> {
     let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
     let content = fs::read_to_string(path)
         .map_err(|error| format!("cannot read config file {path:?}: {error}"))?;
-    match extension {
+    let configs: Vec<EntryOptions> = match extension {
         "json" => serde_json::from_str(&content)
             .map_err(|error| format!("invalid json in {path:?}: {error}")),
         "yaml" | "yml" => serde_yaml_ng::from_str(&content)
             .map_err(|error| format!("invalid yaml in {path:?}: {error}")),
         other => Err(format!("extension not supported: {other}")),
+    }?;
+    // `!expr` is only allowed in `config`; typed fields reject expressions at
+    // deserialization, and `intercept` (a value field) is checked here.
+    for options in &configs {
+        if let Some(intercept) = &options.intercept {
+            reject_exprs(intercept, "intercept")
+                .map_err(|error| format!("invalid config in {path:?}: {error}"))?;
+        }
     }
+    Ok(configs)
 }
 
 /// Serializes entry options to YAML with sorted keys (`id`/`name` first,
