@@ -3,7 +3,7 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
-use cordis_core::{AnyNext, ApplyFn, Context, EventOptions, Fiber, Plugin, Service};
+use cordis_core::{AnyNext, ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service};
 
 use crate::entry::{Entry, EntryGroup, EntryOptions, EntryTree, PartialEntryOptions};
 
@@ -36,6 +36,12 @@ impl Loader {
             tree,
             name: "loader",
         });
+        let group_plugin = loader.group_plugin();
+        loader
+            .tree
+            .builtins
+            .borrow_mut()
+            .insert("@cordisjs/plugin-group".to_string(), group_plugin);
 
         drop(ctx.provide::<Loader>(loader.clone()).unwrap());
         loader.register_internal_hooks();
@@ -122,6 +128,66 @@ impl Loader {
         })
     }
 
+    /// The builtin group plugin: syncs the entry's subgroup from its config.
+    fn group_plugin(self: &Rc<Self>) -> Plugin {
+        let loader = self.clone();
+        Plugin {
+            name: Some("group".to_string()),
+            inject: Vec::new(),
+            apply: Rc::new(move |ctx: &Context, config: &Rc<dyn std::any::Any>| {
+                let fiber = ctx.fiber().clone();
+                if let Some(entry) = loader.find_entry_for_fiber(&fiber) {
+                    let configs: Vec<EntryOptions> = match config
+                        .downcast_ref::<serde_yaml_ng::Value>()
+                    {
+                        Some(value) => serde_yaml_ng::from_value(value.clone()).unwrap_or_default(),
+                        None => Vec::new(),
+                    };
+                    let subgroup = {
+                        let existing = entry.subgroup.borrow().clone();
+                        if let Some(subgroup) = existing {
+                            subgroup
+                        } else {
+                            let subgroup = EntryGroup::new(
+                                loader.tree_handle(),
+                                loader.ctx.clone(),
+                                Some(entry.parent.clone()),
+                            );
+                            *subgroup.entry.borrow_mut() = Some(entry.clone());
+                            *entry.subgroup.borrow_mut() = Some(subgroup.clone());
+                            subgroup
+                        }
+                    };
+                    // `Service.init` registers the stop disposer first.
+                    let stop_subgroup = subgroup.clone();
+                    let _ = ctx.fiber().effect(
+                        move || {
+                            Effect::Disposer(cordis_core::sync_disposer(move || {
+                                let entries: Vec<Rc<Entry>> =
+                                    stop_subgroup.entries.borrow().clone();
+                                for entry in entries {
+                                    let fiber = entry.fiber.borrow().clone();
+                                    if let Some(fiber) = fiber {
+                                        tokio::task::spawn_local(fiber.dispose());
+                                    }
+                                    *entry.fiber.borrow_mut() = None;
+                                }
+                            }))
+                        },
+                        "group.stop()",
+                    );
+                    let loader = loader.clone();
+                    Effect::Async(Box::pin(async move {
+                        loader.read_group(&subgroup, configs).await;
+                        Ok(cordis_core::sync_disposer(|| {}))
+                    }))
+                } else {
+                    Effect::None
+                }
+            }),
+        }
+    }
+
     /// Reads a config list and reconciles the tree (mirrors `tree.read`).
     pub async fn read(&self, configs: Vec<EntryOptions>) {
         let root = self.tree.root.borrow().clone().expect("root");
@@ -129,18 +195,39 @@ impl Loader {
     }
 
     async fn read_group(&self, group: &Rc<EntryGroup>, configs: Vec<EntryOptions>) {
+        eprintln!(
+            "[read_group] start group={:?} configs={}",
+            group.entry.borrow().as_ref().map(|e| e.id()),
+            configs.len()
+        );
         let mut next_entries: Vec<Rc<Entry>> = Vec::new();
         for options in configs {
-            if let Some(existing) = group
-                .entries
-                .borrow()
-                .iter()
-                .find(|entry| entry.options.borrow().id == options.id)
-                .cloned()
-            {
+            if options.group == Some(true) {
+                let mut options = options;
+                self.tree.ensure_id(&mut options);
+                // Group entry: ensure the entry and its subgroup, then process
+                // the nested config.
+                let entry = if let Some(existing) = self.find_matching(group, &options) {
+                    existing.update(PartialEntryOptions::from_options(&options), false, true);
+                    existing
+                } else {
+                    let entry = Entry::new(self.tree_handle(), group.clone(), options.clone());
+                    entry.update(PartialEntryOptions::from_options(&options), true, false);
+                    group.entries.borrow_mut().push(entry.clone());
+                    entry
+                };
+                next_entries.push(entry.clone());
+                if entry.fiber.borrow().is_none() && !entry.disabled() {
+                    entry.init().await;
+                }
+                continue;
+            }
+            if let Some(existing) = self.find_matching(group, &options) {
                 existing.update(PartialEntryOptions::from_options(&options), false, true);
                 next_entries.push(existing);
             } else {
+                let mut options = options;
+                self.tree.ensure_id(&mut options);
                 let entry = Entry::new(self.tree_handle(), group.clone(), options.clone());
                 entry.update(PartialEntryOptions::from_options(&options), true, false);
                 group.entries.borrow_mut().push(entry.clone());
@@ -169,6 +256,24 @@ impl Loader {
         {
             entry.init().await;
         }
+    }
+
+    /// Finds an existing entry by id, or by name when the new id is
+    /// auto-generated (keeps structure stable across re-reads).
+    fn find_matching(&self, group: &Rc<EntryGroup>, options: &EntryOptions) -> Option<Rc<Entry>> {
+        group
+            .entries
+            .borrow()
+            .iter()
+            .find(|entry| {
+                if !options.id.is_empty() {
+                    entry.options.borrow().id == options.id
+                } else {
+                    entry.options.borrow().name == options.name
+                        && entry.options.borrow().group == options.group
+                }
+            })
+            .cloned()
     }
 
     /// Registers a mock plugin under a name (test helper, mirrors `mock`).

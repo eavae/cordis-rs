@@ -44,6 +44,8 @@ pub struct EntryGroup {
     pub parent: Option<Rc<EntryGroup>>,
     pub entries: RefCell<Vec<Rc<Entry>>>,
     pub fiber: RefCell<Option<Rc<Fiber>>>,
+    /// The entry that owns this group (when the group belongs to an entry).
+    pub entry: RefCell<Option<Rc<Entry>>>,
 }
 
 impl EntryGroup {
@@ -58,6 +60,7 @@ impl EntryGroup {
             parent,
             entries: RefCell::new(Vec::new()),
             fiber: RefCell::new(None),
+            entry: RefCell::new(None),
         })
     }
 }
@@ -106,6 +109,9 @@ impl EntryTree {
 
     /// Resolves a plugin by name; `cordis:` names hit builtins.
     pub fn import(&self, name: &str) -> Result<Plugin, String> {
+        if let Some(plugin) = self.builtins.borrow().get(name).cloned() {
+            return Ok(plugin);
+        }
         if let Some(builtin) = name.strip_prefix("cordis:") {
             return self
                 .builtins
@@ -146,7 +152,9 @@ impl EntryTree {
                         .as_ref()
                         .map(|fiber| fiber.inertia_active())
                         .unwrap_or(false)
-                    || (entry.fiber.borrow().is_none() && !entry.disabled())
+                    || (entry.fiber.borrow().is_none()
+                        && !entry.disabled()
+                        && entry.options.borrow().group != Some(true))
             })
             .count();
         (self.tasks.get()).max(pending)
@@ -253,9 +261,11 @@ impl EntryTree {
         drop(entries);
         self.write();
         entry.update(PartialEntryOptions::from_options(&options), true, false);
+        entry.init_task.set(true);
         let this = entry.clone();
         tokio::task::spawn_local(async move {
-            this.init().await;
+            this.init_inner().await;
+            this.init_task.set(false);
         });
         entry
     }
@@ -276,14 +286,33 @@ impl EntryTree {
         self.write();
     }
 
+    /// Updates an entry's options (mirrors `tree.update`).
+    pub fn update_entry(&self, id: &str, options: PartialEntryOptions) {
+        let entry = self
+            .resolve_path(id)
+            .unwrap_or_else(|error| panic!("{error}"));
+        entry.update(options, false, false);
+        if entry.fiber.borrow().is_none()
+            && !entry.disabled()
+            && entry.options.borrow().disabled != Some(true)
+        {
+            entry.init_task.set(true);
+            let this = entry.clone();
+            tokio::task::spawn_local(async move {
+                this.init_inner().await;
+                this.init_task.set(false);
+            });
+        }
+    }
+
     /// Awaits all pending entry tasks (mirrors `tree.await`).
     pub async fn await_tree(&self) {
         loop {
+            tokio::task::yield_now().await;
             let tasks = self.get_tasks();
             if tasks == 0 {
                 return;
             }
-            tokio::task::yield_now().await;
         }
     }
 }
@@ -346,9 +375,10 @@ pub struct Entry {
 impl Entry {
     /// Creates an entry; call `update` immediately afterwards.
     pub fn new(tree: Rc<EntryTree>, parent: Rc<EntryGroup>, options: EntryOptions) -> Rc<Self> {
+        let ctx = tree.ctx.clone();
         Rc::new(Entry {
             tree,
-            ctx: parent.ctx.clone(),
+            ctx,
             parent,
             options: RefCell::new(options),
             fiber: RefCell::new(None),
@@ -367,7 +397,7 @@ impl Entry {
     }
 
     fn ancestor_entry(&self) -> Option<Rc<Entry>> {
-        self.parent.ctx.meta::<Entry>("entry")
+        self.parent.entry.borrow().clone()
     }
 
     /// Whether the entry (or an ancestor) is disabled (mirrors `entry.disabled`).
@@ -410,10 +440,16 @@ impl Entry {
             current.sort_keys();
         }
 
-        if self.disabled() {
-            if let Some(fiber) = self.fiber.borrow().clone() {
+        // Groups are always "enabled" per `disabled()`, but explicitly
+        // disabling a group entry still stops its subtree.
+        let group_disabled = self.options.borrow().group == Some(true)
+            && self.options.borrow().disabled == Some(true);
+        if group_disabled || self.disabled() {
+            let fiber = self.fiber.borrow().clone();
+            if let Some(fiber) = fiber {
                 tokio::task::spawn_local(fiber.dispose());
             }
+            *self.fiber.borrow_mut() = None;
             return;
         }
 
@@ -447,13 +483,18 @@ impl Entry {
         if self.init_task.replace(true) {
             return;
         }
-        let result = self.import_and_apply().await;
+        self.init_inner().await;
         self.init_task.set(false);
+    }
+
+    /// Ungated initialization used by `create` (the pending flag is set by
+    /// the caller).
+    pub(crate) async fn init_inner(self: &Rc<Self>) {
+        let result = self.import_and_apply().await;
         if let Err(error) = result {
             self.ctx.logger().error(error);
         }
         if self.tree.get_tasks() == 0 {
-            // `reflect.notify(['loader'])` wakes loader injectors.
             let _ = self.ctx.notify("loader");
         }
     }
@@ -462,7 +503,11 @@ impl Entry {
         if self.disabled() {
             return Ok(());
         }
-        let plugin = self.tree.import(&self.options.borrow().name)?;
+        let plugin = if self.options.borrow().group == Some(true) {
+            self.tree.import("@cordisjs/plugin-group")?
+        } else {
+            self.tree.import(&self.options.borrow().name)?
+        };
         self.tree.tasks.set(self.tree.tasks.get() + 1);
         let fiber = self
             .ctx

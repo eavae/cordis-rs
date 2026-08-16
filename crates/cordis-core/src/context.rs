@@ -212,6 +212,14 @@ impl Context {
         self.inner.isolate_label(name)
     }
 
+    /// Returns a context sharing this context's state but bound to `fiber`.
+    pub fn with_fiber(&self, fiber: Rc<Fiber>) -> Context {
+        Context {
+            inner: self.inner.clone(),
+            fiber,
+        }
+    }
+
     /// Looks up a service by name.
     ///
     /// Returns `None` when no active provider is visible from this context
