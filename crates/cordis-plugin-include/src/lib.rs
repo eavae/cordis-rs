@@ -3,6 +3,7 @@
 //! Port of `@cordisjs/plugin-include`: reads yaml/json config files into an
 //! entry tree and applies patches (story card D1).
 
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -120,6 +121,63 @@ async fn mount_include(
         &entry.ctx,
     );
     loader.read_group(subgroup, patched).await;
+
+    // Story card D5: tree writes are debounced to a single atomic file write
+    // per event-loop turn, and `loader/config-update` fires on every write.
+    let state = Rc::new(IncludeWriteState {
+        filename,
+        readonly: Cell::new(false),
+        pending: Cell::new(false),
+    });
+    state.readonly.set(!check_writable(&state.filename));
+    let loader_ctx = loader.ctx.clone();
+    let tree = loader.tree_handle();
+    let state_for_write = state.clone();
+    let subgroup_for_write = subgroup.clone();
+    *tree.write_callback.borrow_mut() = Some(Rc::new(move || {
+        loader_ctx.emit("loader/config-update", &[]);
+        if state_for_write.pending.get() {
+            return;
+        }
+        state_for_write.pending.set(true);
+        let state = state_for_write.clone();
+        let subgroup = subgroup_for_write.clone();
+        tokio::task::spawn_local(async move {
+            // `yield_now` mirrors the TS `setTimeout(0)` debounce boundary:
+            // writes issued in the same turn coalesce into one disk write.
+            tokio::task::yield_now().await;
+            let _ = state.write_once(&subgroup);
+            state.pending.set(false);
+        });
+    }));
+}
+
+/// Shared per-instance state for the debounced write-back path.
+struct IncludeWriteState {
+    filename: PathBuf,
+    readonly: Cell<bool>,
+    pending: Cell<bool>,
+}
+
+impl IncludeWriteState {
+    fn write_once(&self, subgroup: &Rc<EntryGroup>) -> Result<(), String> {
+        if self.readonly.get() {
+            return Err("cannot overwrite readonly config".to_string());
+        }
+        let entries: Vec<EntryOptions> = subgroup
+            .entries
+            .borrow()
+            .iter()
+            .map(|entry| entry.options.borrow().clone())
+            .collect();
+        let serialized = serialize_config(&entries)?;
+        atomic_write(&self.filename, &serialized)
+    }
+}
+
+/// Whether the config file is writable (mirrors the TS `checkAccess`).
+fn check_writable(path: &Path) -> bool {
+    fs::OpenOptions::new().append(true).open(path).is_ok()
 }
 
 fn resolve_path(path: &str) -> PathBuf {
