@@ -49,6 +49,7 @@ async fn core_integration_scenario() {
             // A provider service, an event listener and a consumer plugin.
             let counter_fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config| {
@@ -82,6 +83,7 @@ async fn core_integration_scenario() {
             let event_hits_apply = event_hits.clone();
             let consumer_fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: vec![("counter".to_string(), None)],
                     apply: {
@@ -133,6 +135,7 @@ async fn nested_lifecycle_leaves_no_trace() {
             let registry = root.get::<cordis_core::RegistryService>().unwrap();
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config| {
@@ -142,6 +145,7 @@ async fn nested_lifecycle_leaves_no_trace() {
                         );
                         let _ = ctx.plugin(
                             &Plugin {
+                                is_group: false,
                                 name: None,
                                 inject: Vec::new(),
                                 apply: Rc::new(|_ctx, _config| Effect::None),

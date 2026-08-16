@@ -140,6 +140,7 @@ async fn fiber_inertia_lock_3() {
             let root = Context::new();
             let provider = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx, _config| {
@@ -214,6 +215,7 @@ async fn fiber_plugin_error() {
 
             let fiber1 = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: apply.clone(),
@@ -222,6 +224,7 @@ async fn fiber_plugin_error() {
             );
             let fiber2 = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: apply.clone(),
@@ -268,6 +271,7 @@ async fn fiber_dispose_error() {
             };
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: apply.clone(),
@@ -302,6 +306,7 @@ async fn fiber_update_config_on_wrapped_fiber() {
             };
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: apply.clone(),
@@ -345,6 +350,7 @@ async fn fiber_restart_wrapped_fiber() {
             };
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: apply.clone(),
@@ -382,6 +388,7 @@ async fn fiber_update_config_while_injected_service_reloads() {
             });
             let provider = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: provider_apply,
@@ -404,6 +411,7 @@ async fn fiber_update_config_while_injected_service_reloads() {
             };
             let consumer = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: vec![("provider".to_string(), None)],
                     apply: consumer_apply,

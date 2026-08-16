@@ -19,6 +19,7 @@ pub fn apply(ctx: &Context, _config: &Rc<dyn std::any::Any>) -> Effect {
 
 fn main() {
     let plugin = Plugin {
+        is_group: false,
         name: Some("hello".to_string()),
         inject: Vec::new(),
         apply: Rc::new(apply) as ApplyFn,

@@ -34,6 +34,7 @@ async fn apply_functional_plugin() {
             };
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: apply.clone(),
@@ -56,6 +57,7 @@ async fn apply_object_plugin() {
             // The `Plugin` struct is the Rust equivalent of the TS object
             // plugin form `{ apply, name, inject }`.
             let plugin = Plugin {
+                is_group: false,
                 name: None,
                 inject: Vec::new(),
                 apply: {
@@ -82,6 +84,7 @@ async fn inactive_context() {
             let root = Context::new();
             let other_calls = Rc::new(Cell::new(0u32));
             let other = Plugin {
+                is_group: false,
                 name: None,
                 inject: Vec::new(),
                 apply: {
@@ -95,11 +98,13 @@ async fn inactive_context() {
             let other_for_disposer = other.apply.clone();
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(move |ctx: &Context, _config: &Rc<dyn std::any::Any>| {
                         let ctx = ctx.clone();
                         let other = Plugin {
+                            is_group: false,
                             name: None,
                             inject: Vec::new(),
                             apply: other_for_disposer.clone(),
@@ -145,6 +150,7 @@ async fn context_inspect() {
 
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config| {
@@ -158,6 +164,7 @@ async fn context_inspect() {
 
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: Some("foo".to_string()),
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config| {
@@ -171,6 +178,7 @@ async fn context_inspect() {
 
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: Some("bar".to_string()),
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config| {
@@ -197,6 +205,7 @@ async fn ctx_registry_queries() {
             let _ = registry.values();
 
             let plugin = Plugin {
+                is_group: false,
                 name: None,
                 inject: Vec::new(),
                 apply: Rc::new(|_ctx, _config| Effect::None),
@@ -237,6 +246,7 @@ async fn nested_plugins() {
             let callback_hit3 = callback_hit.clone();
             let callback_hit4 = callback_hit.clone();
             let nested2 = Plugin {
+                is_group: false,
                 name: None,
                 inject: Vec::new(),
                 apply: Rc::new(move |ctx: &Context, _config| {
@@ -255,6 +265,7 @@ async fn nested_plugins() {
                 }),
             };
             let nested1 = Plugin {
+                is_group: false,
                 name: None,
                 inject: Vec::new(),
                 apply: Rc::new(move |ctx: &Context, _config| {
@@ -274,6 +285,7 @@ async fn nested_plugins() {
                 }),
             };
             let outer = Plugin {
+                is_group: false,
                 name: None,
                 inject: Vec::new(),
                 apply: Rc::new(move |ctx: &Context, _config| {
@@ -337,6 +349,7 @@ async fn compare_snapshot_after_registry_delete() {
                 .unwrap(),
             );
             let plugin = Plugin {
+                is_group: false,
                 name: None,
                 inject: Vec::new(),
                 apply: {
@@ -390,6 +403,7 @@ async fn root_dispose() {
             let dispose_called = Rc::new(Cell::new(0u32));
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: {
@@ -438,6 +452,7 @@ async fn service_init_equivalent() {
             let stop = Rc::new(Cell::new(0u32));
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: {
@@ -473,6 +488,7 @@ async fn shared_runtime_multiple_fibers() {
             let root = Context::new();
             let apply = Rc::new(|_ctx: &Context, _config: &Rc<dyn std::any::Any>| Effect::None);
             let plugin = Plugin {
+                is_group: false,
                 name: Some("shared".to_string()),
                 inject: Vec::new(),
                 apply: apply.clone(),

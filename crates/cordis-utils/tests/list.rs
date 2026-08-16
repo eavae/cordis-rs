@@ -35,6 +35,7 @@ async fn context_dispose_removes_items() {
             let list_apply = list.clone();
             let fiber = root.plugin(
                 &cordis_core::Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(move |ctx: &Context, _config| {

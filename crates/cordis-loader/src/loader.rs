@@ -49,7 +49,7 @@ impl Loader {
             name: "loader",
             env_data,
         });
-        let group_plugin = loader.group_plugin();
+        let group_plugin = group_plugin(&loader);
         loader
             .tree
             .builtins
@@ -204,9 +204,10 @@ impl Loader {
     }
 
     /// The builtin group plugin: syncs the entry's subgroup from its config.
-    fn group_plugin(self: &Rc<Self>) -> Plugin {
+    fn group_plugin_inner(self: &Rc<Self>) -> Plugin {
         let loader = self.clone();
         Plugin {
+            is_group: true,
             name: Some("group".to_string()),
             inject: Vec::new(),
             apply: Rc::new(move |ctx: &Context, config: &Rc<dyn std::any::Any>| {
@@ -356,6 +357,7 @@ impl Loader {
         self.tree.plugins.borrow_mut().insert(
             name.to_string(),
             Plugin {
+                is_group: false,
                 name: None,
                 inject: inject.into_iter().map(|name| (name, None)).collect(),
                 apply,
@@ -398,6 +400,7 @@ impl Loader {
             Effect::None
         });
         let plugin = Plugin {
+            is_group: false,
             name: Some(name.clone()),
             inject: metadata
                 .inject
@@ -462,6 +465,13 @@ impl Loader {
             .named("loader")
             .info(format!("{type} plugin {}", entry.options.borrow().name));
     }
+}
+
+/// Returns the builtin group plugin bound to `loader` (the Rust counterpart
+/// of the `Group` class in the TS loader). Re-exported by
+/// `cordis-plugin-group`, mirroring the TS `@cordisjs/plugin-group` package.
+pub fn group_plugin(loader: &Rc<Loader>) -> Plugin {
+    loader.group_plugin_inner()
 }
 
 /// The `loader` intercept config (mirrors `Loader.Intercept`).

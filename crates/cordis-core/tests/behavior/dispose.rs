@@ -93,6 +93,7 @@ async fn effects_dispose_by_plugin() {
             let dispose_called_apply = dispose_called.clone();
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(move |ctx: &Context, _config| {

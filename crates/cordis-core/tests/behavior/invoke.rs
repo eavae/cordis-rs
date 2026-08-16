@@ -59,6 +59,7 @@ async fn functional_service() {
             let root = Context::new();
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {

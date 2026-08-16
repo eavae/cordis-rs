@@ -62,6 +62,7 @@ async fn config_validation_rejects_registration() {
             let applied = Rc::new(Cell::new(0u32));
             let fiber = root.plugin_with_validator(
                 &Plugin {
+                    is_group: false,
                     name: Some("demo".to_string()),
                     inject: Vec::new(),
                     apply: {
@@ -96,6 +97,7 @@ async fn config_validation_rejects_update() {
             let applied = Rc::new(Cell::new(0u32));
             let fiber = root.plugin_with_validator(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: {
@@ -130,6 +132,7 @@ async fn apply_error_includes_entry_location() {
             let root = Context::new();
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: Some("demo".to_string()),
                     inject: Vec::new(),
                     apply: Rc::new(|_ctx: &Context, _config| {

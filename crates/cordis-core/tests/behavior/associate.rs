@@ -29,6 +29,7 @@ async fn association_service_injection() {
             let root = Context::new();
             let foo_fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config| {
@@ -41,6 +42,7 @@ async fn association_service_injection() {
             foo_fiber.wait().await.unwrap();
             let bar_fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config| {
@@ -80,6 +82,7 @@ async fn association_property_injection() {
             );
             let foo_fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config| {
@@ -135,6 +138,7 @@ async fn association_mixin_get_set_forwards() {
             let secret = Rc::new(Cell::new(0i32));
             let foo_fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: {

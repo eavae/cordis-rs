@@ -699,6 +699,7 @@ impl Context {
     /// the declared dependencies).
     pub fn inject(&self, deps: &[&str], callback: ApplyFn) -> Rc<Fiber> {
         let plugin = Plugin {
+            is_group: false,
             name: None,
             inject: deps.iter().map(|s| (s.to_string(), None)).collect(),
             apply: callback,

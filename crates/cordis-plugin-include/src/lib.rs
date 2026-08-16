@@ -48,6 +48,7 @@ pub fn include_plugin() -> Plugin {
     Plugin {
         name: Some("include".to_string()),
         inject: vec![("loader".to_string(), None)],
+        is_group: false,
         apply: Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {
             let loader = ctx.get::<Loader>().expect("loader");
             let config = config

@@ -23,6 +23,9 @@ pub struct Plugin {
     pub inject: Vec<(String, Option<Rc<dyn Any>>)>,
     /// The apply callback.
     pub apply: ApplyFn,
+    /// Whether this plugin is a group container (mirrors the `EntryGroup.key`
+    /// marker on the `Group` class in the TS loader).
+    pub is_group: bool,
 }
 
 impl Plugin {

@@ -17,6 +17,6 @@ pub use evaluator::{
     ConfigEvaluator, EvalEnv, EvalError, MinijinjaEvaluator, evaluate_config, reject_exprs,
 };
 pub use host_runtime::{HostRuntime, host_spawn};
-pub use loader::{Loader, LoaderIntercept};
+pub use loader::{Loader, LoaderIntercept, group_plugin};
 pub use plugin_meta::PluginMeta;
 pub use so::{LoadError, SoPlugin, host_vtable, is_plugin_path};

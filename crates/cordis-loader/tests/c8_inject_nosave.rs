@@ -146,6 +146,7 @@ async fn child_fiber_does_not_write_back() {
             let child = Rc::new(RefCell::new(None::<Rc<Fiber>>));
             let child_slot = child.clone();
             let child_plugin = Plugin {
+                is_group: false,
                 name: None,
                 inject: Vec::new(),
                 apply: Rc::new(|_ctx: &Context, _config| Effect::None),

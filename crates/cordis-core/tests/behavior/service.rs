@@ -90,6 +90,7 @@ async fn service_pending_inject() {
                 let gate = gate.clone();
                 root.plugin(
                     &Plugin {
+                        is_group: false,
                         name: None,
                         inject: Vec::new(),
                         apply: Rc::new(move |ctx: &Context, _config| {
@@ -169,6 +170,7 @@ async fn service_multiple_injects() {
 
             let foo_fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: vec![("qux".to_string(), None)],
                     apply: {
@@ -184,6 +186,7 @@ async fn service_multiple_injects() {
             );
             let bar_fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: vec![("foo".to_string(), None), ("qux".to_string(), None)],
                     apply: {
@@ -198,6 +201,7 @@ async fn service_multiple_injects() {
             );
             let qux_fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: {
@@ -234,6 +238,7 @@ async fn decorator_method_injection_equivalent() {
             let callback = Rc::new(Cell::new(0u32));
             let dispose_called = Rc::new(Cell::new(0u32));
             let bar = Plugin {
+                is_group: false,
                 name: None,
                 inject: vec![("foo".to_string(), None)],
                 apply: {
@@ -255,6 +260,7 @@ async fn decorator_method_injection_equivalent() {
 
             let foo_fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config| {
@@ -325,6 +331,7 @@ async fn service_events_during_init() {
                 let gate = gate.clone();
                 root.plugin(
                     &Plugin {
+                        is_group: false,
                         name: None,
                         inject: Vec::new(),
                         apply: Rc::new(move |ctx: &Context, _config| {

@@ -20,6 +20,7 @@ fn opts(name: &str) -> EntryOptions {
 
 fn plugin(applied: Rc<std::cell::Cell<u32>>) -> Plugin {
     Plugin {
+        is_group: false,
         name: None,
         inject: Vec::new(),
         apply: Rc::new(move |_ctx: &Context, _config| {
@@ -90,6 +91,7 @@ async fn reload_rolls_back_on_failure() {
             loader.tree.plugins.borrow_mut().insert(
                 "p".to_string(),
                 Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|_ctx: &Context, _config| {

@@ -529,7 +529,7 @@ impl Entry {
                 && let Some(fiber) = &fiber
                 && fiber.uid.get().is_some()
             {
-                let config = self.resolve_config_value();
+                let config = self.resolve_applied_config();
                 let fiber = fiber.clone();
                 tokio::task::spawn_local(fiber.update_with(config, true));
             } else if let Some(fiber) = &fiber {
@@ -566,12 +566,34 @@ impl Entry {
 
     fn patch_context(&self) {
         if let Some(fiber) = self.fiber.borrow().clone() {
-            let config = self.resolve_config_value();
+            let config = self.resolve_applied_config();
             tokio::task::spawn_local(fiber.update_with(config, true));
         }
     }
 
-    fn resolve_config_value(&self) -> Option<Rc<dyn std::any::Any>> {
+    /// Resolves the config for the currently registered plugin (mirrors the
+    /// TS `_resolveConfig(this.fiber.runtime!.callback)`), falling back to the
+    /// raw config when the plugin cannot be re-imported.
+    fn resolve_applied_config(&self) -> Option<Rc<dyn std::any::Any>> {
+        match self.tree.import(&self.options.borrow().name) {
+            Ok(plugin) => self.resolve_config_value(&plugin),
+            Err(_) => self.raw_config(),
+        }
+    }
+
+    fn resolve_config_value(&self, plugin: &Plugin) -> Option<Rc<dyn std::any::Any>> {
+        match plugin.is_group {
+            // Group plugins receive their config list as-is (mirrors the TS
+            // `_resolveConfig` check against `EntryGroup.key`).
+            true => self.raw_config(),
+            // Non-group plugins also receive the raw config for now; `!expr`
+            // interpolation will be wired here once the config evaluator is
+            // applied during entry apply.
+            false => self.raw_config(),
+        }
+    }
+
+    fn raw_config(&self) -> Option<Rc<dyn std::any::Any>> {
         self.options
             .borrow()
             .config
@@ -626,15 +648,14 @@ impl Entry {
         if self.disabled() {
             return Ok(());
         }
-        let plugin = if self.options.borrow().group == Some(true) {
-            self.tree.import("@cordisjs/plugin-group")?
-        } else {
-            self.tree.import(&self.options.borrow().name)?
-        };
+        // The plugin is always resolved by `options.name` (mirrors the TS
+        // `entry._init`, which imports `this.options.name`). `group: true`
+        // only carries the lifecycle semantics of being a group container.
+        let plugin = self.tree.import(&self.options.borrow().name)?;
         self.tree.tasks.set(self.tree.tasks.get() + 1);
         let fiber = self
             .ctx
-            .registry_plugin(&plugin, self.resolve_config_value());
+            .registry_plugin(&plugin, self.resolve_config_value(&plugin));
         *self.fiber.borrow_mut() = Some(fiber.clone());
         if let Some(loader) = self.ctx.get::<crate::Loader>() {
             loader.show_log("apply", self);

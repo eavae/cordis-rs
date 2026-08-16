@@ -74,6 +74,7 @@ impl Service for HmrService {
 pub fn hmr_plugin() -> cordis_core::Plugin {
     use cordis_core::Plugin;
     Plugin {
+        is_group: false,
         name: Some("hmr".to_string()),
         inject: vec![("loader".to_string(), None)],
         apply: Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {

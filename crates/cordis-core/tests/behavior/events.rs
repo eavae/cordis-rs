@@ -305,6 +305,7 @@ async fn internal_update_hook() {
             let applied_seen = seen.clone();
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {

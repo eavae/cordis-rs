@@ -19,6 +19,7 @@ impl Service for Foo {
 
 fn plugin_with_inject(callback: Rc<Cell<u32>>, dispose_count: Rc<Cell<u32>>) -> Plugin {
     Plugin {
+        is_group: false,
         name: None,
         inject: vec![("foo".to_string(), None)],
         apply: Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
@@ -185,6 +186,7 @@ async fn isolation_isolated_event() {
 
             let fiber = ctx.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config: &Rc<dyn Any>| {

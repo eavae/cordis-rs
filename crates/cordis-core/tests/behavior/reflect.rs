@@ -26,6 +26,7 @@ async fn access_check() {
             let root = Context::new();
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config| {
@@ -44,6 +45,7 @@ async fn access_check() {
 
             let fiber = root.plugin(
                 &Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|ctx: &Context, _config| {

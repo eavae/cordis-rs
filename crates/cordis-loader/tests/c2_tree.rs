@@ -126,6 +126,7 @@ async fn builtins_import() {
             loader.builtins.borrow_mut().insert(
                 "demo".to_string(),
                 cordis_core::Plugin {
+                    is_group: false,
                     name: None,
                     inject: Vec::new(),
                     apply: Rc::new(|_ctx, _config| Effect::None),
