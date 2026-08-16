@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/cordis",
+    "crates/cordis-core",
+    "crates/cordis-loader",
+    "crates/cordis-plugin-group",
+    "crates/cordis-plugin-include",
+    "crates/cordis-plugin-timer",
+    "crates/cordis-plugin-logger-console",
+    "crates/cordis-utils",
+    "crates/cordis-sdk",
+    "crates/cordis-macros",
+    "crates/cordis-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.97"
+repository = "https://github.com/cordisjs/cordis-rs"
+
+[workspace.dependencies]
+# Runtime / async
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+
+# Serialization & config
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+minijinja = "2"
+
+# Plugin loading (`.so` / `.dylib` / `.dll`)
+libloading = "0.8"
+
+# Errors
+anyhow = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"

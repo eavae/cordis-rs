@@ -1,0 +1,18 @@
+[package]
+name = "cordis-plugin-include"
+description = "Cordis include plugin: file-backed entry trees (yaml/json)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis-core = { path = "../cordis-core" }
+cordis-loader = { path = "../cordis-loader" }
+serde.workspace = true
+serde_yaml_ng.workspace = true
+anyhow.workspace = true

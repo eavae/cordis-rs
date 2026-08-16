@@ -1,0 +1,19 @@
+[package]
+name = "cordis-sdk"
+description = "Plugin author SDK: the single crate `.so` plugins depend on"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis-core = { path = "../cordis-core", optional = true }
+
+[features]
+default = []
+re-export-core = ["dep:cordis-core"]
+

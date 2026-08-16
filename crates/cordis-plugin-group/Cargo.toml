@@ -1,0 +1,17 @@
+[package]
+name = "cordis-plugin-group"
+description = "Cordis group plugin: nested entry trees"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis-core = { path = "../cordis-core" }
+cordis-loader = { path = "../cordis-loader" }
+serde.workspace = true
+
