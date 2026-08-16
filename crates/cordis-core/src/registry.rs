@@ -259,6 +259,7 @@ impl RegistryService {
     pub(crate) fn remove_runtime(&self, fiber: &Rc<Fiber>) {
         if let Some(runtime) = &*fiber.runtime.borrow() {
             let key = Rc::as_ptr(&runtime.callback) as *const () as usize;
+
             self.runtimes.borrow_mut().remove(&key);
         }
     }

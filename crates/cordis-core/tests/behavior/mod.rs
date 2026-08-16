@@ -20,6 +20,7 @@ pub mod isolate;
 pub mod logger;
 pub mod plugin;
 pub mod reflect;
+pub mod regression;
 pub mod service;
 
 /// A manually advanced fake clock (millisecond precision).
