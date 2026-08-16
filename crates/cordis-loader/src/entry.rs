@@ -64,11 +64,7 @@ pub struct EntryGroup {
 }
 
 impl EntryGroup {
-    pub(crate) fn new(
-        tree: Rc<EntryTree>,
-        ctx: Context,
-        parent: Option<Rc<EntryGroup>>,
-    ) -> Rc<Self> {
+    pub fn new(tree: Rc<EntryTree>, ctx: Context, parent: Option<Rc<EntryGroup>>) -> Rc<Self> {
         Rc::new(EntryGroup {
             tree,
             ctx,

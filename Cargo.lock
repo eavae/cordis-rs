@@ -72,7 +72,9 @@ dependencies = [
  "cordis-core",
  "cordis-loader",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
+ "tokio",
 ]
 
 [[package]]

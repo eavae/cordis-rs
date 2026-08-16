@@ -233,7 +233,7 @@ impl Loader {
         self.read_group(&root, configs).await;
     }
 
-    async fn read_group(&self, group: &Rc<EntryGroup>, configs: Vec<EntryOptions>) {
+    pub async fn read_group(&self, group: &Rc<EntryGroup>, configs: Vec<EntryOptions>) {
         let mut next_entries: Vec<Rc<Entry>> = Vec::new();
         for options in configs {
             if options.group == Some(true) {

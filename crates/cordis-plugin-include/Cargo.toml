@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 cordis-core = { path = "../cordis-core" }
 cordis-loader = { path = "../cordis-loader" }
+tokio.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 serde_yaml_ng.workspace = true
 anyhow.workspace = true
