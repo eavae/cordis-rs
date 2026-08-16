@@ -7,6 +7,8 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context as TaskContext, Poll};
 
+use crate::fiber::EffectHandle;
+
 /// A boxed future returned by async APIs.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
@@ -48,20 +50,34 @@ pub enum Effect {
     None,
     /// A synchronous disposer.
     Disposer(Disposer),
-    /// A promise resolving to a disposer.
-    Async(BoxFuture<'static, Disposer>),
-    /// A collection of disposers (iterable).
-    Iterable(Vec<Disposer>),
+    /// A nested effect (yielded or returned as a whole).
+    Nested(Rc<EffectHandle>),
+    /// A promise resolving to a disposer (or failing).
+    Async(BoxFuture<'static, Result<Disposer, Box<dyn Error>>>),
+    /// A collection of effect items (iterable); an `Err` item aborts the
+    /// collection and propagates the error (mirrors a generator that throws).
+    Iterable(Vec<Result<EffectItem, Box<dyn Error>>>),
     /// An asynchronous stream of disposers (async iterable).
     AsyncIterable(Pin<Box<dyn AsyncDisposerStream>>),
     /// The callback threw an error (mirrors a throwing apply/effect).
     Error(Box<dyn Error>),
 }
 
+/// One item yielded by an iterable effect.
+pub enum EffectItem {
+    /// A plain disposer.
+    Disposer(Disposer),
+    /// A nested effect handle.
+    Nested(Rc<EffectHandle>),
+}
+
 /// An asynchronous iterator over disposers.
 pub trait AsyncDisposerStream {
     /// Polls the stream for the next disposer.
-    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Disposer>>;
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Disposer, Box<dyn Error>>>>;
 }
 
 /// The apply callback of a plugin (or inject callback).

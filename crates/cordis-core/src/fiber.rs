@@ -11,7 +11,7 @@ use std::task::Poll;
 
 use crate::context::{Context, ContextInner, StoreEntry};
 use crate::registry::Runtime;
-use crate::service::{ApplyFn, BoxFuture, Disposer, Effect, sync_disposer};
+use crate::service::{ApplyFn, BoxFuture, Disposer, Effect, EffectItem, sync_disposer};
 
 /// Lifecycle state of a [`Fiber`] (mirrors `FiberState` in the TS reference).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,13 +97,36 @@ impl From<CordisError> for FiberError {
     }
 }
 
+/// Effect metadata tree entry (mirrors `EffectMeta` in fiber.ts).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffectMeta {
+    /// The label passed to [`Fiber::effect`].
+    pub label: String,
+    /// Nested effects collected during this effect's execution.
+    pub children: Vec<EffectMeta>,
+}
+
+/// An entry of a fiber's (or an effect's) disposables list.
+pub(crate) enum Disposable {
+    /// A plain disposer (from a plugin apply or a yielded disposer).
+    Direct(Disposer),
+    /// A nested effect handle.
+    Effect(Rc<EffectHandle>),
+}
+
+/// The optional background task produced by an async effect or apply.
+pub(crate) type EffectTask = Option<BoxFuture<'static, Result<(), Box<dyn Error>>>>;
+
 /// Idempotent effect handle returned by [`Fiber::effect`].
 pub struct EffectHandle {
     /// Label used for diagnostics and effect metadata.
     pub label: String,
     epoch: Cell<bool>,
-    disposables: RefCell<Vec<Disposer>>,
-    task: RefCell<Option<BoxFuture<'static, ()>>>,
+    disposables: RefCell<Vec<Disposable>>,
+    has_task: Cell<bool>,
+    task_done: Rc<Cell<bool>>,
+    task_result: Rc<RefCell<Option<Result<(), String>>>>,
+    meta: RefCell<EffectMeta>,
 }
 
 impl EffectHandle {
@@ -112,12 +135,18 @@ impl EffectHandle {
             label: label.to_string(),
             epoch: Cell::new(true),
             disposables: RefCell::new(Vec::new()),
-            task: RefCell::new(None),
+            has_task: Cell::new(false),
+            task_done: Rc::new(Cell::new(true)),
+            task_result: Rc::new(RefCell::new(None)),
+            meta: RefCell::new(EffectMeta {
+                label: label.to_string(),
+                children: Vec::new(),
+            }),
         })
     }
 
-    fn collect(&self, disposer: Disposer) {
-        self.disposables.borrow_mut().push(disposer);
+    fn collect(&self, item: Disposable) {
+        self.disposables.borrow_mut().push(item);
     }
 
     /// Whether the effect has already been disposed.
@@ -125,21 +154,102 @@ impl EffectHandle {
         !self.epoch.get()
     }
 
-    /// Runs the disposer chain (idempotent) and resolves when it completes.
-    pub fn dispose(self: &Rc<Self>) -> BoxFuture<'static, ()> {
+    /// The metadata tree of this effect.
+    pub fn meta(&self) -> EffectMeta {
+        self.meta.borrow().clone()
+    }
+
+    /// Runs the disposer chain (idempotent) and resolves with the first
+    /// error, if any. Async effects are awaited before the chain runs.
+    pub fn dispose(self: &Rc<Self>) -> BoxFuture<'static, Result<(), Box<dyn Error>>> {
         if !self.epoch.replace(false) {
-            return Box::pin(async {});
+            return Box::pin(async { Ok(()) });
         }
+        if !self.has_task.get() {
+            return Box::pin(self.clone().run_dispose_chain());
+        }
+        self.clone().spawn_dispose_with_task()
+    }
+
+    /// Awaits the background task without disposing the effect (mirrors the
+    /// thenable form `await effect` in the TS reference).
+    ///
+    /// On task failure the already-collected disposables are cleaned up (the
+    /// TS `task?.catch(dispose)` path) and the error is propagated.
+    pub fn wait_task(self: &Rc<Self>) -> BoxFuture<'static, Result<(), Box<dyn Error>>> {
+        if !self.has_task.get() {
+            return Box::pin(async { Ok(()) });
+        }
+        let done = self.task_done.clone();
         let this = self.clone();
         Box::pin(async move {
-            if let Some(task) = this.task.take() {
-                task.await;
+            while !done.get() {
+                tokio::task::yield_now().await;
             }
-            let mut disposables = this.disposables.take();
-            for disposer in disposables.drain(..).rev() {
-                let _ = disposer().await;
+            let mut result = match &*this.task_result.borrow() {
+                Some(Err(message)) => {
+                    Err(Box::new(std::io::Error::other(message.clone())) as Box<dyn Error>)
+                }
+                _ => Ok(()),
+            };
+            if result.is_err() {
+                let mut disposables = this.disposables.take();
+                for item in disposables.drain(..).rev() {
+                    let outcome = match item {
+                        Disposable::Direct(disposer) => disposer().await,
+                        Disposable::Effect(handle) => handle.dispose().await,
+                    };
+                    if result.is_ok() {
+                        result = outcome;
+                    }
+                }
             }
+            result
         })
+    }
+
+    /// Waits for the background task, then runs the disposer chain in the
+    /// background; the returned future resolves when cleanup completes.
+    fn spawn_dispose_with_task(self: Rc<Self>) -> BoxFuture<'static, Result<(), Box<dyn Error>>> {
+        let done = self.task_done.clone();
+        let this = self.clone();
+        let cleanup_done = Rc::new(Cell::new(false));
+        let cleanup_done_waiter = cleanup_done.clone();
+        let join = tokio::task::spawn_local(async move {
+            while !done.get() {
+                tokio::task::yield_now().await;
+            }
+            let result = this.run_dispose_chain().await;
+            cleanup_done_waiter.set(true);
+            result
+        });
+        Box::pin(async move {
+            while !cleanup_done.get() {
+                tokio::task::yield_now().await;
+            }
+            join.await
+                .unwrap_or_else(|error| Err(Box::new(error) as Box<dyn Error>))
+        })
+    }
+
+    async fn run_dispose_chain(self: Rc<Self>) -> Result<(), Box<dyn Error>> {
+        let mut result = match &*self.task_result.borrow() {
+            Some(Err(message)) => {
+                Err(Box::new(std::io::Error::other(message.clone())) as Box<dyn Error>)
+            }
+            _ => Ok(()),
+        };
+        let mut disposables = self.disposables.take();
+        for item in disposables.drain(..).rev() {
+            let outcome = match item {
+                Disposable::Direct(disposer) => disposer().await,
+                Disposable::Effect(handle) => handle.dispose().await,
+            };
+            if result.is_ok() {
+                result = outcome;
+            }
+        }
+        result
     }
 }
 
@@ -184,8 +294,8 @@ pub struct Fiber {
     pub(crate) epoch: RefCell<Epoch>,
     /// Resolved service entries for the inject map.
     pub(crate) resolved: RefCell<HashMap<String, Rc<StoreEntry>>>,
-    /// Ordered effect disposers (disposed in reverse order).
-    pub(crate) disposables: RefCell<Vec<Disposer>>,
+    /// Ordered effect disposables (disposed in reverse order).
+    pub(crate) disposables: RefCell<Vec<Disposable>>,
     /// Inertia lock state.
     pub(crate) inertia: RefCell<Inertia>,
     /// The dispose handle registered on the parent fiber.
@@ -256,32 +366,48 @@ impl Fiber {
         let task = match self.run_effect(execute, &handle) {
             Ok(task) => task,
             Err(reason) => {
-                // TS: `catch (reason) { dispose(); throw reason }`
-                // The cleanup future is dropped: this error path runs in a
-                // synchronous context (B3 refines async cleanup ordering).
-                std::mem::drop(handle.dispose());
+                // TS: `catch (reason) { dispose(); throw reason }` — already
+                // collected disposables are cleaned up in the background
+                // (requires a LocalSet; the error path only runs inside the
+                // runtime).
+                tokio::task::spawn_local(handle.dispose());
                 return Err(CordisError {
                     code: "INVALID_EFFECT",
                     message: reason.to_string(),
                 });
             }
         };
-        handle.task.replace(task);
-        let handle_for_fiber = handle.clone();
-        self.disposables.borrow_mut().push(Box::new(move || {
-            let handle = handle_for_fiber.clone();
-            Box::pin(async move {
-                handle.dispose().await;
-                Ok(())
-            })
-        }));
+        if let Some(task) = task {
+            // Async effects run in the background (requires a LocalSet) and
+            // signal completion through `task_done`.
+            let done = handle.task_done.clone();
+            let task_result = handle.task_result.clone();
+            let wrapped = Box::pin(async move {
+                let result = task.await;
+                *task_result.borrow_mut() = Some(result.map_err(|error| error.to_string()));
+                done.set(true);
+                Ok::<(), Box<dyn Error>>(())
+            });
+            handle.has_task.set(true);
+            handle.task_done.set(false);
+            tokio::task::spawn_local(wrapped);
+        }
+        self.disposables
+            .borrow_mut()
+            .push(Disposable::Effect(handle.clone()));
         Ok(handle)
     }
 
-    /// Returns the ordered effect metadata tree (story card B3).
-    pub fn get_effects(&self) -> Vec<Rc<EffectHandle>> {
-        // B3 replaces this with a metadata tree; B2 exposes the raw handles.
-        Vec::new()
+    /// Returns the ordered effect metadata tree (mirrors `fiber.getEffects()`).
+    pub fn get_effects(&self) -> Vec<EffectMeta> {
+        self.disposables
+            .borrow()
+            .iter()
+            .filter_map(|item| match item {
+                Disposable::Effect(handle) => Some(handle.meta()),
+                Disposable::Direct(_) => None,
+            })
+            .collect()
     }
 
     /// Awaits inertia completion and propagates apply errors.
@@ -323,8 +449,10 @@ impl Fiber {
 
     /// Disposes the fiber (unregisters from its runtime, unloads effects).
     pub fn dispose(self: &Rc<Self>) -> BoxFuture<'static, ()> {
-        if let Some(handle) = &*self.dispose.borrow() {
-            return handle.dispose();
+        if let Some(handle) = self.dispose.borrow().clone() {
+            return Box::pin(async move {
+                let _ = handle.dispose().await;
+            });
         }
         // Root fibers dispose by restarting (mirrors `dispose = restart`).
         let this = self.clone();
@@ -418,8 +546,12 @@ impl Fiber {
                 None => None,
             }
         };
-        if let Some(task) = task {
-            task.await;
+        if let Some(task) = task
+            && let Err(reason) = task.await
+        {
+            self.log_error(&reason);
+            *self.error.borrow_mut() = Some(Box::new(FiberError::new(reason.to_string())));
+            *self.epoch.borrow_mut() = Epoch::Inactive;
         }
         if *self.epoch.borrow() == target {
             self.inertia.borrow_mut().active = false;
@@ -432,9 +564,13 @@ impl Fiber {
     }
 
     async fn unload(self: Rc<Self>) {
-        let disposers = self.disposables.take();
-        for disposer in disposers.into_iter().rev() {
-            if let Err(reason) = catch_disposer(disposer).await {
+        let disposables = self.disposables.take();
+        for item in disposables.into_iter().rev() {
+            let outcome = match item {
+                Disposable::Direct(disposer) => disposer().await,
+                Disposable::Effect(handle) => handle.dispose().await,
+            };
+            if let Err(reason) = outcome {
                 self.log_error(&reason);
             }
         }
@@ -521,45 +657,87 @@ impl Fiber {
 
     /// Executes an effect callback and collects disposers into the handle.
     fn run_effect<F>(
-        &self,
+        self: &Rc<Self>,
         execute: F,
         handle: &Rc<EffectHandle>,
-    ) -> Result<Option<BoxFuture<'static, ()>>, Box<dyn Error>>
+    ) -> Result<EffectTask, Box<dyn Error>>
     where
         F: FnOnce() -> Effect,
     {
+        let fiber = self.clone();
+        let collect = |fiber: &Rc<Self>, handle: &Rc<EffectHandle>, item: Disposable| {
+            if let Disposable::Effect(nested) = &item {
+                handle.meta.borrow_mut().children.push(nested.meta());
+                let mut list = fiber.disposables.borrow_mut();
+                if let Some(position) = list.iter().position(
+                    |entry| matches!(entry, Disposable::Effect(h) if Rc::ptr_eq(h, nested)),
+                ) {
+                    list.remove(position);
+                }
+            }
+            handle.collect(item);
+        };
         match execute() {
             Effect::None => Ok(None),
             Effect::Disposer(disposer) => {
-                handle.collect(disposer);
+                collect(&fiber, handle, Disposable::Direct(disposer));
+                Ok(None)
+            }
+            Effect::Nested(nested) => {
+                collect(&fiber, handle, Disposable::Effect(nested));
                 Ok(None)
             }
             Effect::Async(future) => {
                 let handle = handle.clone();
+                let fiber = fiber.clone();
                 Ok(Some(Box::pin(async move {
-                    let disposer = future.await;
-                    handle.collect(disposer);
+                    match future.await {
+                        Ok(disposer) => {
+                            collect(&fiber, &handle, Disposable::Direct(disposer));
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    }
                 })))
             }
-            Effect::Iterable(disposers) => {
-                for disposer in disposers {
-                    handle.collect(disposer);
+            Effect::Iterable(items) => {
+                for item in items {
+                    match item {
+                        Ok(EffectItem::Disposer(disposer)) => {
+                            collect(&fiber, handle, Disposable::Direct(disposer));
+                        }
+                        Ok(EffectItem::Nested(nested)) => {
+                            collect(&fiber, handle, Disposable::Effect(nested));
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 Ok(None)
             }
             Effect::AsyncIterable(stream) => {
                 let handle = handle.clone();
+                let fiber = fiber.clone();
                 let mut stream = stream;
+                let mut stream_pending = false;
                 Ok(Some(Box::pin(async move {
                     poll_fn(|cx| {
                         loop {
-                            if handle.is_disposed() {
-                                return Poll::Ready(());
+                            if !stream_pending && handle.is_disposed() {
+                                return Poll::Ready(Ok(()));
                             }
                             match stream.as_mut().poll_next(cx) {
-                                Poll::Ready(Some(disposer)) => handle.collect(disposer),
-                                Poll::Ready(None) => return Poll::Ready(()),
-                                Poll::Pending => return Poll::Pending,
+                                Poll::Ready(Some(Ok(disposer))) => {
+                                    collect(&fiber, &handle, Disposable::Direct(disposer));
+                                    stream_pending = false;
+                                }
+                                Poll::Ready(Some(Err(error))) => {
+                                    return Poll::Ready(Err(error));
+                                }
+                                Poll::Ready(None) => return Poll::Ready(Ok(())),
+                                Poll::Pending => {
+                                    stream_pending = true;
+                                    return Poll::Pending;
+                                }
                             }
                         }
                     })
@@ -577,50 +755,80 @@ impl Fiber {
         ctx: &Context,
         callback: &ApplyFn,
         config: &Option<Rc<dyn Any>>,
-    ) -> Result<Option<BoxFuture<'static, ()>>, Box<dyn Error>> {
+    ) -> Result<EffectTask, Box<dyn Error>> {
         let empty: Rc<dyn Any> = Rc::new(());
         let config = config.as_ref().unwrap_or(&empty);
         let target = self.epoch.borrow().clone();
+        let collect = |this: &Rc<Self>, item: Disposable| {
+            this.disposables.borrow_mut().push(item);
+        };
         match callback(ctx, config) {
             Effect::None => Ok(None),
             Effect::Disposer(disposer) => {
-                self.disposables.borrow_mut().push(disposer);
+                collect(self, Disposable::Direct(disposer));
+                Ok(None)
+            }
+            Effect::Nested(nested) => {
+                collect(self, Disposable::Effect(nested));
                 Ok(None)
             }
             Effect::Async(future) => {
                 let this = self.clone();
                 Ok(Some(Box::pin(async move {
-                    eprintln!(
-                        "[fiber {}] awaiting async apply",
-                        this.uid.get().unwrap_or(0)
-                    );
-                    let disposer = future.await;
-                    eprintln!("[fiber {}] async apply done", this.uid.get().unwrap_or(0));
-                    this.disposables.borrow_mut().push(disposer);
+                    match future.await {
+                        Ok(disposer) => {
+                            this.disposables
+                                .borrow_mut()
+                                .push(Disposable::Direct(disposer));
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    }
                 })))
             }
-            Effect::Iterable(disposers) => {
-                let mut list = self.disposables.borrow_mut();
-                for disposer in disposers {
-                    list.push(disposer);
+            Effect::Iterable(items) => {
+                for item in items {
+                    match item {
+                        Ok(EffectItem::Disposer(disposer)) => {
+                            self.disposables
+                                .borrow_mut()
+                                .push(Disposable::Direct(disposer));
+                        }
+                        Ok(EffectItem::Nested(nested)) => {
+                            self.disposables
+                                .borrow_mut()
+                                .push(Disposable::Effect(nested));
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 Ok(None)
             }
             Effect::AsyncIterable(stream) => {
                 let this = self.clone();
                 let mut stream = stream;
+                let mut stream_pending = false;
                 Ok(Some(Box::pin(async move {
                     poll_fn(|cx| {
                         loop {
-                            if *this.epoch.borrow() != target {
-                                return Poll::Ready(());
+                            if !stream_pending && *this.epoch.borrow() != target {
+                                return Poll::Ready(Ok(()));
                             }
                             match stream.as_mut().poll_next(cx) {
-                                Poll::Ready(Some(disposer)) => {
-                                    this.disposables.borrow_mut().push(disposer);
+                                Poll::Ready(Some(Ok(disposer))) => {
+                                    this.disposables
+                                        .borrow_mut()
+                                        .push(Disposable::Direct(disposer));
+                                    stream_pending = false;
                                 }
-                                Poll::Ready(None) => return Poll::Ready(()),
-                                Poll::Pending => return Poll::Pending,
+                                Poll::Ready(Some(Err(error))) => {
+                                    return Poll::Ready(Err(error));
+                                }
+                                Poll::Ready(None) => return Poll::Ready(Ok(())),
+                                Poll::Pending => {
+                                    stream_pending = true;
+                                    return Poll::Pending;
+                                }
                             }
                         }
                     })
@@ -640,10 +848,6 @@ impl fmt::Debug for Fiber {
             .field("state", &self.state.get())
             .finish()
     }
-}
-
-async fn catch_disposer(disposer: Disposer) -> Result<(), Box<dyn Error>> {
-    disposer().await
 }
 
 /// Creates a disposer from a sync closure (public convenience helper).

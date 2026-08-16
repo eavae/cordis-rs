@@ -10,6 +10,7 @@ use std::future::{Future, poll_fn};
 use std::rc::Rc;
 use std::task::{Poll, Waker};
 
+pub mod dispose;
 pub mod fiber;
 pub mod isolate;
 
@@ -42,27 +43,50 @@ impl Timers {
     ///
     /// Equivalent to `vi.advanceTimersByTimeAsync(ms)`.
     pub async fn advance(&self, ms: u64) {
-        let due_wakers = {
-            let mut state = self.state.borrow_mut();
-            state.now_ms += ms;
-            let mut due = Vec::new();
-            let mut index = 0;
-            while index < state.waiters.len() {
-                if state.waiters[index].deadline <= state.now_ms {
-                    let mut waiter = state.waiters.remove(index);
-                    if let Some(waker) = waiter.waker.take() {
-                        due.push(waker);
+        let mut remaining = ms;
+        loop {
+            let due_wakers = {
+                let mut state = self.state.borrow_mut();
+                let target = state.now_ms + remaining;
+                let earliest = state
+                    .waiters
+                    .iter()
+                    .map(|w| w.deadline)
+                    .filter(|deadline| *deadline <= target)
+                    .min();
+                match earliest {
+                    Some(deadline) => {
+                        let delta = deadline - state.now_ms;
+                        state.now_ms = deadline;
+                        remaining -= delta;
+                        let mut due = Vec::new();
+                        let mut index = 0;
+                        while index < state.waiters.len() {
+                            if state.waiters[index].deadline <= state.now_ms {
+                                let mut waiter = state.waiters.remove(index);
+                                if let Some(waker) = waiter.waker.take() {
+                                    due.push(waker);
+                                }
+                            } else {
+                                index += 1;
+                            }
+                        }
+                        due
                     }
-                } else {
-                    index += 1;
+                    None => {
+                        state.now_ms = target;
+                        return;
+                    }
                 }
+            };
+            for waker in due_wakers {
+                waker.wake();
             }
-            due
-        };
-        for waker in due_wakers {
-            waker.wake();
+            tokio::task::yield_now().await;
+            if remaining == 0 {
+                return;
+            }
         }
-        tokio::task::yield_now().await;
     }
 
     /// Sleeps for `ms` milliseconds of fake time.

@@ -62,10 +62,10 @@ async fn fiber_inertia_lock_1() {
                     Effect::Async(Box::pin(async move {
                         timers.sleep(1000).await;
                         let timers = timers.clone();
-                        async_disposer(move || async move {
+                        Ok(async_disposer(move || async move {
                             timers.sleep(1000).await;
                             Ok(())
-                        })
+                        }))
                     }))
                 }),
             );
@@ -75,7 +75,7 @@ async fn fiber_inertia_lock_1() {
             timers.advance(400).await;
             assert_eq!(fiber.state.get(), FiberState::Loading);
 
-            dispose.dispose().await;
+            dispose.dispose().await.unwrap();
             timers.advance(400).await;
             assert_eq!(fiber.state.get(), FiberState::Loading);
 
@@ -108,10 +108,10 @@ async fn fiber_inertia_lock_2() {
                     Effect::Async(Box::pin(async move {
                         timers.sleep(1000).await;
                         let timers = timers.clone();
-                        async_disposer(move || async move {
+                        Ok(async_disposer(move || async move {
                             timers.sleep(1000).await;
                             Ok(())
-                        })
+                        }))
                     }))
                 }),
             );
@@ -120,7 +120,7 @@ async fn fiber_inertia_lock_2() {
             timers.advance(400).await;
             assert_eq!(fiber.state.get(), FiberState::Loading);
 
-            dispose.dispose().await;
+            dispose.dispose().await.unwrap();
             timers.advance(400).await;
             assert_eq!(fiber.state.get(), FiberState::Loading);
 
@@ -158,49 +158,24 @@ async fn fiber_inertia_lock_3() {
                     Effect::Async(Box::pin(async move {
                         timers.sleep(1000).await;
                         let timers = timers.clone();
-                        async_disposer(move || async move {
+                        Ok(async_disposer(move || async move {
                             timers.sleep(1000).await;
                             Ok(())
-                        })
+                        }))
                     }))
                 }),
             );
             tokio::task::yield_now().await;
             tokio::task::yield_now().await;
             timers.advance(400).await;
-            println!(
-                "lock3 t=400: state={:?} now={}",
-                fiber.state.get(),
-                timers.now()
-            );
             assert_eq!(fiber.state.get(), FiberState::Loading);
 
             timers.advance(1000).await;
-            println!(
-                "lock3 t=1400: state={:?} now={}",
-                fiber.state.get(),
-                timers.now()
-            );
             assert_eq!(fiber.state.get(), FiberState::Active);
 
             provider.dispose().await;
-            println!(
-                "lock3 after dispose: state={:?} now={}",
-                fiber.state.get(),
-                timers.now()
-            );
             tokio::task::yield_now().await;
-            println!(
-                "lock3 after yield: state={:?} now={}",
-                fiber.state.get(),
-                timers.now()
-            );
             timers.advance(2000).await;
-            println!(
-                "lock3 after advance: state={:?} now={}",
-                fiber.state.get(),
-                timers.now()
-            );
             assert_eq!(fiber.state.get(), FiberState::Pending);
         }))
         .await;
@@ -257,7 +232,6 @@ async fn fiber_plugin_error() {
             fiber2.wait().await.unwrap();
             assert_eq!(fiber2.state.get(), FiberState::Active);
             let logger = root.get::<LoggerService>().unwrap();
-            println!("error count: {}", logger.error_count());
             assert_eq!(
                 logger.error_count(),
                 1,

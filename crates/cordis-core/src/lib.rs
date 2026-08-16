@@ -14,8 +14,11 @@ pub mod service;
 
 pub use context::Context;
 pub use events::EventsService;
-pub use fiber::{CordisError, EffectHandle, Fiber, FiberError, FiberState, disposer};
+pub use fiber::{CordisError, EffectHandle, EffectMeta, Fiber, FiberError, FiberState, disposer};
 pub use logger::LoggerService;
 pub use reflect::ReflectService;
 pub use registry::{Plugin, RegistryService};
-pub use service::{Config, Disposer, Effect, Service, async_disposer, sync_disposer};
+pub use service::{
+    AsyncDisposerStream, Config, Disposer, Effect, EffectItem, Service, async_disposer,
+    sync_disposer,
+};

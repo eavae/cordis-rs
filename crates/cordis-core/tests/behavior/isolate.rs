@@ -30,7 +30,7 @@ async fn isolation_isolated_context() {
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert!(ctx2.get::<Foo>().is_none());
 
-    dispose0.dispose().await;
+    dispose0.dispose().await.unwrap();
     assert!(root.get::<Foo>().is_none());
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert!(ctx2.get::<Foo>().is_none());
@@ -40,8 +40,8 @@ async fn isolation_isolated_context() {
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert_eq!(ctx2.get::<Foo>().unwrap().bar, 300);
 
-    dispose1.dispose().await;
-    dispose2.dispose().await;
+    dispose1.dispose().await.unwrap();
+    dispose2.dispose().await.unwrap();
 }
 
 #[tokio::test]
@@ -61,10 +61,10 @@ async fn isolation_shared_label() {
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert_eq!(ctx2.get::<Foo>().unwrap().bar, 200);
 
-    dispose12.dispose().await;
+    dispose12.dispose().await.unwrap();
     assert_eq!(root.get::<Foo>().unwrap().bar, 100);
     assert!(ctx1.get::<Foo>().is_none());
     assert!(ctx2.get::<Foo>().is_none());
 
-    dispose0.dispose().await;
+    dispose0.dispose().await.unwrap();
 }

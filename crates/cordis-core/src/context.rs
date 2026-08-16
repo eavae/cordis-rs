@@ -160,6 +160,9 @@ impl Context {
         ctx.provide_inner(LoggerService::default());
         ctx.provide_inner(ReflectService);
         ctx.provide_inner(RegistryService::default());
+        // context.ts clears the root fiber's disposables after framework
+        // services are registered, so they don't surface as user effects.
+        ctx.fiber.disposables.borrow_mut().clear();
         ctx
     }
 
@@ -359,6 +362,18 @@ impl Context {
             apply: callback,
         };
         self.plugin(&plugin, None)
+    }
+
+    /// Registers an effect on this context's fiber (mirrors `ctx.effect`).
+    pub fn effect<F>(
+        &self,
+        execute: F,
+        label: &str,
+    ) -> Result<Rc<EffectHandle>, crate::fiber::CordisError>
+    where
+        F: FnOnce() -> Effect,
+    {
+        self.fiber.effect(execute, label)
     }
 
     /// Notifies fibers that depend on `name` (mirrors `ReflectService.notify`).
