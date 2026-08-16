@@ -17,18 +17,32 @@ use crate::service::{ApplyFn, Effect, Service};
 pub struct Plugin {
     /// Optional plugin name used for fiber naming.
     pub name: Option<String>,
-    /// Declared inject dependencies.
-    pub inject: Vec<String>,
+    /// Declared inject dependencies: name → optional per-inject config.
+    pub inject: Vec<(String, Option<Rc<dyn Any>>)>,
     /// The apply callback.
     pub apply: ApplyFn,
 }
 
+impl Plugin {
+    /// The declared inject names.
+    pub fn inject_names(&self) -> impl Iterator<Item = &str> {
+        self.inject.iter().map(|(name, _)| name.as_str())
+    }
+}
+
 /// A plugin runtime shared by all fibers of the same plugin.
-pub(crate) struct Runtime {
-    pub name: Option<String>,
-    pub callback: ApplyFn,
-    pub fibers: RefCell<Vec<Rc<Fiber>>>,
-    pub registry: RefCell<Option<Weak<RegistryService>>>,
+pub struct Runtime {
+    pub(crate) name: Option<String>,
+    pub(crate) callback: ApplyFn,
+    pub(crate) fibers: RefCell<Vec<Rc<Fiber>>>,
+    pub(crate) registry: RefCell<Option<Weak<RegistryService>>>,
+}
+
+impl Runtime {
+    /// Number of live fibers of this runtime.
+    pub fn fiber_count(&self) -> usize {
+        self.fibers.borrow().len()
+    }
 }
 
 /// Registry service, available on every context as `ctx.registry`.
@@ -72,7 +86,7 @@ impl RegistryService {
         parent
             .fiber()
             .assert_active()
-            .expect("cannot register plugin on inactive context");
+            .expect("cannot create effect on inactive context");
 
         let callback = plugin.apply.clone();
         let key = Rc::as_ptr(&callback) as *const () as usize;
@@ -99,7 +113,13 @@ impl RegistryService {
             parent: Some(parent.clone()),
             config: RefCell::new(config),
             state: Cell::new(FiberState::Pending),
-            inject: RefCell::new(plugin.inject.iter().map(|n| (n.clone(), None)).collect()),
+            inject: RefCell::new(
+                plugin
+                    .inject
+                    .iter()
+                    .map(|(name, config)| (name.clone(), config.clone()))
+                    .collect(),
+            ),
             runtime: RefCell::new(Some(runtime.clone())),
             error: RefCell::new(None),
             epoch: RefCell::new(Epoch::Inactive),
@@ -137,6 +157,49 @@ impl RegistryService {
         fiber
     }
 
+    /// Resolves the runtime key of a plugin callback.
+    fn runtime_key(callback: &ApplyFn) -> usize {
+        Rc::as_ptr(callback) as *const () as usize
+    }
+
+    /// Whether a plugin is registered.
+    pub fn has(&self, plugin: &Plugin) -> bool {
+        self.runtimes
+            .borrow()
+            .contains_key(&Self::runtime_key(&plugin.apply))
+    }
+
+    /// Number of registered runtimes.
+    pub fn size(&self) -> usize {
+        self.runtimes.borrow().len()
+    }
+
+    /// The keys (callback addresses) of registered runtimes.
+    pub fn keys(&self) -> Vec<usize> {
+        self.runtimes.borrow().keys().copied().collect()
+    }
+
+    /// The registered runtimes.
+    pub fn values(&self) -> Vec<Rc<Runtime>> {
+        self.runtimes.borrow().values().cloned().collect()
+    }
+
+    /// Deletes a plugin runtime, disposing all of its fibers (mirrors
+    /// `registry.delete`).
+    pub fn delete(&self, plugin: &Plugin) {
+        let runtime = {
+            let runtimes = self.runtimes.borrow();
+            runtimes.get(&Self::runtime_key(&plugin.apply)).cloned()
+        };
+        let Some(runtime) = runtime else {
+            return;
+        };
+        let fibers = runtime.fibers.borrow().clone();
+        for fiber in fibers {
+            tokio::task::spawn_local(fiber.dispose());
+        }
+    }
+
     /// Re-checks every fiber that injects `name` and applies the same-label
     /// filter (mirrors `ReflectService.notify`).
     pub(crate) fn notify(&self, name: &str, provider: &Context) -> Vec<Rc<Fiber>> {
@@ -168,20 +231,18 @@ impl RegistryService {
     }
 }
 
-fn build_child_inner(parent: &Context, inject: &[String]) -> Rc<ContextInner> {
+fn build_child_inner(
+    parent: &Context,
+    inject: &[(String, Option<Rc<dyn Any>>)],
+) -> Rc<ContextInner> {
     let intercept = if inject.is_empty() {
         parent.inner.intercept.clone()
     } else {
         let entries = inject
             .iter()
-            .filter_map(|name| {
-                parent
-                    .inner
-                    .intercept
-                    .entries
-                    .borrow()
-                    .get(name)
-                    .map(|config| (name.clone(), config.clone()))
+            .filter_map(|(name, config)| {
+                let config = config.as_ref()?.clone();
+                Some((name.clone(), config))
             })
             .collect();
         Rc::new(InterceptLayer {

@@ -13,6 +13,7 @@ use std::task::{Poll, Waker};
 pub mod dispose;
 pub mod fiber;
 pub mod isolate;
+pub mod plugin;
 
 /// A manually advanced fake clock (millisecond precision).
 #[derive(Default)]

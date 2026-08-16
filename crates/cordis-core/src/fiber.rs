@@ -410,6 +410,12 @@ impl Fiber {
             .collect()
     }
 
+    /// Number of registered effect disposables (mirrors
+    /// `fiber._disposables.length`).
+    pub fn effect_count(&self) -> usize {
+        self.disposables.borrow().len()
+    }
+
     /// Awaits inertia completion and propagates apply errors.
     pub async fn wait(self: &Rc<Self>) -> Result<(), FiberError> {
         while self.inertia.borrow().active {

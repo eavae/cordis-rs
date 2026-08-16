@@ -131,9 +131,7 @@ pub struct Context {
 
 impl std::fmt::Debug for Context {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Context")
-            .field("fiber", &self.fiber)
-            .finish()
+        write!(f, "Context <{}>", self.fiber.name())
     }
 }
 
@@ -358,7 +356,7 @@ impl Context {
     pub fn inject(&self, deps: &[&str], callback: ApplyFn) -> Rc<Fiber> {
         let plugin = Plugin {
             name: None,
-            inject: deps.iter().map(|s| s.to_string()).collect(),
+            inject: deps.iter().map(|s| (s.to_string(), None)).collect(),
             apply: callback,
         };
         self.plugin(&plugin, None)

@@ -402,7 +402,7 @@ async fn fiber_update_config_while_injected_service_reloads() {
             let consumer = root.plugin(
                 &Plugin {
                     name: None,
-                    inject: vec!["provider".to_string()],
+                    inject: vec![("provider".to_string(), None)],
                     apply: consumer_apply,
                 },
                 Some(Rc::new(ConsumerConfig { mode: "old" })),
