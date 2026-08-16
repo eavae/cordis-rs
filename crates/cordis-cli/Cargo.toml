@@ -7,11 +7,19 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"
 
 [dependencies]
 cordis-core = { path = "../cordis-core" }
 cordis-loader = { path = "../cordis-loader" }
+cordis-plugin-include = { path = "../cordis-plugin-include" }
+cordis-plugin-hmr = { path = "../cordis-plugin-hmr" }
+cordis-plugin-logger-console = { path = "../cordis-plugin-logger-console" }
+tokio.workspace = true
+serde.workspace = true
+serde_yaml_ng.workspace = true
 anyhow.workspace = true
-

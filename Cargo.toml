@@ -28,7 +28,7 @@ repository = "https://github.com/cordisjs/cordis-rs"
 
 [workspace.dependencies]
 # Runtime / async
-tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "signal"] }
 
 # Serialization & config
 serde = { version = "1", features = ["derive"] }
