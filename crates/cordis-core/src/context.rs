@@ -216,6 +216,51 @@ impl Context {
             .map(|entry| entry.value.clone())
     }
 
+    /// Strict dynamic access (mirrors the throwing `ctx[name]` access in the
+    /// TS reference).
+    ///
+    /// Returns an error with the TS-compatible message when the property is
+    /// missing or the context is inactive.
+    pub fn get_str_strict(&self, name: &str) -> Result<Rc<dyn Any>, String> {
+        if self.fiber.uid.get().is_none() {
+            return Err(format!(
+                "cannot get required service \"{name}\" in inactive context"
+            ));
+        }
+        self.get_str(name)
+            .ok_or_else(|| format!("cannot get property \"{name}\" without inject"))
+    }
+
+    /// Dynamic set (mirrors `ctx[name] = value` in the TS reference).
+    pub fn set_str(&self, name: &str, value: Rc<dyn Any>) -> Result<(), String> {
+        let label = self
+            .inner
+            .isolate
+            .lookup(name)
+            .ok_or_else(|| format!("cannot set property \"{name}\" without provide"))?;
+        let mut store = self.inner.store.borrow_mut();
+        match store.by_label.get_mut(&label) {
+            Some(entry) => {
+                let name = entry.name.clone();
+                let fiber = entry.fiber.clone();
+                let check = entry.check.clone();
+                *entry = Rc::new(StoreEntry {
+                    name,
+                    value,
+                    fiber,
+                    check,
+                });
+                Ok(())
+            }
+            None => Err(format!("cannot set property \"{name}\" without provide")),
+        }
+    }
+
+    /// Whether the value is a [`Context`] (mirrors `Context.is(value)`).
+    pub fn is_context(value: &dyn Any) -> bool {
+        value.is::<Context>()
+    }
+
     /// Looks up a typed service.
     pub fn get<S: Service>(&self) -> Option<Rc<S>> {
         self.get_str(S::NAME)?.downcast::<S>().ok()
@@ -442,10 +487,10 @@ impl Context {
         let mut props = self.inner.props.borrow_mut();
         for (key, accessor) in entries {
             let full = format!("{source}.{key}");
-            if props.contains_key(&full) {
+            if props.contains_key(&key) {
                 return Err(format!("property \"{full}\" is already declared"));
             }
-            props.insert(full, accessor);
+            props.insert(key, accessor);
         }
         Ok(())
     }
@@ -453,8 +498,8 @@ impl Context {
     /// Resolves an associated value `source.key` (mirrors the property
     /// access `ctx[source].key` in the TS reference).
     pub fn resolve_assoc(&self, source: &str, key: &str) -> Option<Rc<dyn Any>> {
-        let full = format!("{source}.{key}");
-        let accessor = self.inner.props.borrow().get(&full)?.clone();
+        let _ = source;
+        let accessor = self.inner.props.borrow().get(key)?.clone();
         (accessor.get)(self)
     }
 
@@ -464,7 +509,7 @@ impl Context {
         let accessor = {
             let props = self.inner.props.borrow();
             props
-                .get(&full)
+                .get(key)
                 .cloned()
                 .ok_or_else(|| format!("cannot set property \"{full}\" without provide"))?
         };
