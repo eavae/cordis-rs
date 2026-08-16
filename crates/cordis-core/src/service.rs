@@ -94,6 +94,14 @@ pub type ApplyFn = Rc<dyn Fn(&crate::Context, &Rc<dyn Any>) -> Effect>;
 pub trait Service: Any {
     /// Stable service name used for dynamic access (`ctx.get_str(name)`).
     const NAME: &'static str;
+
+    /// Whether the service is currently usable.
+    ///
+    /// Mirrors the TS `Service.check`; injectors whose dependencies fail the
+    /// check stay `PENDING`.
+    fn check(&self, _ctx: &crate::Context) -> bool {
+        true
+    }
 }
 
 /// Marker trait for service config values.

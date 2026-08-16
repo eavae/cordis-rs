@@ -22,6 +22,9 @@ use crate::{EventsService, LoggerService, ReflectService};
 
 static NEXT_LABEL_ID: AtomicU64 = AtomicU64::new(1);
 
+/// A service availability check (`Service::check` in the TS reference).
+pub type ServiceCheck = Rc<dyn Fn(&Context) -> bool>;
+
 /// A service label. Labels compare by value: contexts isolated with the same
 /// label share the same service instance (mirrors `Symbol('name')` equality
 /// in the TS reference).
@@ -68,6 +71,7 @@ pub(crate) struct StoreEntry {
     pub name: String,
     pub value: Rc<dyn Any>,
     pub fiber: std::rc::Weak<Fiber>,
+    pub check: Option<ServiceCheck>,
 }
 
 impl std::fmt::Debug for StoreEntry {
@@ -192,6 +196,16 @@ impl Context {
     /// `ctx.root[symbols.isolate][name] ??= Symbol(name)` in the TS source).
     /// The returned handle disposes the registration and notifies consumers.
     pub fn provide_str(&self, name: &str, value: Rc<dyn Any>) -> Result<Rc<EffectHandle>, String> {
+        self.provide_str_with_check(name, value, None)
+    }
+
+    /// Registers a service with an explicit availability check.
+    pub fn provide_str_with_check(
+        &self,
+        name: &str,
+        value: Rc<dyn Any>,
+        check: Option<ServiceCheck>,
+    ) -> Result<Rc<EffectHandle>, String> {
         self.fiber.assert_active().map_err(|e| e.message)?;
         let label = self.ensure_label(name);
         {
@@ -220,6 +234,7 @@ impl Context {
                         name: name.clone(),
                         value,
                         fiber: Rc::downgrade(&ctx.fiber),
+                        check: check.clone(),
                     });
                     ctx.inner
                         .store
@@ -256,7 +271,11 @@ impl Context {
 
     /// Registers a typed service.
     pub fn provide<S: Service>(&self, value: Rc<S>) -> Result<Rc<EffectHandle>, String> {
-        self.provide_str(S::NAME, value)
+        let check = {
+            let value = value.clone();
+            Rc::new(move |ctx: &Context| value.check(ctx)) as ServiceCheck
+        };
+        self.provide_str_with_check(S::NAME, value, Some(check))
     }
 
     /// Returns a new context with an additional isolate layer.

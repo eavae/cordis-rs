@@ -548,10 +548,24 @@ impl Fiber {
     }
 
     /// Re-checks one injected service and updates the resolved map.
-    pub(crate) fn check_impl(&self, name: &str) {
+    pub(crate) fn check_impl(self: &Rc<Self>, name: &str) {
         match self.ctx.lookup_strict(name) {
             Some(entry) => {
-                self.resolved.borrow_mut().insert(name.to_string(), entry);
+                let usable = match &entry.check {
+                    Some(check) => {
+                        let context = Context {
+                            inner: self.ctx.clone(),
+                            fiber: self.clone(),
+                        };
+                        check(&context)
+                    }
+                    None => true,
+                };
+                if usable {
+                    self.resolved.borrow_mut().insert(name.to_string(), entry);
+                } else {
+                    self.resolved.borrow_mut().remove(name);
+                }
             }
             None => {
                 self.resolved.borrow_mut().remove(name);

@@ -13,6 +13,7 @@ pub mod registry;
 pub mod service;
 
 pub use context::Context;
+pub use cordis_macros::{inject, service};
 pub use events::{
     AnyNext, EventCallback, EventFilter, EventOptions, EventsService, ListenerFilter,
     ParallelError, WaterfallNext, event_listener,

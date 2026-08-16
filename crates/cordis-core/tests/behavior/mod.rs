@@ -15,6 +15,7 @@ pub mod events;
 pub mod fiber;
 pub mod isolate;
 pub mod plugin;
+pub mod service;
 
 /// A manually advanced fake clock (millisecond precision).
 #[derive(Default)]
