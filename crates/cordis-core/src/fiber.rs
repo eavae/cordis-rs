@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::task::Poll;
 
 use crate::context::{Context, ContextInner, StoreEntry};
+use crate::error::ConfigValidator;
 use crate::events::{EventCallback, WaterfallNext, run_waterfall_step};
 use crate::registry::Runtime;
 use crate::service::{ApplyFn, BoxFuture, Disposer, Effect, EffectItem, sync_disposer};
@@ -309,6 +310,8 @@ pub struct Fiber {
     pub(crate) dispose: RefCell<Option<Rc<EffectHandle>>>,
     /// Fiber-level internal hooks.
     pub(crate) _hooks: RefCell<HashMap<String, Vec<InternalHook>>>,
+    /// Config validator applied on updates (story card B12).
+    pub(crate) validator: RefCell<Option<ConfigValidator>>,
 }
 
 impl Fiber {
@@ -329,6 +332,7 @@ impl Fiber {
             inertia: RefCell::new(Inertia::default()),
             dispose: RefCell::new(None),
             _hooks: RefCell::new(HashMap::new()),
+            validator: RefCell::new(None),
         })
     }
 
@@ -465,6 +469,14 @@ impl Fiber {
         let this = self.clone();
         Box::pin(async move {
             this.assert_active()?;
+            if let Some(validator) = &*this.validator.borrow()
+                && let Some(config) = &config
+                && let Err(error) = validator(config)
+            {
+                this.log_error(&error);
+                *this.error.borrow_mut() = Some(Box::new(FiberError::new(error.to_string())));
+                return Err(FiberError::new(error.to_string()));
+            }
             let hooks = this
                 ._hooks
                 .borrow()
@@ -635,7 +647,7 @@ impl Fiber {
                     match self.run_apply(&ctx, &runtime.callback, &config) {
                         Ok(task) => task,
                         Err(reason) => {
-                            self.log_error(&reason);
+                            self.log_error(&format!("{reason} at <{}>", self.name()));
                             *self.error.borrow_mut() =
                                 Some(Box::new(FiberError::new(reason.to_string())));
                             *self.epoch.borrow_mut() = Epoch::Inactive;
@@ -649,7 +661,7 @@ impl Fiber {
         if let Some(task) = task
             && let Err(reason) = task.await
         {
-            self.log_error(&reason);
+            self.log_error(&format!("{reason} at <{}>", self.name()));
             *self.error.borrow_mut() = Some(Box::new(FiberError::new(reason.to_string())));
             *self.epoch.borrow_mut() = Epoch::Inactive;
         }
@@ -749,7 +761,7 @@ impl Fiber {
         }
     }
 
-    fn log_error(&self, reason: &dyn fmt::Display) {
+    pub(crate) fn log_error(&self, reason: &dyn fmt::Display) {
         if let Some(logger) = self.ctx.get_service::<crate::LoggerService>("logger") {
             logger.error(reason);
         }

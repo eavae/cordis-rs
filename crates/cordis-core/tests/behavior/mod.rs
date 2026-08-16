@@ -12,6 +12,7 @@ use std::task::{Poll, Waker};
 
 pub mod associate;
 pub mod dispose;
+pub mod errors;
 pub mod events;
 pub mod fiber;
 pub mod invoke;

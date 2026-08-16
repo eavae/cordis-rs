@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::error::ConfigValidator;
 use crate::events::{EventCallback, EventFilter, EventOptions, ParallelError};
 use crate::fiber::{CordisError, EffectHandle, Fiber, FiberState};
 use crate::logger::Logger;
@@ -559,10 +560,20 @@ impl Context {
 
     /// Registers a plugin on this context (see [`RegistryService::plugin`]).
     pub fn plugin(&self, plugin: &Plugin, config: Option<Rc<dyn Any>>) -> Rc<Fiber> {
+        self.plugin_with_validator(plugin, config, None)
+    }
+
+    /// Registers a plugin with a config validator (story card B12).
+    pub fn plugin_with_validator(
+        &self,
+        plugin: &Plugin,
+        config: Option<Rc<dyn Any>>,
+        validator: Option<ConfigValidator>,
+    ) -> Rc<Fiber> {
         let registry = self
             .get::<RegistryService>()
             .expect("registry service must be present");
-        registry.plugin(self, plugin, config)
+        registry.plugin_with_validator(self, plugin, config, validator)
     }
 
     /// Registers an inject callback (a plugin whose only role is consuming

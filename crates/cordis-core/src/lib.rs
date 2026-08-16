@@ -5,6 +5,7 @@
 //! single-threaded tokio runtime.
 
 pub mod context;
+pub mod error;
 pub mod events;
 pub mod fiber;
 pub mod logger;
@@ -14,6 +15,7 @@ pub mod service;
 
 pub use context::{Context, MixinAccessor, MixinGet, MixinSet};
 pub use cordis_macros::{inject, service};
+pub use error::{ConfigValidator, ValidationError, ValidationIssue};
 pub use events::{
     AnyNext, EventCallback, EventFilter, EventOptions, EventsService, ListenerFilter,
     ParallelError, WaterfallNext, event_listener,

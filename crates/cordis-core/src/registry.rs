@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use crate::context::{Context, ContextInner, InterceptLayer};
+use crate::error::ConfigValidator;
 use crate::fiber::{Epoch, Fiber, FiberState};
 use crate::service::{ApplyFn, Effect, Service};
 
@@ -83,6 +84,17 @@ impl RegistryService {
         plugin: &Plugin,
         config: Option<Rc<dyn Any>>,
     ) -> Rc<Fiber> {
+        self.plugin_with_validator(parent, plugin, config, None)
+    }
+
+    /// Registers a plugin with an optional config validator.
+    pub fn plugin_with_validator(
+        &self,
+        parent: &Context,
+        plugin: &Plugin,
+        config: Option<Rc<dyn Any>>,
+        validator: Option<ConfigValidator>,
+    ) -> Rc<Fiber> {
         parent
             .fiber()
             .assert_active()
@@ -107,6 +119,9 @@ impl RegistryService {
 
         let uid = self.next_counter();
         let child_inner = build_child_inner(parent, &plugin.inject);
+        let validation_error = validator
+            .as_ref()
+            .and_then(|validate| config.as_ref().and_then(|config| validate(config).err()));
         let fiber = Rc::new(Fiber {
             uid: Cell::new(Some(uid)),
             ctx: child_inner,
@@ -128,6 +143,7 @@ impl RegistryService {
             inertia: RefCell::new(Default::default()),
             dispose: RefCell::new(None),
             _hooks: RefCell::new(HashMap::new()),
+            validator: RefCell::new(validator),
         });
 
         // Mirror `parent.fiber.effect(...)` in fiber.ts: the registration
@@ -138,6 +154,22 @@ impl RegistryService {
             .effect(
                 move || {
                     runtime.fibers.borrow_mut().push(fiber_for_effect.clone());
+                    if let Some(error) = validation_error.clone() {
+                        fiber_for_effect
+                            .log_error(&format!("{error} at <{}>", fiber_for_effect.name()));
+                        *fiber_for_effect.error.borrow_mut() =
+                            Some(Box::new(crate::fiber::FiberError::new(error.to_string())));
+                        *fiber_for_effect.epoch.borrow_mut() = Epoch::Inactive;
+                        fiber_for_effect.state.set(FiberState::Failed);
+                        let fiber = fiber_for_effect.clone();
+                        return Effect::Disposer(Box::new(move || {
+                            let fiber = fiber.clone();
+                            Box::pin(async move {
+                                unregister_dispose(fiber).await;
+                                Ok(())
+                            })
+                        }));
+                    }
                     for name in fiber_for_effect.inject.borrow().keys() {
                         fiber_for_effect.check_impl(name);
                     }
