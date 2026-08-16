@@ -32,6 +32,10 @@ pub type MixinGet = Rc<dyn Fn(&Context) -> Option<Rc<dyn Any>>>;
 /// A mixin setter.
 pub type MixinSet = Rc<dyn Fn(&Context, Rc<dyn Any>)>;
 
+/// A callable-service invocation handler (`[Service.invoke]` in the TS
+/// reference).
+pub type InvokeFn = Rc<dyn Fn(&Context, Option<&Rc<dyn Any>>) -> Option<Rc<dyn Any>>>;
+
 /// A registered accessor (`Property.Accessor` in reflect.ts).
 pub struct MixinAccessor {
     /// Resolves the value.
@@ -87,6 +91,7 @@ pub(crate) struct StoreEntry {
     pub value: Rc<dyn Any>,
     pub fiber: std::rc::Weak<Fiber>,
     pub check: Option<ServiceCheck>,
+    pub invoke: Option<InvokeFn>,
 }
 
 impl std::fmt::Debug for StoreEntry {
@@ -244,11 +249,13 @@ impl Context {
                 let name = entry.name.clone();
                 let fiber = entry.fiber.clone();
                 let check = entry.check.clone();
+                let invoke = entry.invoke.clone();
                 *entry = Rc::new(StoreEntry {
                     name,
                     value,
                     fiber,
                     check,
+                    invoke,
                 });
                 Ok(())
             }
@@ -282,6 +289,16 @@ impl Context {
         name: &str,
         value: Rc<dyn Any>,
         check: Option<ServiceCheck>,
+    ) -> Result<Rc<EffectHandle>, String> {
+        self.provide_inner_impl(name, value, check, None)
+    }
+
+    fn provide_inner_impl(
+        &self,
+        name: &str,
+        value: Rc<dyn Any>,
+        check: Option<ServiceCheck>,
+        invoke: Option<InvokeFn>,
     ) -> Result<Rc<EffectHandle>, String> {
         self.fiber.assert_active().map_err(|e| e.message)?;
         {
@@ -318,6 +335,7 @@ impl Context {
                         value,
                         fiber: Rc::downgrade(&ctx.fiber),
                         check: check.clone(),
+                        invoke: invoke.clone(),
                     });
                     ctx.inner
                         .store
@@ -358,7 +376,24 @@ impl Context {
             let value = value.clone();
             Rc::new(move |ctx: &Context| value.check(ctx)) as ServiceCheck
         };
-        self.provide_str_with_check(S::NAME, value, Some(check))
+        let invoke = {
+            let value = value.clone();
+            Rc::new(move |ctx: &Context, init: Option<&Rc<dyn Any>>| value.invoke(ctx, init))
+                as InvokeFn
+        };
+        self.provide_inner_impl(S::NAME, value, Some(check), Some(invoke))
+    }
+
+    /// Invokes a callable service (mirrors `ctx[service](...)`).
+    pub fn invoke_str(&self, name: &str, init: Option<Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
+        let entry = self.inner.lookup_strict(name)?;
+        let invoke = entry.invoke.as_ref()?;
+        invoke(self, init.as_ref())
+    }
+
+    /// Invokes a typed callable service.
+    pub fn invoke<S: Service>(&self, init: Option<Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
+        self.invoke_str(S::NAME, init)
     }
 
     /// Returns a new context with an additional isolate layer.

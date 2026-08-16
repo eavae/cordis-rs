@@ -102,6 +102,17 @@ pub trait Service: Any {
     fn check(&self, _ctx: &crate::Context) -> bool {
         true
     }
+
+    /// Callable-service invocation (mirrors `[Service.invoke]`).
+    ///
+    /// The default returns `None` (not callable).
+    fn invoke(
+        &self,
+        _ctx: &crate::Context,
+        _init: Option<&std::rc::Rc<dyn Any>>,
+    ) -> Option<std::rc::Rc<dyn Any>> {
+        None
+    }
 }
 
 /// Marker trait for service config values.
