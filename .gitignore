@@ -2,3 +2,4 @@ docs/
 .cargo/
 /target/
 
+**/SPEC-MAP.md
