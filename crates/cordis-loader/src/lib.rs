@@ -6,5 +6,5 @@
 pub mod entry;
 pub mod loader;
 
-pub use entry::{Entry, EntryGroup, EntryOptions, EntryTree, PartialEntryOptions};
+pub use entry::{Entry, EntryGroup, EntryOptions, EntryTree, IsolateValue, PartialEntryOptions};
 pub use loader::Loader;

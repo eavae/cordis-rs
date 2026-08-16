@@ -14,6 +14,8 @@ fn opts(id: &str, name: &str, disabled: bool) -> EntryOptions {
         group: None,
         disabled: disabled.then_some(true),
         inject: None,
+        isolate: None,
+        intercept: None,
     }
 }
 

@@ -29,6 +29,21 @@ pub struct EntryOptions {
     /// Declared inject dependencies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inject: Option<Vec<String>>,
+    /// Per-service isolate scopes (story card C4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolate: Option<std::collections::HashMap<String, IsolateValue>>,
+    /// Per-service intercept overrides (story card C4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intercept: Option<serde_yaml_ng::Value>,
+}
+
+/// An isolate declaration: `true` for a local realm, a string for a shared
+/// label.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IsolateValue {
+    Flag(bool),
+    Label(String),
 }
 
 impl EntryOptions {
@@ -375,8 +390,9 @@ pub struct Entry {
 impl Entry {
     /// Creates an entry; call `update` immediately afterwards.
     pub fn new(tree: Rc<EntryTree>, parent: Rc<EntryGroup>, options: EntryOptions) -> Rc<Self> {
-        let ctx = tree.ctx.clone();
-        Rc::new(Entry {
+        let ctx = parent.ctx.clone();
+        let ctx = ctx.with_isolate_layer().with_intercept_layer();
+        let entry = Rc::new(Entry {
             tree,
             ctx,
             parent,
@@ -384,7 +400,28 @@ impl Entry {
             fiber: RefCell::new(None),
             subgroup: RefCell::new(None),
             init_task: Cell::new(false),
-        })
+        });
+        entry.apply_realm_layers();
+        entry
+    }
+
+    /// Rebuilds the entry's top isolate/intercept layers from its options.
+    fn apply_realm_layers(&self) {
+        self.ctx.clear_isolate_layer();
+        self.ctx.clear_intercept_layer();
+        let isolate = self.options.borrow().isolate.clone().unwrap_or_default();
+        for (name, value) in isolate {
+            let label = match value {
+                IsolateValue::Flag(true) => {
+                    Rc::<str>::from(format!("{name}#{}", self.options.borrow().id))
+                }
+                IsolateValue::Label(label) => Rc::<str>::from(format!("{name}@{label}")),
+                IsolateValue::Flag(false) => continue,
+            };
+            self.ctx.set_isolate(&name, label);
+        }
+        // Intercept values are interpreted by typed configs (C6); the layer
+        // is created here so later cards can fill it.
     }
 
     /// The full id, prefixed by ancestor entry ids (mirrors `entry.id`).
@@ -453,8 +490,64 @@ impl Entry {
             return;
         }
 
+        let changed = self.options.borrow().diff(&legacy);
+        if changed
+            .iter()
+            .any(|key| *key == "isolate" || *key == "intercept")
+        {
+            let old_isolate = legacy.isolate.clone().unwrap_or_default();
+            let new_isolate = self.options.borrow().isolate.clone().unwrap_or_default();
+            let changed_names: Vec<String> = new_isolate
+                .keys()
+                .chain(old_isolate.keys())
+                .filter(|name| new_isolate.get(*name) != old_isolate.get(*name))
+                .cloned()
+                .collect();
+            let old_labels: HashMap<String, cordis_core::Label> = changed_names
+                .iter()
+                .map(|name| {
+                    let label = self
+                        .ctx
+                        .isolate_label(name)
+                        .unwrap_or_else(|| Rc::from("") as cordis_core::Label);
+                    (name.clone(), label)
+                })
+                .collect();
+            self.apply_realm_layers();
+            let fiber = self.fiber.borrow().clone();
+            let is_group = self.options.borrow().group == Some(true);
+            if is_group
+                && let Some(fiber) = &fiber
+                && fiber.uid.get().is_some()
+            {
+                let config = self.resolve_config_value();
+                let fiber = fiber.clone();
+                tokio::task::spawn_local(fiber.update_with(config, true));
+            } else if let Some(fiber) = &fiber {
+                // Migrate services provided by this entry's fiber to the new
+                // labels (mirrors the loader's store migration).
+                for (name, old_label) in &old_labels {
+                    if let Some(new_label) = self.ctx.isolate_label(name) {
+                        self.ctx
+                            .migrate_label_if(name, old_label, &new_label, fiber);
+                    }
+                }
+            }
+            // Wake fibers that depend on the re-scoped names.
+            for name in &changed_names {
+                let mut labels = Vec::new();
+                if let Some(old) = old_labels.get(name) {
+                    labels.push(old.clone());
+                }
+                if let Some(new) = self.ctx.isolate_label(name) {
+                    labels.push(new);
+                }
+                let _ = self.ctx.notify_with_labels(name, &labels);
+            }
+            return;
+        }
+
         if self.fiber.borrow().is_some() {
-            let changed = self.options.borrow().diff(&legacy);
             if changed.is_empty() {
                 return;
             }
@@ -557,6 +650,8 @@ pub struct PartialEntryOptions {
     pub group: Option<bool>,
     pub disabled: Option<bool>,
     pub inject: Option<Vec<String>>,
+    pub isolate: Option<std::collections::HashMap<String, IsolateValue>>,
+    pub intercept: Option<serde_yaml_ng::Value>,
 }
 
 impl PartialEntryOptions {
@@ -569,6 +664,8 @@ impl PartialEntryOptions {
             group: self.group,
             disabled: self.disabled,
             inject: self.inject.clone(),
+            isolate: self.isolate.clone(),
+            intercept: self.intercept.clone(),
         }
     }
 
@@ -591,6 +688,12 @@ impl PartialEntryOptions {
         if let Some(inject) = &self.inject {
             current.inject = Some(inject.clone());
         }
+        if let Some(isolate) = &self.isolate {
+            current.isolate = Some(isolate.clone());
+        }
+        if let Some(intercept) = &self.intercept {
+            current.intercept = Some(intercept.clone());
+        }
     }
 
     /// Applies every field; `None` values clear the current value.
@@ -605,6 +708,8 @@ impl PartialEntryOptions {
         current.group = self.group;
         current.disabled = self.disabled;
         current.inject = self.inject.clone();
+        current.isolate = self.isolate.clone();
+        current.intercept = self.intercept.clone();
     }
 
     /// Builds a partial update from a full options set (used by `read`).
@@ -616,6 +721,8 @@ impl PartialEntryOptions {
             group: options.group,
             disabled: options.disabled,
             inject: options.inject.clone(),
+            isolate: options.isolate.clone(),
+            intercept: options.intercept.clone(),
         }
     }
 }
@@ -635,6 +742,12 @@ impl EntryOptions {
         }
         if self.name != legacy.name {
             changed.push("name");
+        }
+        if self.isolate != legacy.isolate {
+            changed.push("isolate");
+        }
+        if self.intercept != legacy.intercept {
+            changed.push("intercept");
         }
         changed
     }

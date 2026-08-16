@@ -230,6 +230,46 @@ impl Context {
             .map(|entry| entry.value.clone())
     }
 
+    /// Whether any visible store entry with `name` exists (used by the
+    /// loader to detect provider-side re-scoping).
+    pub fn provides(&self, name: &str) -> bool {
+        self.inner
+            .store
+            .borrow()
+            .by_label
+            .values()
+            .any(|entry| entry.name == name)
+    }
+
+    /// Moves a store entry from `old_label` to `new_label` when its provider
+    /// fiber matches `provider` (mirrors the loader's service migration).
+    pub fn migrate_label_if(
+        &self,
+        name: &str,
+        old_label: &Label,
+        new_label: &Label,
+        provider: &Rc<Fiber>,
+    ) -> bool {
+        let mut store = self.inner.store.borrow_mut();
+        let Some(entry) = store.by_label.get(old_label).cloned() else {
+            return false;
+        };
+        if entry.name != name {
+            return false;
+        }
+        let owned_by = entry
+            .fiber
+            .upgrade()
+            .map(|fiber| Rc::ptr_eq(&fiber, provider))
+            .unwrap_or(false);
+        if !owned_by || store.by_label.contains_key(new_label) {
+            return false;
+        }
+        store.by_label.remove(old_label);
+        store.by_label.insert(new_label.clone(), entry);
+        true
+    }
+
     /// Strict dynamic access (mirrors the throwing `ctx[name]` access in the
     /// TS reference).
     ///
@@ -417,6 +457,63 @@ impl Context {
             parent: Some(self.inner.isolate.clone()),
         });
         self.spawn(layer, self.inner.intercept.clone())
+    }
+
+    /// Returns a context with an empty isolate layer on top (used by the
+    /// loader to scope entry services per-realm).
+    pub fn with_isolate_layer(&self) -> Context {
+        let layer = Rc::new(IsolateLayer {
+            entries: RefCell::new(HashMap::new()),
+            parent: Some(self.inner.isolate.clone()),
+        });
+        self.spawn(layer, self.inner.intercept.clone())
+    }
+
+    /// Sets an isolate label on this context's top layer.
+    pub fn set_isolate(&self, name: &str, label: Label) {
+        self.inner
+            .isolate
+            .entries
+            .borrow_mut()
+            .insert(name.to_string(), label);
+    }
+
+    /// Removes an isolate label from this context's top layer.
+    pub fn remove_isolate(&self, name: &str) {
+        self.inner.isolate.entries.borrow_mut().remove(name);
+    }
+
+    /// Clears all entries on this context's top isolate layer.
+    pub fn clear_isolate_layer(&self) {
+        self.inner.isolate.entries.borrow_mut().clear();
+    }
+
+    /// Returns a context with an empty intercept layer on top.
+    pub fn with_intercept_layer(&self) -> Context {
+        let layer = Rc::new(InterceptLayer {
+            entries: RefCell::new(HashMap::new()),
+            parent: Some(self.inner.intercept.clone()),
+        });
+        self.spawn(self.inner.isolate.clone(), layer)
+    }
+
+    /// Sets an intercept config on this context's top layer.
+    pub fn set_intercept(&self, name: &str, config: Rc<dyn Any>) {
+        self.inner
+            .intercept
+            .entries
+            .borrow_mut()
+            .insert(name.to_string(), config);
+    }
+
+    /// Removes an intercept config from this context's top layer.
+    pub fn remove_intercept(&self, name: &str) {
+        self.inner.intercept.entries.borrow_mut().remove(name);
+    }
+
+    /// Clears all entries on this context's top intercept layer.
+    pub fn clear_intercept_layer(&self) {
+        self.inner.intercept.entries.borrow_mut().clear();
     }
 
     /// Returns a new context with an additional intercept layer.
@@ -727,6 +824,15 @@ impl Context {
             return Vec::new();
         };
         registry.notify(name, self)
+    }
+
+    /// Notifies fibers whose isolate label for `name` matches one of
+    /// `labels` (used by the loader's realm migration).
+    pub fn notify_with_labels(&self, name: &str, labels: &[Label]) -> Vec<Rc<Fiber>> {
+        let Some(registry) = self.get::<RegistryService>() else {
+            return Vec::new();
+        };
+        registry.notify_with_labels(name, labels)
     }
 
     fn spawn(&self, isolate: Rc<IsolateLayer>, intercept: Rc<InterceptLayer>) -> Context {

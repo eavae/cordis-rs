@@ -14,6 +14,8 @@ fn group_opts(id: &str, config: Vec<EntryOptions>) -> EntryOptions {
         group: Some(true),
         disabled: None,
         inject: None,
+        isolate: None,
+        intercept: None,
     }
 }
 
@@ -25,6 +27,8 @@ fn foo_opts() -> EntryOptions {
         group: None,
         disabled: None,
         inject: None,
+        isolate: None,
+        intercept: None,
     }
 }
 

@@ -150,7 +150,7 @@ impl Loader {
                         } else {
                             let subgroup = EntryGroup::new(
                                 loader.tree_handle(),
-                                loader.ctx.clone(),
+                                entry.ctx.clone(),
                                 Some(entry.parent.clone()),
                             );
                             *subgroup.entry.borrow_mut() = Some(entry.clone());
@@ -195,11 +195,6 @@ impl Loader {
     }
 
     async fn read_group(&self, group: &Rc<EntryGroup>, configs: Vec<EntryOptions>) {
-        eprintln!(
-            "[read_group] start group={:?} configs={}",
-            group.entry.borrow().as_ref().map(|e| e.id()),
-            configs.len()
-        );
         let mut next_entries: Vec<Rc<Entry>> = Vec::new();
         for options in configs {
             if options.group == Some(true) {
@@ -278,11 +273,16 @@ impl Loader {
 
     /// Registers a mock plugin under a name (test helper, mirrors `mock`).
     pub fn mock(&self, name: &str, apply: ApplyFn) -> String {
+        self.mock_with_inject(name, Vec::new(), apply)
+    }
+
+    /// Registers a mock plugin with an inject list (test helper).
+    pub fn mock_with_inject(&self, name: &str, inject: Vec<String>, apply: ApplyFn) -> String {
         self.tree.plugins.borrow_mut().insert(
             name.to_string(),
             Plugin {
                 name: None,
-                inject: Vec::new(),
+                inject: inject.into_iter().map(|name| (name, None)).collect(),
                 apply,
             },
         );

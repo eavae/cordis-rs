@@ -258,6 +258,30 @@ impl RegistryService {
         affected
     }
 
+    /// Notifies fibers whose isolate label for `name` matches `labels`.
+    pub(crate) fn notify_with_labels(&self, name: &str, labels: &[crate::Label]) -> Vec<Rc<Fiber>> {
+        let runtimes = self.runtimes.borrow();
+        let mut affected = Vec::new();
+        for runtime in runtimes.values() {
+            for fiber in runtime.fibers.borrow().iter() {
+                if !fiber.inject.borrow().contains_key(name) {
+                    continue;
+                }
+                let label = fiber.ctx.isolate_label(name);
+                if !labels
+                    .iter()
+                    .any(|candidate| label.as_ref() == Some(candidate))
+                {
+                    continue;
+                }
+                fiber.check_impl(name);
+                fiber.refresh();
+                affected.push(fiber.clone());
+            }
+        }
+        affected
+    }
+
     /// Removes a runtime once its last fiber is disposed.
     pub(crate) fn remove_runtime(&self, fiber: &Rc<Fiber>) {
         if let Some(runtime) = &*fiber.runtime.borrow() {
