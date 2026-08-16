@@ -13,4 +13,3 @@ workspace = true
 [dependencies]
 cordis-core = { path = "../cordis-core" }
 tokio.workspace = true
-
