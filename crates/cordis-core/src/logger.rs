@@ -13,13 +13,33 @@ use crate::fiber::EffectHandle;
 use crate::service::{Config, Effect, Service, sync_disposer};
 
 /// Log level (mirrors `LoggerLevel` in logger.ts).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(from = "u8", into = "u8")]
 #[repr(u8)]
 pub enum LoggerLevel {
     Error = 0,
     Warn = 1,
     Info = 2,
     Debug = 3,
+}
+
+impl From<u8> for LoggerLevel {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => LoggerLevel::Error,
+            1 => LoggerLevel::Warn,
+            2 => LoggerLevel::Info,
+            _ => LoggerLevel::Debug,
+        }
+    }
+}
+
+impl From<LoggerLevel> for u8 {
+    fn from(level: LoggerLevel) -> Self {
+        level as u8
+    }
 }
 
 /// Log type (mirrors `LoggerType`).
@@ -32,7 +52,8 @@ pub enum LoggerType {
 }
 
 impl LoggerType {
-    fn level(self) -> LoggerLevel {
+    /// The level of this log type.
+    pub fn level(self) -> LoggerLevel {
         match self {
             LoggerType::Error => LoggerLevel::Error,
             LoggerType::Warn => LoggerLevel::Warn,
@@ -109,6 +130,13 @@ pub struct Message {
     pub level: LoggerLevel,
     /// Format string plus arguments.
     pub args: Vec<LogValue>,
+}
+
+impl Message {
+    /// The current time in milliseconds (used by exporters for diffs).
+    pub fn now_millis() -> u64 {
+        now_millis()
+    }
 }
 
 /// A log exporter (mirrors `Exporter` in logger.ts).
@@ -498,10 +526,7 @@ pub fn format_message(
             LogValue::Str(format) => format,
             _ => unreachable!(),
         },
-        _ => {
-            args.insert(0, LogValue::Empty);
-            "%o".to_string()
-        }
+        _ => "%o".to_string(),
     };
 
     let mut output = String::new();
@@ -552,7 +577,13 @@ pub fn format_message(
                             (format!("%{other}"), false)
                         }
                     }
-                    (other, None) => (format!("%{other}"), false),
+                    (other, None) => {
+                        if let Some(custom) = formatters.get(&other) {
+                            (custom(&LogValue::Empty), true)
+                        } else {
+                            (format!("%{other}"), false)
+                        }
+                    }
                 };
                 if consumed && !args.is_empty() {
                     args.remove(0);

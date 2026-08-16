@@ -30,6 +30,7 @@ name = "cordis-core"
 version = "0.1.0"
 dependencies = [
  "cordis-macros",
+ "serde",
  "tokio",
 ]
 
@@ -82,6 +83,7 @@ name = "cordis-plugin-logger-console"
 version = "0.1.0"
 dependencies = [
  "cordis-core",
+ "serde",
 ]
 
 [[package]]
