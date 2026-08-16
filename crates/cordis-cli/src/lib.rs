@@ -15,6 +15,173 @@ pub struct CliOptions {
     pub plugins_dir: Option<String>,
 }
 
+/// Scaffolds a new cordis project (story card H2).
+pub fn create_project(dir: &Path, force: bool) -> anyhow::Result<()> {
+    if dir.exists() {
+        if !force {
+            anyhow::bail!(
+                "directory {} already exists (use --force to overwrite)",
+                dir.display()
+            );
+        }
+    } else {
+        std::fs::create_dir_all(dir)?;
+    }
+    let name = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("cordis-app")
+        .to_string();
+
+    std::fs::create_dir_all(dir.join("plugins/hello/src"))?;
+
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "plugins/hello"]
+resolver = "3"
+"#,
+    )?;
+    std::fs::create_dir_all(dir.join("app/src"))?;
+    std::fs::write(
+        dir.join("app/Cargo.toml"),
+        format!(
+            r#"[package]
+name = "{name}-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cordis-cli = {{ path = "{repo}" }}
+anyhow = "1"
+tokio = {{ version = "1", features = ["rt", "macros", "time", "sync", "signal"] }}
+"#,
+            repo = crate_path("cordis-cli")
+        ),
+    )?;
+    std::fs::write(
+        dir.join("app/src/main.rs"),
+        "fn main() -> anyhow::Result<()> {\n    // The default project watches `./plugins` and reads `./cordis.yml`.\n    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;\n    let local = tokio::task::LocalSet::new();\n    local.block_on(&runtime, async { cordis_cli::run(&Default::default()).await })\n}\n",
+    )?;
+    std::fs::write(
+        dir.join("cordis.yml"),
+        "- id: 'hello'\n  name: cordis-hello\n",
+    )?;
+
+    // Example plugin (a `.so` that logs through the host vtable on apply).
+    std::fs::write(
+        dir.join("plugins/hello/Cargo.toml"),
+        format!(
+            r#"[package]
+name = "cordis-hello"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cordis-sdk = {{ path = "{repo}", default-features = false }}
+
+[lints.rust]
+unsafe_code = "allow"
+"#,
+            repo = crate_path("cordis-sdk")
+        ),
+    )?;
+    std::fs::write(
+        dir.join("plugins/hello/src/lib.rs"),
+        r#"//! The example cordis plugin: logs through the host vtable on apply.
+
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use cordis_sdk::{HostVtable, PLUGIN_API_VERSION, PluginHandle};
+
+const META: &std::ffi::CStr =
+    c"{\"name\":\"cordis-hello\",\"version\":\"0.1.0\",\"inject\":[],\"provide\":[]}";
+
+struct PluginInstance {
+    vtable: *const HostVtable,
+    apply_count: AtomicU32,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn plugin_api_version() -> u32 {
+    PLUGIN_API_VERSION
+}
+
+/// # Safety
+///
+/// `host` must point to a valid vtable that outlives the plugin instance.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn plugin_create(host: *const HostVtable) -> *mut PluginHandle {
+    if host.is_null() {
+        return std::ptr::null_mut();
+    }
+    let instance = Box::new(PluginInstance {
+        vtable: host,
+        apply_count: AtomicU32::new(0),
+    });
+    Box::into_raw(instance).cast::<PluginHandle>()
+}
+
+/// # Safety
+///
+/// `handle` must come from a matching create call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn plugin_dispose(handle: *mut PluginHandle) {
+    if handle.is_null() {
+        return;
+    }
+    drop(unsafe { Box::from_raw(handle as *mut PluginInstance) });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn plugin_meta() -> *const std::ffi::c_char {
+    META.as_ptr()
+}
+
+/// # Safety
+///
+/// `config` must be NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn plugin_validate_config(_config: *const std::ffi::c_char) -> i32 {
+    0
+}
+
+/// # Safety
+///
+/// `handle` must come from `plugin_create`; `config` must be NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, _config: *const std::ffi::c_char) -> i32 {
+    // SAFETY: the handle came from plugin_create and is alive.
+    let instance = unsafe { &*(handle as *mut PluginInstance) };
+    instance.apply_count.fetch_add(1, Ordering::SeqCst);
+    // SAFETY: the host vtable outlives the plugin instance.
+    let vtable = unsafe { &*instance.vtable };
+    let message = std::ffi::CString::new("hello from the example cordis plugin").unwrap();
+    (vtable.log)(message.as_ptr());
+    0
+}
+"#,
+    )?;
+    Ok(())
+}
+
+fn crate_path(crate_name: &str) -> String {
+    // The CLI crate lives at <workspace>/crates/cordis-cli; the template
+    // references sibling crates by their absolute path so the generated
+    // project builds against the local SDK no matter where it is scaffolded.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let workspace = Path::new(&manifest)
+        .parent()
+        .and_then(|path| path.parent())
+        .unwrap_or(Path::new("."));
+    let root = workspace.join("crates").join(crate_name);
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    root.to_string_lossy().into_owned()
+}
+
 /// Runs the cordis startup path: root → loader → plugins → wait for signal.
 pub async fn run(options: &CliOptions) -> anyhow::Result<()> {
     let config_path = options
@@ -84,9 +251,15 @@ pub async fn run(options: &CliOptions) -> anyhow::Result<()> {
         })
         .collect();
     if !failed.is_empty() {
-        return Err(anyhow::anyhow!("plugin failed to apply:\n{}", failed.join("\n")));
+        return Err(anyhow::anyhow!(
+            "plugin failed to apply:\n{}",
+            failed.join("\n")
+        ));
     }
-    loader.ctx.logger().info(format!("cordis started (config {config_path})"));
+    loader
+        .ctx
+        .logger()
+        .info(format!("cordis started (config {config_path})"));
 
     // Signal handlers are installed inside `wait_for_exit`; announce that the
     // process is ready so drivers (tests/scripts) can signal it safely.
@@ -107,7 +280,10 @@ fn load_so_plugins(loader: &Loader, dir: &Path) -> anyhow::Result<Vec<SoPlugin>>
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        let is_plugin = path.extension().map(|ext| ext == "so" || ext == "dylib").unwrap_or(false);
+        let is_plugin = path
+            .extension()
+            .map(|ext| ext == "so" || ext == "dylib")
+            .unwrap_or(false);
         if !is_plugin {
             continue;
         }
@@ -124,12 +300,18 @@ fn load_so_plugins(loader: &Loader, dir: &Path) -> anyhow::Result<Vec<SoPlugin>>
         // SAFETY: the log callback stays valid for the plugin's lifetime.
         let handle = unsafe { plugin.create(cli_log) };
         if handle.is_null() {
-            return Err(anyhow::anyhow!("plugin create failed for {}", path.display()));
+            return Err(anyhow::anyhow!(
+                "plugin create failed for {}",
+                path.display()
+            ));
         }
-        let name = loader
-            .register_so_plugin(&plugin)
-            .map_err(|error| anyhow::anyhow!("cannot register plugin {}: {error}", path.display()))?;
-        loader.ctx.logger().info(format!("loaded plugin {name} ({})", path.display()));
+        let name = loader.register_so_plugin(&plugin).map_err(|error| {
+            anyhow::anyhow!("cannot register plugin {}: {error}", path.display())
+        })?;
+        loader
+            .ctx
+            .logger()
+            .info(format!("loaded plugin {name} ({})", path.display()));
         libraries.push(plugin);
     }
     Ok(libraries)

@@ -71,7 +71,10 @@ fn cli_starts_and_exits_on_signal() {
         stdout.contains("cordis started"),
         "startup log missing: {stdout} / {stderr}"
     );
-    assert!(stdout.contains("cordis exiting"), "exit log missing: {stdout}");
+    assert!(
+        stdout.contains("cordis exiting"),
+        "exit log missing: {stdout}"
+    );
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -88,7 +91,11 @@ fn cli_accepts_cordis_shared_env() {
     });
     fs::copy(
         &fixture,
-        plugins.join(if cfg!(target_os = "macos") { "e5.dylib" } else { "e5.so" }),
+        plugins.join(if cfg!(target_os = "macos") {
+            "e5.dylib"
+        } else {
+            "e5.so"
+        }),
     )
     .unwrap();
     fs::write(
@@ -146,7 +153,11 @@ fn cli_fails_on_invalid_plugin_config() {
     });
     fs::copy(
         &fixture,
-        plugins.join(if cfg!(target_os = "macos") { "e5.dylib" } else { "e5.so" }),
+        plugins.join(if cfg!(target_os = "macos") {
+            "e5.dylib"
+        } else {
+            "e5.so"
+        }),
     )
     .unwrap();
     fs::write(

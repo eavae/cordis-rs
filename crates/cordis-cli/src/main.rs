@@ -1,9 +1,17 @@
 fn main() -> anyhow::Result<()> {
     let mut config = None;
     let mut plugins_dir = None;
+    let mut create_dir = None;
+    let mut force = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "create" => {
+                create_dir = args.next();
+            }
+            "--force" | "-f" => {
+                force = true;
+            }
             "-c" | "--config" => {
                 config = args.next();
             }
@@ -12,7 +20,7 @@ fn main() -> anyhow::Result<()> {
             }
             "-h" | "--help" => {
                 println!(
-                    "cordis {} — usage: cordis [-c cordis.yml] [--plugins-dir plugins]",
+                    "cordis {} — usage: cordis create <name> | cordis [-c cordis.yml] [--plugins-dir plugins]",
                     env!("CARGO_PKG_VERSION")
                 );
                 return Ok(());
@@ -22,6 +30,10 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(2);
             }
         }
+    }
+
+    if let Some(dir) = create_dir {
+        return cordis_cli::create_project(std::path::Path::new(&dir), force);
     }
 
     let options = cordis_cli::CliOptions {
