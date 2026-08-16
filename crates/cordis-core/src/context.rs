@@ -175,6 +175,11 @@ impl Context {
         &self.fiber
     }
 
+    /// Resolves the isolate label for `name` along this context's chain.
+    pub fn isolate_label(&self, name: &str) -> Option<Label> {
+        self.inner.isolate_label(name)
+    }
+
     /// Looks up a service by name.
     ///
     /// Returns `None` when no active provider is visible from this context
