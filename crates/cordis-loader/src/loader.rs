@@ -80,6 +80,7 @@ impl Loader {
                         if let Some(fiber) = fiber
                             && !no_save
                             && let Some(entry) = loader.find_entry_for_fiber(&fiber)
+                            && !loader.fiber_is_root_of(&entry, &fiber)
                             && let Ok(config) = args[0].clone().downcast::<serde_yaml_ng::Value>()
                         {
                             let mut options = entry.options.borrow().clone();
@@ -111,6 +112,7 @@ impl Loader {
                         if !no_save
                             && let Some(fiber) = fiber
                             && let Some(entry) = loader.find_entry_for_fiber(&fiber)
+                            && !loader.fiber_is_root_of(&entry, &fiber)
                         {
                             loader.show_log("reload", &entry);
                         }
@@ -136,6 +138,15 @@ impl Loader {
                         let Some(fiber) = fiber else {
                             return Ok(None);
                         };
+                        // Merging entry-level inject happens on fiber
+                        // creation (story card C8); the entry is reachable
+                        // from the root fiber's parent context.
+                        if fiber.uid.get().is_some()
+                            && let Some(entry) = loader.find_entry_for_parent(&fiber)
+                        {
+                            entry.merge_inject_into(&fiber);
+                            return Ok(None);
+                        }
                         // Only care about disposals (`uid` becomes None).
                         if fiber.uid.get().is_some() {
                             return Ok(None);
@@ -165,6 +176,30 @@ impl Loader {
                 .map(|candidate| Rc::ptr_eq(candidate, fiber))
                 .unwrap_or(false)
         })
+    }
+
+    /// Finds the entry whose own context is `fiber`'s parent context (the
+    /// entry's root fiber; mirrors `fiber.parent[Entry.key]`).
+    fn find_entry_for_parent(&self, fiber: &Rc<Fiber>) -> Option<Rc<Entry>> {
+        let parent = fiber.parent.as_ref()?;
+        self.tree
+            .entries()
+            .into_iter()
+            .find(|entry| parent.shares_inner(&entry.ctx))
+    }
+
+    /// Whether `fiber` is the root fiber of `entry` (mirrors
+    /// `fiber.parent.fiber?.entry === fiber.entry`: child fibers under the
+    /// same entry must not write back to the entry's config).
+    fn fiber_is_root_of(&self, entry: &Rc<Entry>, fiber: &Rc<Fiber>) -> bool {
+        let Some(root) = entry.fiber.borrow().clone() else {
+            return false;
+        };
+        fiber
+            .parent
+            .as_ref()
+            .map(|parent| Rc::ptr_eq(parent.fiber(), &root))
+            .unwrap_or(false)
     }
 
     /// The builtin group plugin: syncs the entry's subgroup from its config.

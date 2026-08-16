@@ -401,6 +401,19 @@ impl Entry {
         entry
     }
 
+    /// Merges this entry's `inject` declarations into `fiber`'s inject map
+    /// (mirrors `Inject.resolve(entry.options.inject, fiber.inject)`; the
+    /// entry's declaration wins on conflicts).
+    pub(crate) fn merge_inject_into(&self, fiber: &Rc<Fiber>) {
+        let Some(names) = self.options.borrow().inject.clone() else {
+            return;
+        };
+        let mut inject = fiber.inject.borrow_mut();
+        for name in names {
+            inject.insert(name, None);
+        }
+    }
+
     /// Rebuilds the entry's top isolate/intercept layers from its options.
     fn apply_realm_layers(&self) {
         self.ctx.clear_isolate_layer();

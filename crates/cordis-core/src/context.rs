@@ -207,6 +207,12 @@ impl Context {
         &self.fiber
     }
 
+    /// Whether both contexts share the same inner state segment (used by the
+    /// loader to identify an entry's own context).
+    pub fn shares_inner(&self, other: &Context) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// Resolves the isolate label for `name` along this context's chain.
     pub fn isolate_label(&self, name: &str) -> Option<Label> {
         self.inner.isolate_label(name)
