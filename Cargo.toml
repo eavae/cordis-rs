@@ -11,6 +11,7 @@ members = [
     "crates/cordis-utils",
     "crates/cordis-sdk",
     "crates/cordis-macros",
+    "crates/cordis-plugin-hmr",
     "crates/cordis-cli",
     "fixtures/hello-plugin",
     "fixtures/bad-version",
@@ -37,6 +38,7 @@ minijinja = "2"
 
 # Plugin loading (`.so` / `.dylib` / `.dll`)
 libloading = "0.8"
+notify = "8"
 
 # Errors
 anyhow = "1"

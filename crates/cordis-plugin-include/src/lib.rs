@@ -152,6 +152,43 @@ async fn mount_include(
     }));
 }
 
+/// Refreshes the include entry whose config file is `filename` (F1: config
+/// file changes trigger a reload of the include tree instead of an HMR).
+pub async fn refresh_include_file(loader: &Loader, filename: &Path) -> bool {
+    let canonical = match fs::canonicalize(filename) {
+        Ok(path) => path,
+        Err(_) => filename.to_path_buf(),
+    };
+    for entry in loader.tree_handle().entries() {
+        let Some(config) = entry.options.borrow().config.clone() else {
+            continue;
+        };
+        let Ok(config) = serde_yaml_ng::from_value::<IncludeConfig>(config) else {
+            continue;
+        };
+        let candidate = fs::canonicalize(resolve_path(&config.path))
+            .unwrap_or_else(|_| resolve_path(&config.path));
+        if candidate != canonical {
+            continue;
+        }
+        let Some(subgroup) = entry.subgroup.borrow().clone() else {
+            continue;
+        };
+        if fs::read_to_string(&canonical).is_err() {
+            continue;
+        }
+        let data = parse_config(&canonical).unwrap_or_default();
+        let patched = apply_patches(
+            data,
+            config.patches.as_deref().unwrap_or_default(),
+            &entry.ctx,
+        );
+        loader.read_group(&subgroup, patched).await;
+        return true;
+    }
+    false
+}
+
 /// Shared per-instance state for the debounced write-back path.
 struct IncludeWriteState {
     filename: PathBuf,

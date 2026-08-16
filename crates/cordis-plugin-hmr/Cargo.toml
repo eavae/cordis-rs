@@ -1,0 +1,22 @@
+[package]
+name = "cordis-plugin-hmr"
+description = "Cordis HMR plugin: file watching, dependency classification, reload"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cordis-core = { path = "../cordis-core" }
+cordis-loader = { path = "../cordis-loader" }
+cordis-plugin-include = { path = "../cordis-plugin-include" }
+tokio.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+anyhow.workspace = true
