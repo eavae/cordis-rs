@@ -118,11 +118,11 @@ impl EntryTree {
         tree
     }
 
-    /// Resolves a plugin by name; `cordis:` names hit builtins.
+    /// Resolves a plugin by name. `cordis:` names hit builtins only; other
+    /// names resolve through user-registered plugins first, with builtin
+    /// aliases as a fallback (mirrors the TS loader, where `cordis:` hits
+    /// builtins and package names are user-resolvable).
     pub fn import(&self, name: &str) -> Result<Plugin, String> {
-        if let Some(plugin) = self.builtins.borrow().get(name).cloned() {
-            return Ok(plugin);
-        }
         if let Some(builtin) = name.strip_prefix("cordis:") {
             return self
                 .builtins
@@ -131,11 +131,13 @@ impl EntryTree {
                 .cloned()
                 .ok_or_else(|| format!("cannot resolve builtin \"{name}\""));
         }
-        self.plugins
-            .borrow()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| format!("cannot resolve plugin \"{name}\""))
+        if let Some(plugin) = self.plugins.borrow().get(name).cloned() {
+            return Ok(plugin);
+        }
+        if let Some(plugin) = self.builtins.borrow().get(name).cloned() {
+            return Ok(plugin);
+        }
+        Err(format!("cannot resolve plugin \"{name}\""))
     }
 
     /// Registers a plugin under a name (mock/builtin table).

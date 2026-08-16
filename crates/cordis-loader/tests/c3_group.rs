@@ -234,3 +234,40 @@ async fn group_plugin_selection_follows_entry_name() {
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn user_plugin_overrides_builtin_group_alias() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let loader = Loader::new(&root);
+            let applied = Rc::new(Cell::new(0u32));
+            let applied_apply = applied.clone();
+            loader.mock(
+                "@cordisjs/plugin-group",
+                Rc::new(move |_ctx: &Context, _config| {
+                    applied_apply.set(applied_apply.get() + 1);
+                    Effect::None
+                }),
+            );
+            let tree = loader.tree_handle();
+            let entry = tree.create(
+                EntryOptions {
+                    name: "@cordisjs/plugin-group".to_string(),
+                    config: Some(serde_yaml_ng::to_value(Vec::<EntryOptions>::new()).unwrap()),
+                    group: Some(true),
+                    ..group_opts("", Vec::new())
+                },
+                None,
+                0,
+            );
+            tree.await_tree().await;
+            assert_eq!(applied.get(), 1);
+            assert!(
+                entry.subgroup.borrow().is_none(),
+                "a user-registered plugin must shadow the builtin group alias"
+            );
+        })
+        .await;
+}
