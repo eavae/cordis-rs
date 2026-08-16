@@ -6,6 +6,8 @@
 use std::future::Future;
 use std::time::Duration;
 
+pub mod isolate;
+
 /// Handle to the paused fake clock created by [`with_timers`].
 ///
 /// Equivalent to Vitest's fake timers (`vi.useFakeTimers`): while the handle
