@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::task::{Context as TaskContext, Poll};
 
 use cordis_core::{
-    AsyncDisposerStream, Context, Effect, EffectItem, EffectMeta, EventsService, Plugin,
-    async_disposer, sync_disposer,
+    AsyncDisposerStream, Context, Effect, EffectItem, EffectMeta, EventOptions, Plugin,
+    async_disposer, event_listener, sync_disposer,
 };
 
 use super::Timers;
@@ -175,14 +175,22 @@ async fn effects_yield_dispose() {
         .run_until(async {
             let root = Context::new();
             let seq = Seq::new();
-            let on_effect = {
-                let events = root.get::<EventsService>().unwrap();
-                events.on(&root, "custom-event", |_| {}).unwrap()
-            };
+            let on_effect = root
+                .on(
+                    "custom-event",
+                    event_listener(|_| {}),
+                    EventOptions::default(),
+                )
+                .unwrap();
             let nested = {
                 let seq = seq.clone();
-                let events = root.get::<EventsService>().unwrap();
-                let on_effect = events.on(&root, "custom-event", |_| {}).unwrap();
+                let on_effect = root
+                    .on(
+                        "custom-event",
+                        event_listener(|_| {}),
+                        EventOptions::default(),
+                    )
+                    .unwrap();
                 let seq2 = seq.clone();
                 root.effect(
                     move || {
@@ -217,8 +225,14 @@ async fn effects_yield_dispose() {
                 )
                 .unwrap()
             };
-            let events = root.get::<EventsService>().unwrap();
-            drop(events.on(&root, "custom-event", |_| {}).unwrap());
+            drop(
+                root.on(
+                    "custom-event",
+                    event_listener(|_| {}),
+                    EventOptions::default(),
+                )
+                .unwrap(),
+            );
 
             // Root-level metadata only includes the outer anonymous effect
             // and the standalone listener; nested effects are owned by their

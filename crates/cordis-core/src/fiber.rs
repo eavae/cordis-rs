@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::task::Poll;
 
 use crate::context::{Context, ContextInner, StoreEntry};
+use crate::events::{EventCallback, WaterfallNext, run_waterfall_step};
 use crate::registry::Runtime;
 use crate::service::{ApplyFn, BoxFuture, Disposer, Effect, EffectItem, sync_disposer};
 
@@ -112,6 +113,12 @@ pub(crate) enum Disposable {
     Direct(Disposer),
     /// A nested effect handle.
     Effect(Rc<EffectHandle>),
+}
+
+/// A fiber-level internal hook (e.g. `internal/update`).
+#[derive(Clone)]
+pub(crate) struct InternalHook {
+    pub callback: EventCallback,
 }
 
 /// The optional background task produced by an async effect or apply.
@@ -300,6 +307,8 @@ pub struct Fiber {
     pub(crate) inertia: RefCell<Inertia>,
     /// The dispose handle registered on the parent fiber.
     pub(crate) dispose: RefCell<Option<Rc<EffectHandle>>>,
+    /// Fiber-level internal hooks.
+    pub(crate) _hooks: RefCell<HashMap<String, Vec<InternalHook>>>,
 }
 
 impl Fiber {
@@ -319,6 +328,7 @@ impl Fiber {
             disposables: RefCell::new(Vec::new()),
             inertia: RefCell::new(Inertia::default()),
             dispose: RefCell::new(None),
+            _hooks: RefCell::new(HashMap::new()),
         })
     }
 
@@ -338,6 +348,14 @@ impl Fiber {
             fiber = current.parent.as_ref().map(|parent| &**parent.fiber());
         }
         "root".to_string()
+    }
+
+    /// Returns the context owned by this fiber.
+    pub fn context(self: &Rc<Self>) -> Context {
+        Context {
+            inner: self.ctx.clone(),
+            fiber: self.clone(),
+        }
     }
 
     /// Asserts the fiber is not disposed.
@@ -447,10 +465,72 @@ impl Fiber {
         let this = self.clone();
         Box::pin(async move {
             this.assert_active()?;
-            *this.config.borrow_mut() = config;
-            *this.error.borrow_mut() = None;
-            this.restart().await
+            let hooks = this
+                ._hooks
+                .borrow()
+                .get("internal/update")
+                .cloned()
+                .unwrap_or_default();
+            let applied = Rc::new(Cell::new(false));
+            let this_for_tail = this.clone();
+            let config_for_tail = config.clone();
+            let applied_for_tail = applied.clone();
+            let tail: WaterfallNext = Rc::new(move || {
+                *this_for_tail.config.borrow_mut() = config_for_tail.clone();
+                *this_for_tail.error.borrow_mut() = None;
+                applied_for_tail.set(true);
+                None
+            });
+            let args: Vec<Rc<dyn Any>> = vec![config.unwrap_or_else(|| Rc::new(()) as Rc<dyn Any>)];
+            let callbacks = Rc::new(RefCell::new(
+                hooks
+                    .into_iter()
+                    .map(|hook| hook.callback)
+                    .collect::<Vec<_>>(),
+            ));
+            let _ = run_waterfall_step(callbacks, args, tail);
+            if applied.get() {
+                this.restart().await
+            } else {
+                Ok(())
+            }
         })
+    }
+
+    /// Registers a fiber-level internal hook (mirrors the `EventsService`
+    /// constructor path for `internal/update`).
+    pub fn register_internal_hook(
+        self: &Rc<Self>,
+        event: &str,
+        callback: EventCallback,
+        prepend: bool,
+    ) -> Result<Rc<EffectHandle>, CordisError> {
+        let event = event.to_string();
+        let this = self.clone();
+        let effect_label = format!("ctx.on({event:?})");
+        self.effect(
+            move || {
+                let hook = InternalHook {
+                    callback: callback.clone(),
+                };
+                let mut hooks_borrow = this._hooks.borrow_mut();
+                let list = hooks_borrow.entry(event.clone()).or_default();
+                if prepend {
+                    list.insert(0, hook);
+                } else {
+                    list.push(hook);
+                }
+                drop(hooks_borrow);
+                let this = this.clone();
+                let event = event.clone();
+                Effect::Disposer(sync_disposer(move || {
+                    if let Some(list) = this._hooks.borrow_mut().get_mut(&event) {
+                        list.retain(|hook| !Rc::ptr_eq(&hook.callback, &callback));
+                    }
+                }))
+            },
+            &effect_label,
+        )
     }
 
     /// Disposes the fiber (unregisters from its runtime, unloads effects).

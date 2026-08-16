@@ -127,6 +127,7 @@ impl RegistryService {
             disposables: RefCell::new(Vec::new()),
             inertia: RefCell::new(Default::default()),
             dispose: RefCell::new(None),
+            _hooks: RefCell::new(HashMap::new()),
         });
 
         // Mirror `parent.fiber.effect(...)` in fiber.ts: the registration

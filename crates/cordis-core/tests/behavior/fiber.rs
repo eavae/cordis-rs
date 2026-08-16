@@ -8,7 +8,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use cordis_core::{
-    Context, Effect, EventsService, FiberState, LoggerService, Plugin, Service, async_disposer,
+    Context, Effect, EventOptions, FiberState, LoggerService, Plugin, Service, async_disposer,
+    event_listener,
 };
 
 #[derive(Debug)]
@@ -191,14 +192,16 @@ async fn fiber_plugin_error() {
             let apply = {
                 let callback_hit = callback_hit.clone();
                 Rc::new(move |ctx: &Context, config: &Rc<dyn std::any::Any>| {
-                    let events = ctx.get::<EventsService>().expect("events");
                     let callback_hit = callback_hit.clone();
                     drop(
-                        events
-                            .on(ctx, "custom", move |_| {
+                        ctx.on(
+                            "custom",
+                            event_listener(move |_| {
                                 callback_hit.set(callback_hit.get() + 1);
-                            })
-                            .unwrap(),
+                            }),
+                            EventOptions::default(),
+                        )
+                        .unwrap(),
                     );
                     let config = config.downcast_ref::<PluginConfig>().expect("config");
                     if !config.foo {
@@ -238,7 +241,7 @@ async fn fiber_plugin_error() {
                 "apply error must be logged exactly once"
             );
 
-            root.get::<EventsService>().unwrap().emit("custom", &[]);
+            root.emit("custom", &[]);
             assert_eq!(callback_hit.get(), 1);
         })
         .await;

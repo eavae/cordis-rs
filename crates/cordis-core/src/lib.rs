@@ -13,7 +13,10 @@ pub mod registry;
 pub mod service;
 
 pub use context::Context;
-pub use events::EventsService;
+pub use events::{
+    AnyNext, EventCallback, EventFilter, EventOptions, EventsService, ListenerFilter,
+    ParallelError, WaterfallNext, event_listener,
+};
 pub use fiber::{CordisError, EffectHandle, EffectMeta, Fiber, FiberError, FiberState, disposer};
 pub use logger::LoggerService;
 pub use reflect::ReflectService;

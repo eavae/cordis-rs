@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::task::{Poll, Waker};
 
 pub mod dispose;
+pub mod events;
 pub mod fiber;
 pub mod isolate;
 pub mod plugin;

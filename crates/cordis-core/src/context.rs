@@ -14,7 +14,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::fiber::{EffectHandle, Fiber, FiberState};
+use crate::events::{EventCallback, EventFilter, EventOptions, ParallelError};
+use crate::fiber::{CordisError, EffectHandle, Fiber, FiberState};
 use crate::registry::{Plugin, RegistryService};
 use crate::service::{ApplyFn, Config, Effect, Service};
 use crate::{EventsService, LoggerService, ReflectService};
@@ -372,6 +373,107 @@ impl Context {
         F: FnOnce() -> Effect,
     {
         self.fiber.effect(execute, label)
+    }
+
+    /// Registers an event listener (mirrors `ctx.on`).
+    pub fn on(
+        &self,
+        event: &str,
+        callback: EventCallback,
+        options: EventOptions,
+    ) -> Result<Rc<EffectHandle>, CordisError> {
+        self.get::<EventsService>()
+            .expect("events service")
+            .on(self, event, callback, options)
+    }
+
+    /// Registers a listener with an attached filter.
+    pub fn on_filtered(
+        &self,
+        event: &str,
+        callback: EventCallback,
+        options: EventOptions,
+        filter: crate::events::ListenerFilter,
+    ) -> Result<Rc<EffectHandle>, CordisError> {
+        self.get::<EventsService>()
+            .expect("events service")
+            .on_filtered(self, event, callback, options, filter)
+    }
+
+    /// Registers a one-shot event listener (mirrors `ctx.once`).
+    pub fn once(
+        &self,
+        event: &str,
+        callback: EventCallback,
+        options: EventOptions,
+    ) -> Result<Rc<EffectHandle>, CordisError> {
+        self.get::<EventsService>()
+            .expect("events service")
+            .once(self, event, callback, options)
+    }
+
+    /// Emits an event (mirrors `ctx.emit`).
+    pub fn emit(&self, event: &str, args: &[Rc<dyn Any>]) {
+        self.get::<EventsService>()
+            .expect("events service")
+            .emit(self, event, args);
+    }
+
+    /// Emits with a filter (mirrors `ctx.emit(thisArg, name, ...)`).
+    pub fn emit_with(&self, event: &str, args: &[Rc<dyn Any>], this_arg: &dyn EventFilter) {
+        self.get::<EventsService>()
+            .expect("events service")
+            .emit_with(self, event, args, Some(this_arg));
+    }
+
+    /// Runs listeners concurrently (mirrors `ctx.parallel`).
+    pub async fn parallel(
+        &self,
+        event: &str,
+        args: &[Rc<dyn Any>],
+        this_arg: Option<&dyn EventFilter>,
+    ) -> Result<(), ParallelError> {
+        self.get::<EventsService>()
+            .expect("events service")
+            .parallel(self, event, args, this_arg)
+            .await
+    }
+
+    /// Runs listeners sequentially (mirrors `ctx.serial`).
+    pub async fn serial(
+        &self,
+        event: &str,
+        args: &[Rc<dyn Any>],
+        this_arg: Option<&dyn EventFilter>,
+    ) -> Result<Option<Rc<dyn Any>>, Box<dyn std::error::Error>> {
+        self.get::<EventsService>()
+            .expect("events service")
+            .serial(self, event, args, this_arg)
+            .await
+    }
+
+    /// Runs listeners synchronously with bail semantics (mirrors `ctx.bail`).
+    pub fn bail(
+        &self,
+        event: &str,
+        args: &[Rc<dyn Any>],
+        this_arg: Option<&dyn EventFilter>,
+    ) -> Result<Option<Rc<dyn Any>>, Box<dyn std::error::Error>> {
+        self.get::<EventsService>()
+            .expect("events service")
+            .bail(self, event, args, this_arg)
+    }
+
+    /// Runs listeners in a waterfall chain (mirrors `ctx.waterfall`).
+    pub fn waterfall(
+        &self,
+        event: &str,
+        args: &[Rc<dyn Any>],
+        tail: crate::events::WaterfallNext,
+    ) -> Result<Option<Rc<dyn Any>>, Box<dyn std::error::Error>> {
+        self.get::<EventsService>()
+            .expect("events service")
+            .waterfall(self, event, args, tail)
     }
 
     /// Notifies fibers that depend on `name` (mirrors `ReflectService.notify`).

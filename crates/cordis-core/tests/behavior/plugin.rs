@@ -3,7 +3,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use cordis_core::{Context, Effect, EventsService, Plugin, RegistryService, sync_disposer};
+use cordis_core::{
+    Context, Effect, EventOptions, Plugin, RegistryService, event_listener, sync_disposer,
+};
 
 #[derive(Debug)]
 struct Options {
@@ -112,9 +114,13 @@ async fn inactive_context() {
                                 ctx.effect(|| Effect::None, "x").is_err(),
                                 "effect on inactive context must fail"
                             );
-                            let events = ctx.get::<EventsService>().unwrap();
                             assert!(
-                                events.on(&ctx, "custom-event", |_| {}).is_err(),
+                                ctx.on(
+                                    "custom-event",
+                                    event_listener(|_| {}),
+                                    EventOptions::default(),
+                                )
+                                .is_err(),
                                 "on on inactive context must fail"
                             );
                         }))
@@ -219,10 +225,12 @@ async fn nested_plugins() {
                 }
             };
             drop(
-                root.get::<EventsService>()
-                    .unwrap()
-                    .on(&root, "custom-event", listener)
-                    .unwrap(),
+                root.on(
+                    "custom-event",
+                    event_listener(listener),
+                    EventOptions::default(),
+                )
+                .unwrap(),
             );
 
             let callback_hit2 = callback_hit.clone();
@@ -234,12 +242,14 @@ async fn nested_plugins() {
                 apply: Rc::new(move |ctx: &Context, _config| {
                     let callback_hit = callback_hit4.clone();
                     drop(
-                        ctx.get::<EventsService>()
-                            .unwrap()
-                            .on(ctx, "custom-event", move |_| {
+                        ctx.on(
+                            "custom-event",
+                            event_listener(move |_| {
                                 callback_hit.set(callback_hit.get() + 1);
-                            })
-                            .unwrap(),
+                            }),
+                            EventOptions::default(),
+                        )
+                        .unwrap(),
                     );
                     Effect::None
                 }),
@@ -250,12 +260,14 @@ async fn nested_plugins() {
                 apply: Rc::new(move |ctx: &Context, _config| {
                     let callback_hit = callback_hit3.clone();
                     drop(
-                        ctx.get::<EventsService>()
-                            .unwrap()
-                            .on(ctx, "custom-event", move |_| {
+                        ctx.on(
+                            "custom-event",
+                            event_listener(move |_| {
                                 callback_hit.set(callback_hit.get() + 1);
-                            })
-                            .unwrap(),
+                            }),
+                            EventOptions::default(),
+                        )
+                        .unwrap(),
                     );
                     let _ = ctx.plugin(&nested2, None);
                     Effect::None
@@ -267,12 +279,14 @@ async fn nested_plugins() {
                 apply: Rc::new(move |ctx: &Context, _config| {
                     let callback_hit = callback_hit2.clone();
                     drop(
-                        ctx.get::<EventsService>()
-                            .unwrap()
-                            .on(ctx, "custom-event", move |_| {
+                        ctx.on(
+                            "custom-event",
+                            event_listener(move |_| {
                                 callback_hit.set(callback_hit.get() + 1);
-                            })
-                            .unwrap(),
+                            }),
+                            EventOptions::default(),
+                        )
+                        .unwrap(),
                     );
                     let _ = ctx.plugin(&nested1, None);
                     Effect::None
@@ -284,27 +298,21 @@ async fn nested_plugins() {
             let registry = root.get::<RegistryService>().unwrap();
             assert_eq!(registry.size(), 3);
             assert_eq!(callback_hit.get(), 0);
-            root.get::<EventsService>()
-                .unwrap()
-                .emit("custom-event", &[]);
+            root.emit("custom-event", &[]);
             assert_eq!(callback_hit.get(), 4);
 
             callback_hit.set(0);
             fiber.dispose().await;
             tokio::task::yield_now().await;
             assert_eq!(registry.size(), 0);
-            root.get::<EventsService>()
-                .unwrap()
-                .emit("custom-event", &[]);
+            root.emit("custom-event", &[]);
             assert_eq!(callback_hit.get(), 1);
 
             // Subsequent disposal is a no-op.
             callback_hit.set(0);
             fiber.dispose().await;
             assert_eq!(registry.size(), 0);
-            root.get::<EventsService>()
-                .unwrap()
-                .emit("custom-event", &[]);
+            root.emit("custom-event", &[]);
             assert_eq!(callback_hit.get(), 1);
         })
         .await;
@@ -318,13 +326,15 @@ async fn compare_snapshot_after_registry_delete() {
             let root = Context::new();
             let callback_hit = Rc::new(Cell::new(0u32));
             drop(
-                root.get::<EventsService>()
-                    .unwrap()
-                    .on(&root, "custom-event", {
+                root.on(
+                    "custom-event",
+                    event_listener({
                         let callback_hit = callback_hit.clone();
                         move |_| callback_hit.set(callback_hit.get() + 1)
-                    })
-                    .unwrap(),
+                    }),
+                    EventOptions::default(),
+                )
+                .unwrap(),
             );
             let plugin = Plugin {
                 name: None,
@@ -334,12 +344,14 @@ async fn compare_snapshot_after_registry_delete() {
                     Rc::new(move |ctx: &Context, _config| {
                         let callback_hit = callback_hit.clone();
                         drop(
-                            ctx.get::<EventsService>()
-                                .unwrap()
-                                .on(ctx, "custom-event", move |_| {
+                            ctx.on(
+                                "custom-event",
+                                event_listener(move |_| {
                                     callback_hit.set(callback_hit.get() + 1);
-                                })
-                                .unwrap(),
+                                }),
+                                EventOptions::default(),
+                            )
+                            .unwrap(),
                         );
                         Effect::None
                     })
@@ -349,9 +361,7 @@ async fn compare_snapshot_after_registry_delete() {
             let before = callback_hit.get();
             let fiber = root.plugin(&plugin, None);
             fiber.wait().await.unwrap();
-            root.get::<EventsService>()
-                .unwrap()
-                .emit("custom-event", &[]);
+            root.emit("custom-event", &[]);
             assert_eq!(callback_hit.get(), before + 2, "root + plugin listener");
 
             let registry = root.get::<RegistryService>().unwrap();
@@ -359,17 +369,13 @@ async fn compare_snapshot_after_registry_delete() {
             tokio::task::yield_now().await;
             tokio::task::yield_now().await;
             callback_hit.set(0);
-            root.get::<EventsService>()
-                .unwrap()
-                .emit("custom-event", &[]);
+            root.emit("custom-event", &[]);
             assert_eq!(callback_hit.get(), 1, "only the root listener remains");
 
             let fiber = root.plugin(&plugin, None);
             fiber.wait().await.unwrap();
             callback_hit.set(0);
-            root.get::<EventsService>()
-                .unwrap()
-                .emit("custom-event", &[]);
+            root.emit("custom-event", &[]);
             assert_eq!(callback_hit.get(), 2);
         })
         .await;
