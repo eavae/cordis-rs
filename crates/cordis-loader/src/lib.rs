@@ -7,6 +7,7 @@ pub mod config;
 pub mod entry;
 pub mod evaluator;
 pub mod loader;
+pub mod so;
 
 pub use config::{atomic_write, parse_config, serialize_config, to_sorted_value};
 pub use entry::{Entry, EntryGroup, EntryOptions, EntryTree, IsolateValue, PartialEntryOptions};
@@ -14,3 +15,4 @@ pub use evaluator::{
     ConfigEvaluator, EvalEnv, EvalError, MinijinjaEvaluator, evaluate_config, reject_exprs,
 };
 pub use loader::{Loader, LoaderIntercept};
+pub use so::{LoadError, SoPlugin, is_plugin_path};

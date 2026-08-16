@@ -60,6 +60,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cordis-core",
+ "cordis-sdk",
+ "libloading",
  "minijinja",
  "serde",
  "serde_json",
