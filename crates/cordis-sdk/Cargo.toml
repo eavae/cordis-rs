@@ -16,3 +16,6 @@ all = "warn"
 [dependencies]
 cordis-core = { path = "../cordis-core" }
 cordis-macros = { path = "../cordis-macros" }
+
+[dev-dependencies]
+libloading.workspace = true

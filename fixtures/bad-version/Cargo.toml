@@ -1,0 +1,14 @@
+[package]
+name = "cordis-fixture-bad-version"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cordis-sdk = { path = "../../crates/cordis-sdk" }
+
+[lints.rust]
+unsafe_code = "allow"

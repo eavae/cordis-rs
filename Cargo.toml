@@ -12,6 +12,8 @@ members = [
     "crates/cordis-sdk",
     "crates/cordis-macros",
     "crates/cordis-cli",
+    "fixtures/hello-plugin",
+    "fixtures/bad-version",
 ]
 
 [workspace.package]

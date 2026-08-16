@@ -10,33 +10,29 @@ pub use cordis_core::{
 };
 pub use cordis_macros::{inject, service};
 
-/// The ABI version implemented by this SDK.
-pub const PLUGIN_API_VERSION: u32 = 1;
-
-/// Returns the plugin ABI version the host must match.
-#[unsafe(no_mangle)]
-pub extern "C" fn plugin_api_version() -> u32 {
-    PLUGIN_API_VERSION
-}
-
-/// Placeholder plugin entry (finalized in E2).
-#[unsafe(no_mangle)]
-pub extern "C" fn plugin_create() -> *mut () {
-    std::ptr::null_mut()
-}
-
-/// Placeholder plugin teardown (finalized in E2).
-#[unsafe(no_mangle)]
-pub extern "C" fn plugin_dispose(_handle: *mut ()) {}
+pub mod abi;
+pub use abi::{
+    HostVtable, PLUGIN_API_VERSION, PluginHandle, plugin_api_version, plugin_create, plugin_dispose,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    extern "C" fn noop_log(_message: *const std::ffi::c_char) {}
+
     #[test]
     fn abi_symbols_are_exported() {
         assert_eq!(plugin_api_version(), PLUGIN_API_VERSION);
-        assert!(plugin_create().is_null());
+        // SAFETY: the vtable is valid for the call.
+        let vtable = abi::HostVtable {
+            log: noop_log,
+            host_version: PLUGIN_API_VERSION,
+        };
+        let handle = unsafe { plugin_create(&vtable) };
+        assert!(!handle.is_null());
+        // SAFETY: handle comes from plugin_create.
+        unsafe { plugin_dispose(handle) };
     }
 
     #[test]
