@@ -449,6 +449,11 @@ impl Fiber {
         Ok(())
     }
 
+    /// Whether an inertia task is currently in flight.
+    pub fn inertia_active(&self) -> bool {
+        self.inertia.borrow().active
+    }
+
     /// Restarts the fiber: unloads current effects, re-resolves injects and
     /// applies the plugin again.
     pub fn restart(self: &Rc<Self>) -> BoxFuture<'static, Result<(), FiberError>> {

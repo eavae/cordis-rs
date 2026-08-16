@@ -7,6 +7,9 @@ use std::rc::Rc;
 use cordis_core::{Context, Fiber, Plugin};
 use serde::{Deserialize, Serialize};
 
+/// The tree's write callback (config write-back).
+pub type WriteCallback = Rc<dyn Fn()>;
+
 /// A single entry's options (mirrors `EntryOptions` in entry.ts).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EntryOptions {
@@ -59,16 +62,26 @@ impl EntryGroup {
     }
 }
 
+impl std::fmt::Debug for EntryGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntryGroup")
+            .field("entries", &self.entries.borrow().len())
+            .finish()
+    }
+}
+
 /// The entry tree container (mirrors `EntryTree` in tree.ts).
 pub struct EntryTree {
     pub ctx: Context,
     pub enable_logs: bool,
     /// Name → plugin table (builtins/mocks; `.so` loading arrives in E3).
-    pub plugins: RefCell<HashMap<String, Plugin>>,
+    pub plugins: Rc<RefCell<HashMap<String, Plugin>>>,
+    /// `cordis:` builtin plugins.
+    pub builtins: Rc<RefCell<HashMap<String, Plugin>>>,
     /// Called after every structural change (config write-back).
-    pub write_callback: RefCell<Option<Rc<dyn Fn()>>>,
-    pub root: RefCell<Option<Rc<EntryGroup>>>,
-    pub tasks: RefCell<usize>,
+    pub write_callback: Rc<RefCell<Option<WriteCallback>>>,
+    pub root: Rc<RefCell<Option<Rc<EntryGroup>>>>,
+    pub tasks: Rc<Cell<usize>>,
 }
 
 impl EntryTree {
@@ -80,18 +93,27 @@ impl EntryTree {
         let tree = Rc::new(EntryTree {
             ctx: ctx.clone(),
             enable_logs: true,
-            plugins: RefCell::new(HashMap::new()),
-            write_callback: RefCell::new(None),
-            root: RefCell::new(None),
-            tasks: RefCell::new(0),
+            plugins: Rc::new(RefCell::new(HashMap::new())),
+            builtins: Rc::new(RefCell::new(HashMap::new())),
+            write_callback: Rc::new(RefCell::new(None)),
+            root: Rc::new(RefCell::new(None)),
+            tasks: Rc::new(Cell::new(0)),
         });
         let root = EntryGroup::new(tree.clone(), ctx.clone(), None);
         *tree.root.borrow_mut() = Some(root);
         tree
     }
 
-    /// Resolves a plugin by name (builtins/mocks for now; `.so` in E3).
+    /// Resolves a plugin by name; `cordis:` names hit builtins.
     pub fn import(&self, name: &str) -> Result<Plugin, String> {
+        if let Some(builtin) = name.strip_prefix("cordis:") {
+            return self
+                .builtins
+                .borrow()
+                .get(builtin)
+                .cloned()
+                .ok_or_else(|| format!("cannot resolve builtin \"{name}\""));
+        }
         self.plugins
             .borrow()
             .get(name)
@@ -113,7 +135,21 @@ impl EntryTree {
 
     /// The number of pending init tasks.
     pub fn get_tasks(&self) -> usize {
-        *self.tasks.borrow()
+        let pending = self
+            .entries()
+            .iter()
+            .filter(|entry| {
+                entry.init_task.get()
+                    || entry
+                        .fiber
+                        .borrow()
+                        .as_ref()
+                        .map(|fiber| fiber.inertia_active())
+                        .unwrap_or(false)
+                    || (entry.fiber.borrow().is_none() && !entry.disabled())
+            })
+            .count();
+        (self.tasks.get()).max(pending)
     }
 
     /// All entries in the tree (depth-first).
@@ -130,6 +166,161 @@ impl EntryTree {
     pub fn resolve(&self, id: &str) -> Option<Rc<Entry>> {
         self.entries().into_iter().find(|entry| entry.id() == id)
     }
+
+    /// Resolves an entry by id, walking nested groups via `:` separators.
+    pub fn resolve_path(&self, id: &str) -> Result<Rc<Entry>, String> {
+        let parts: Vec<&str> = id.split(Self::SEP).collect();
+        let tree: &EntryTree = self;
+        let mut current: Rc<EntryGroup> = tree
+            .root
+            .borrow()
+            .clone()
+            .ok_or_else(|| format!("cannot resolve entry {id}"))?;
+        for (index, part) in parts.iter().enumerate() {
+            let is_last = index + 1 == parts.len();
+            let entry = current
+                .entries
+                .borrow()
+                .iter()
+                .find(|entry| entry.options.borrow().id == *part)
+                .cloned()
+                .ok_or_else(|| format!("cannot resolve entry {id}"))?;
+            if is_last {
+                return Ok(entry);
+            }
+            current = entry
+                .subgroup
+                .borrow()
+                .clone()
+                .ok_or_else(|| format!("cannot resolve entry {id}"))?;
+        }
+        Err(format!("cannot resolve entry {id}"))
+    }
+
+    /// Resolves a group; `None` resolves the root group.
+    pub fn resolve_group(&self, id: Option<&str>) -> Result<Rc<EntryGroup>, String> {
+        match id {
+            None => self
+                .root
+                .borrow()
+                .clone()
+                .ok_or_else(|| "tree has no root".to_string()),
+            Some(id) => {
+                let entry = self.resolve_path(id)?;
+                entry
+                    .subgroup
+                    .borrow()
+                    .clone()
+                    .ok_or_else(|| format!("entry {id} is not a group"))
+            }
+        }
+    }
+
+    /// Generates a non-colliding 8-character hex id (mirrors `ensureId`).
+    pub fn ensure_id(&self, options: &mut EntryOptions) -> String {
+        if !options.id.is_empty() {
+            return options.id.clone();
+        }
+        loop {
+            let id = random_hex(8);
+            if !self
+                .entries()
+                .iter()
+                .any(|entry| entry.options.borrow().id == id)
+            {
+                options.id = id.clone();
+                return id;
+            }
+        }
+    }
+
+    /// Creates an entry under a parent group (mirrors `tree.create`).
+    pub fn create(
+        self: &Rc<Self>,
+        options: EntryOptions,
+        parent: Option<&str>,
+        position: usize,
+    ) -> Rc<Entry> {
+        let group = self
+            .resolve_group(parent)
+            .expect("cannot resolve parent group");
+        let mut options = options;
+        self.ensure_id(&mut options);
+        let entry = Entry::new(self.clone(), group.clone(), options.clone());
+        let mut entries = group.entries.borrow_mut();
+        let position = position.min(entries.len());
+        entries.insert(position, entry.clone());
+        drop(entries);
+        self.write();
+        entry.update(PartialEntryOptions::from_options(&options), true, false);
+        let this = entry.clone();
+        tokio::task::spawn_local(async move {
+            this.init().await;
+        });
+        entry
+    }
+
+    /// Removes an entry (mirrors `tree.remove`).
+    pub fn remove(&self, id: &str) {
+        let entry = self
+            .resolve_path(id)
+            .unwrap_or_else(|error| panic!("{error}"));
+        entry
+            .parent
+            .entries
+            .borrow_mut()
+            .retain(|item| !Rc::ptr_eq(item, &entry));
+        if let Some(fiber) = entry.fiber.borrow().clone() {
+            tokio::task::spawn_local(fiber.dispose());
+        }
+        self.write();
+    }
+
+    /// Awaits all pending entry tasks (mirrors `tree.await`).
+    pub async fn await_tree(&self) {
+        loop {
+            let tasks = self.get_tasks();
+            if tasks == 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+fn random_hex(length: usize) -> String {
+    let mut result = String::with_capacity(length);
+    for _ in 0..length {
+        let digit = (fast_random() % 16) as u8;
+        result.push(char::from_digit(digit as u32, 16).expect("hex digit"));
+    }
+    result
+}
+
+fn fast_random() -> u64 {
+    use std::cell::Cell;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    thread_local! {
+        static STATE: Cell<u64> = const { Cell::new(0) };
+    }
+    STATE.with(|state| {
+        let seed = state.get();
+        let next = if seed == 0 {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(1)
+        } else {
+            seed
+        };
+        // xorshift
+        let mut x = next;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        state.set(x);
+        x
+    })
 }
 
 fn collect_entries(group: &Rc<EntryGroup>, result: &mut Vec<Rc<Entry>>) {
@@ -272,13 +463,13 @@ impl Entry {
             return Ok(());
         }
         let plugin = self.tree.import(&self.options.borrow().name)?;
-        *self.tree.tasks.borrow_mut() += 1;
+        self.tree.tasks.set(self.tree.tasks.get() + 1);
         let fiber = self
             .ctx
             .registry_plugin(&plugin, self.resolve_config_value());
         *self.fiber.borrow_mut() = Some(fiber.clone());
         let result = fiber.wait().await.map_err(|error| error.to_string());
-        *self.tree.tasks.borrow_mut() -= 1;
+        self.tree.tasks.set(self.tree.tasks.get().saturating_sub(1));
         result
     }
 

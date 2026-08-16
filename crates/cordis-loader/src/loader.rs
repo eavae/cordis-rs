@@ -1,7 +1,6 @@
 //! The Loader service (story cards C1/C6).
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::ops::Deref;
 use std::rc::Rc;
 
 use cordis_core::{AnyNext, ApplyFn, Context, EventOptions, Fiber, Plugin, Service};
@@ -11,11 +10,7 @@ use crate::entry::{Entry, EntryGroup, EntryOptions, EntryTree, PartialEntryOptio
 /// The plugin loader service (mirrors `Loader` in loader/index.ts).
 pub struct Loader {
     pub ctx: Context,
-    pub enable_logs: bool,
-    pub plugins: RefCell<HashMap<String, Plugin>>,
-    pub write_callback: RefCell<Option<Rc<dyn Fn()>>>,
-    pub root: RefCell<Option<Rc<EntryGroup>>>,
-    pub tasks: RefCell<usize>,
+    pub tree: Rc<EntryTree>,
     pub name: &'static str,
 }
 
@@ -23,37 +18,33 @@ impl Service for Loader {
     const NAME: &'static str = "loader";
 }
 
+impl Deref for Loader {
+    type Target = EntryTree;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tree
+    }
+}
+
 impl Loader {
     /// Creates a loader on `ctx`, provides `ctx.loader` and registers the
     /// internal hooks (write-back, reload log, self-dispose).
     pub fn new(ctx: &Context) -> Rc<Self> {
+        let tree = EntryTree::new(ctx);
         let loader = Rc::new(Loader {
             ctx: ctx.clone(),
-            enable_logs: true,
-            plugins: RefCell::new(HashMap::new()),
-            write_callback: RefCell::new(None),
-            root: RefCell::new(None),
-            tasks: RefCell::new(0),
+            tree,
             name: "loader",
         });
-        let root = EntryGroup::new(loader.tree_handle(), ctx.clone(), None);
-        *loader.root.borrow_mut() = Some(root);
 
         drop(ctx.provide::<Loader>(loader.clone()).unwrap());
         loader.register_internal_hooks();
         loader
     }
 
-    /// Converts this loader into an [`EntryTree`] handle for groups.
-    pub(crate) fn tree_handle(&self) -> Rc<EntryTree> {
-        Rc::new(EntryTree {
-            ctx: self.ctx.clone(),
-            enable_logs: self.enable_logs,
-            plugins: self.plugins.clone(),
-            write_callback: self.write_callback.clone(),
-            root: self.root.clone(),
-            tasks: self.tasks.clone(),
-        })
+    /// Returns the underlying tree handle.
+    pub fn tree_handle(&self) -> Rc<EntryTree> {
+        Rc::clone(&self.tree)
     }
 
     fn register_internal_hooks(self: &Rc<Self>) {
@@ -121,7 +112,7 @@ impl Loader {
     }
 
     fn find_entry_for_fiber(&self, fiber: &Rc<Fiber>) -> Option<Rc<Entry>> {
-        self.entries().into_iter().find(|entry| {
+        self.tree.entries().into_iter().find(|entry| {
             entry
                 .fiber
                 .borrow()
@@ -131,19 +122,9 @@ impl Loader {
         })
     }
 
-    /// All entries (depth-first).
-    pub fn entries(&self) -> Vec<Rc<Entry>> {
-        let mut result = Vec::new();
-        let root = self.root.borrow();
-        if let Some(root) = root.as_ref() {
-            collect(root, &mut result);
-        }
-        result
-    }
-
     /// Reads a config list and reconciles the tree (mirrors `tree.read`).
     pub async fn read(&self, configs: Vec<EntryOptions>) {
-        let root = self.root.borrow().clone().expect("root");
+        let root = self.tree.root.borrow().clone().expect("root");
         self.read_group(&root, configs).await;
     }
 
@@ -192,7 +173,7 @@ impl Loader {
 
     /// Registers a mock plugin under a name (test helper, mirrors `mock`).
     pub fn mock(&self, name: &str, apply: ApplyFn) -> String {
-        self.plugins.borrow_mut().insert(
+        self.tree.plugins.borrow_mut().insert(
             name.to_string(),
             Plugin {
                 name: None,
@@ -205,7 +186,8 @@ impl Loader {
 
     /// The fiber of the entry with the given id (test helper).
     pub fn expect_fiber(&self, id: &str) -> Rc<Fiber> {
-        self.entries()
+        self.tree
+            .entries()
             .into_iter()
             .find(|entry| entry.id() == id)
             .and_then(|entry| entry.fiber.borrow().clone())
@@ -214,18 +196,10 @@ impl Loader {
 
     /// The raw entry data (test helper, mirrors `loader.data`).
     pub fn data(&self) -> Vec<EntryOptions> {
-        self.entries()
+        self.tree
+            .entries()
             .iter()
             .map(|entry| entry.options.borrow().clone())
             .collect()
-    }
-}
-
-fn collect(group: &Rc<EntryGroup>, result: &mut Vec<Rc<Entry>>) {
-    for entry in group.entries.borrow().iter() {
-        result.push(entry.clone());
-        if let Some(subgroup) = &*entry.subgroup.borrow() {
-            collect(subgroup, result);
-        }
     }
 }
