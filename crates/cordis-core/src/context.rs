@@ -563,6 +563,14 @@ impl Context {
         self.plugin_with_validator(plugin, config, None)
     }
 
+    /// Registers a plugin via the registry service (used by the loader).
+    pub fn registry_plugin(&self, plugin: &Plugin, config: Option<Rc<dyn Any>>) -> Rc<Fiber> {
+        let registry = self
+            .get::<RegistryService>()
+            .expect("registry service must be present");
+        registry.plugin(self, plugin, config)
+    }
+
     /// Registers a plugin with a config validator (story card B12).
     pub fn plugin_with_validator(
         &self,
@@ -706,7 +714,7 @@ impl Context {
     }
 
     /// Notifies fibers that depend on `name` (mirrors `ReflectService.notify`).
-    pub(crate) fn notify(&self, name: &str) -> Vec<Rc<Fiber>> {
+    pub fn notify(&self, name: &str) -> Vec<Rc<Fiber>> {
         let Some(registry) = self.get::<RegistryService>() else {
             return Vec::new();
         };

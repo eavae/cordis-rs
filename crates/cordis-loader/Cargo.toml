@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 cordis-core = { path = "../cordis-core" }
+tokio.workspace = true
 serde.workspace = true
 serde_yaml_ng.workspace = true
 minijinja.workspace = true

@@ -133,6 +133,19 @@ impl EventsService {
         self.on_impl(ctx, event, callback, options, None, &effect_label)
     }
 
+    /// The service-level `internal/update` hooks (global ones only; non-global
+    /// hooks are stored on fibers).
+    pub(crate) fn global_internal_update_hooks(&self) -> Vec<EventCallback> {
+        self.hooks
+            .borrow()
+            .get("internal/update")
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|hook| hook.callback)
+            .collect()
+    }
+
     /// Registers a listener with an attached filter (Rust equivalent of the
     /// TS pattern of extending a context with a filter function).
     pub fn on_filtered(

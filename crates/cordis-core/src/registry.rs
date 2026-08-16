@@ -15,6 +15,7 @@ use crate::fiber::{Epoch, Fiber, FiberState};
 use crate::service::{ApplyFn, Effect, Service};
 
 /// A plugin declaration (minimal form; B4 extends it).
+#[derive(Clone)]
 pub struct Plugin {
     /// Optional plugin name used for fiber naming.
     pub name: Option<String>,
@@ -154,6 +155,7 @@ impl RegistryService {
             .effect(
                 move || {
                     runtime.fibers.borrow_mut().push(fiber_for_effect.clone());
+                    let _ = parent_events_emit(parent, &fiber_for_effect);
                     if let Some(error) = validation_error.clone() {
                         fiber_for_effect
                             .log_error(&format!("{error} at <{}>", fiber_for_effect.name()));
@@ -187,6 +189,7 @@ impl RegistryService {
             )
             .expect("parent fiber must be active");
         *fiber.dispose.borrow_mut() = Some(handle);
+        let _ = parent_events_emit(parent, &fiber);
         fiber
     }
 
@@ -297,6 +300,9 @@ async fn unregister_dispose(fiber: Rc<Fiber>) {
     if fiber.uid.replace(None).is_none() {
         return;
     }
+    if let Some(parent) = &fiber.parent {
+        let _ = parent_events_emit(parent, &fiber);
+    }
     if let Some(runtime) = &*fiber.runtime.borrow() {
         let mut fibers = runtime.fibers.borrow_mut();
         if let Some(position) = fibers.iter().position(|f| Rc::ptr_eq(f, &fiber)) {
@@ -310,4 +316,14 @@ async fn unregister_dispose(fiber: Rc<Fiber>) {
     }
     fiber.set_epoch(Epoch::Inactive);
     let _ = fiber.wait().await;
+}
+
+/// Emits the `internal/plugin` event for a fiber (mirrors the TS fiber
+/// constructor/dispose emits).
+fn parent_events_emit(parent: &Context, fiber: &Rc<Fiber>) -> Result<(), ()> {
+    if let Some(events) = parent.get::<crate::EventsService>() {
+        let fiber_any: Rc<dyn Any> = fiber.clone();
+        events.emit(parent, "internal/plugin", &[fiber_any]);
+    }
+    Ok(())
 }

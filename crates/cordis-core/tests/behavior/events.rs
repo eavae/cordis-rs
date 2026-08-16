@@ -325,7 +325,7 @@ async fn internal_update_hook() {
                     Rc::new(move |args| {
                         let config = args[0].downcast_ref::<Config>().expect("config").value;
                         hook_seen.borrow_mut().push(("hook", config));
-                        let next = &args[1].downcast_ref::<AnyNext>().expect("next").0;
+                        let next = &args[3].downcast_ref::<AnyNext>().expect("next").0;
                         next();
                         Ok(None)
                     }),

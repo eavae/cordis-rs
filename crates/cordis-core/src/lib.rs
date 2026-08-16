@@ -28,6 +28,6 @@ pub use logger::{
 pub use reflect::ReflectService;
 pub use registry::{Plugin, RegistryService};
 pub use service::{
-    AsyncDisposerStream, Config, Disposer, Effect, EffectItem, Service, async_disposer,
+    ApplyFn, AsyncDisposerStream, Config, Disposer, Effect, EffectItem, Service, async_disposer,
     sync_disposer,
 };

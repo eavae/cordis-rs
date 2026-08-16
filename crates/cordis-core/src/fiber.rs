@@ -466,6 +466,16 @@ impl Fiber {
         self: &Rc<Self>,
         config: Option<Rc<dyn Any>>,
     ) -> BoxFuture<'static, Result<(), FiberError>> {
+        self.update_with(config, false)
+    }
+
+    /// Updates the plugin config with the `noSave` flag and dispatches the
+    /// `internal/update` waterfall (service hooks → fiber hooks → default).
+    pub fn update_with(
+        self: &Rc<Self>,
+        config: Option<Rc<dyn Any>>,
+        no_save: bool,
+    ) -> BoxFuture<'static, Result<(), FiberError>> {
         let this = self.clone();
         Box::pin(async move {
             this.assert_active()?;
@@ -477,12 +487,22 @@ impl Fiber {
                 *this.error.borrow_mut() = Some(Box::new(FiberError::new(error.to_string())));
                 return Err(FiberError::new(error.to_string()));
             }
-            let hooks = this
+            // Service-level global hooks first (e.g. the loader's write-back
+            // hooks), then fiber-level hooks.
+            let mut callbacks: Vec<EventCallback> = {
+                let events = this.ctx.get_service::<crate::EventsService>("events");
+                match events {
+                    Some(events) => events.global_internal_update_hooks(),
+                    None => Vec::new(),
+                }
+            };
+            let fiber_hooks = this
                 ._hooks
                 .borrow()
                 .get("internal/update")
                 .cloned()
                 .unwrap_or_default();
+            callbacks.extend(fiber_hooks.into_iter().map(|hook| hook.callback));
             let applied = Rc::new(Cell::new(false));
             let this_for_tail = this.clone();
             let config_for_tail = config.clone();
@@ -493,13 +513,15 @@ impl Fiber {
                 applied_for_tail.set(true);
                 None
             });
-            let args: Vec<Rc<dyn Any>> = vec![config.unwrap_or_else(|| Rc::new(()) as Rc<dyn Any>)];
-            let callbacks = Rc::new(RefCell::new(
-                hooks
-                    .into_iter()
-                    .map(|hook| hook.callback)
-                    .collect::<Vec<_>>(),
-            ));
+            let args: Vec<Rc<dyn Any>> = vec![
+                config.unwrap_or_else(|| Rc::new(()) as Rc<dyn Any>),
+                Rc::new(no_save),
+                {
+                    let fiber_any: Rc<dyn Any> = this.clone();
+                    fiber_any
+                },
+            ];
+            let callbacks = Rc::new(RefCell::new(callbacks));
             let _ = run_waterfall_step(callbacks, args, tail);
             if applied.get() {
                 this.restart().await
