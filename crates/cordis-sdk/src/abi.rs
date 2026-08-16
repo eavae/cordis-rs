@@ -25,6 +25,12 @@ pub type BoxedDrop = unsafe extern "C" fn(*mut std::ffi::c_void);
 /// Spawns a plugin-owned boxed future on the host runtime.
 pub type HostSpawn = unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void);
 
+/// Validates a config payload (JSON string); 0 = valid, non-zero = invalid.
+pub type ValidateConfig = unsafe extern "C" fn(*const c_char) -> i32;
+
+/// Applies a config payload (JSON string); 0 = ok, non-zero = failed.
+pub type ApplyConfig = unsafe extern "C" fn(*mut PluginHandle, *const c_char) -> i32;
+
 /// A future owned by the plugin, polled by the host.
 ///
 /// `data` is an opaque pointer allocated on the plugin side; `poll` and
@@ -100,6 +106,38 @@ pub unsafe extern "C" fn plugin_create(host: *const HostVtable) -> *mut PluginHa
 #[cfg(feature = "abi-exports")]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn plugin_dispose(_handle: *mut PluginHandle) {}
+
+/// Returns the plugin metadata as a NUL-terminated JSON string.
+///
+/// The returned pointer is owned by the plugin and stays valid for the
+/// library's lifetime (a `&'static str` on the plugin side).
+#[cfg(feature = "abi-exports")]
+#[unsafe(no_mangle)]
+pub extern "C" fn plugin_meta() -> *const c_char {
+    c"{\"name\":\"cordis-sdk\",\"version\":\"0.1.0\",\"inject\":[],\"provide\":[]}".as_ptr()
+}
+
+/// Validates a config payload (JSON string); 0 = valid, non-zero = invalid.
+///
+/// # Safety
+///
+/// `config` must be a NUL-terminated UTF-8 string.
+#[cfg(feature = "abi-exports")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn plugin_validate_config(_config: *const c_char) -> i32 {
+    0
+}
+
+/// Applies a config payload (JSON string); 0 = ok, non-zero = failed.
+///
+/// # Safety
+///
+/// `handle` must come from `plugin_create`; `config` must be NUL-terminated.
+#[cfg(feature = "abi-exports")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn plugin_apply(_handle: *mut PluginHandle, _config: *const c_char) -> i32 {
+    0
+}
 
 /// The waker shared between the host and a spawned plugin future.
 ///

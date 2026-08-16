@@ -4,14 +4,19 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use cordis_sdk::{HostVtable, PLUGIN_API_VERSION, PluginHandle};
+use cordis_sdk::{
+    HostVtable, PLUGIN_API_VERSION, PluginHandle,
+    abi::{ApplyConfig, ValidateConfig},
+};
 use libloading::{Library, Symbol};
 
 use crate::host_runtime::{HostRuntime, host_spawn};
+use crate::plugin_meta::PluginMeta;
 
 type ApiVersion = unsafe extern "C" fn() -> u32;
 type Create = unsafe extern "C" fn(*const HostVtable) -> *mut PluginHandle;
 type Dispose = unsafe extern "C" fn(*mut PluginHandle);
+type Meta = unsafe extern "C" fn() -> *const std::ffi::c_char;
 
 /// Errors produced by the dynamic loader.
 #[derive(Debug)]
@@ -75,6 +80,9 @@ pub struct SoPlugin {
     handle: Option<*mut PluginHandle>,
     create: Symbol<'static, Create>,
     dispose: Symbol<'static, Dispose>,
+    meta: Option<Symbol<'static, Meta>>,
+    validate: Option<Symbol<'static, ValidateConfig>>,
+    apply: Option<Symbol<'static, ApplyConfig>>,
 }
 
 // SAFETY: the handle is only touched on the host thread; `Send` is required
@@ -136,6 +144,36 @@ impl SoPlugin {
                     })?,
             )
         };
+        // E5/E6: metadata, config validation and apply are optional symbols
+        // (older plugins may only export the E2/E3 protocol).
+        let meta = unsafe { library.get(b"plugin_meta") }
+            .ok()
+            .map(|symbol: Symbol<Meta>| {
+                // SAFETY: the symbol is moved together with the library into the
+                // struct; the library outlives it.
+                unsafe { std::mem::transmute::<Symbol<Meta>, Symbol<'static, Meta>>(symbol) }
+            });
+        let validate = unsafe { library.get(b"plugin_validate_config") }.ok().map(
+            |symbol: Symbol<ValidateConfig>| {
+                // SAFETY: see above.
+                unsafe {
+                    std::mem::transmute::<Symbol<ValidateConfig>, Symbol<'static, ValidateConfig>>(
+                        symbol,
+                    )
+                }
+            },
+        );
+        let apply =
+            unsafe { library.get(b"plugin_apply") }
+                .ok()
+                .map(|symbol: Symbol<ApplyConfig>| {
+                    // SAFETY: see above.
+                    unsafe {
+                        std::mem::transmute::<Symbol<ApplyConfig>, Symbol<'static, ApplyConfig>>(
+                            symbol,
+                        )
+                    }
+                });
         Ok(SoPlugin {
             path: path.to_path_buf(),
             version: found,
@@ -145,6 +183,9 @@ impl SoPlugin {
             handle: None,
             create,
             dispose,
+            meta,
+            validate,
+            apply,
         })
     }
 
@@ -156,6 +197,37 @@ impl SoPlugin {
     /// The library path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The plugin metadata (E6), when the plugin exports `plugin_meta`.
+    pub fn metadata(&self) -> Option<Result<PluginMeta, String>> {
+        self.meta.as_ref().map(|meta| {
+            // SAFETY: the symbol is valid for the library lifetime.
+            let ptr = unsafe { meta() };
+            if ptr.is_null() {
+                return Err("plugin_meta returned null".to_string());
+            }
+            // SAFETY: the plugin returns a NUL-terminated string.
+            let raw = unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned();
+            serde_json::from_str(&raw).map_err(|error| format!("invalid plugin metadata: {error}"))
+        })
+    }
+
+    /// The config validator (E5), when exported by the plugin.
+    pub fn validator(&self) -> Option<ValidateConfig> {
+        self.validate.as_ref().map(|symbol| **symbol)
+    }
+
+    /// The apply entry (E5), when exported by the plugin.
+    pub fn apply_fn(&self) -> Option<ApplyConfig> {
+        self.apply.as_ref().map(|symbol| **symbol)
+    }
+
+    /// The plugin instance handle (the value returned by `plugin_create`).
+    pub fn handle_ptr(&self) -> Option<*mut PluginHandle> {
+        self.handle
     }
 
     /// Calls `plugin_create` with a vtable built for this instance; returns

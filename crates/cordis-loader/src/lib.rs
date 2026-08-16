@@ -8,6 +8,7 @@ pub mod entry;
 pub mod evaluator;
 pub mod host_runtime;
 pub mod loader;
+pub mod plugin_meta;
 pub mod so;
 
 pub use config::{atomic_write, parse_config, serialize_config, to_sorted_value};
@@ -17,4 +18,5 @@ pub use evaluator::{
 };
 pub use host_runtime::{HostRuntime, host_spawn};
 pub use loader::{Loader, LoaderIntercept};
+pub use plugin_meta::PluginMeta;
 pub use so::{LoadError, SoPlugin, host_vtable, is_plugin_path};

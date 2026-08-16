@@ -6,6 +6,7 @@ use std::rc::Rc;
 use cordis_core::{AnyNext, ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service};
 
 use crate::entry::{Entry, EntryGroup, EntryOptions, EntryTree, PartialEntryOptions};
+use crate::so::SoPlugin;
 
 /// The plugin loader service (mirrors `Loader` in loader/index.ts).
 pub struct Loader {
@@ -361,6 +362,52 @@ impl Loader {
             },
         );
         name.to_string()
+    }
+
+    /// Registers a loaded `.so` plugin into the tree under its metadata name
+    /// (story cards E5/E6). The plugin's config validator and apply entry are
+    /// bridged into the core [`Plugin`].
+    pub fn register_so_plugin(&self, plugin: &SoPlugin) -> Result<String, String> {
+        let metadata = plugin
+            .metadata()
+            .ok_or_else(|| "plugin does not export plugin_meta".to_string())??;
+        let validate = plugin.validator();
+        let apply_entry = plugin.apply_fn();
+        let handle = plugin
+            .handle_ptr()
+            .ok_or_else(|| "plugin instance is not created".to_string())?;
+        let name = metadata.name.clone();
+        let name_for_error = name.clone();
+        let apply: ApplyFn = Rc::new(move |_ctx: &Context, config: &Rc<dyn std::any::Any>| {
+            let config = config
+                .downcast_ref::<serde_yaml_ng::Value>()
+                .cloned()
+                .unwrap_or(serde_yaml_ng::Value::Null);
+            let json = serde_json::to_string(&config).unwrap_or_else(|_| "null".to_string());
+            let json = std::ffi::CString::new(json).expect("config has no NUL");
+            if let Some(validate) = validate
+                && unsafe { validate(json.as_ptr()) } != 0
+            {
+                return Effect::Error(format!("config rejected by plugin {name_for_error}").into());
+            }
+            if let Some(apply_entry) = apply_entry {
+                // SAFETY: the handle came from plugin_create and stays valid
+                // while the owning SoPlugin is alive (held by the tree).
+                let _ = unsafe { apply_entry(handle, json.as_ptr()) };
+            }
+            Effect::None
+        });
+        let plugin = Plugin {
+            name: Some(name.clone()),
+            inject: metadata
+                .inject
+                .iter()
+                .map(|name| (name.clone(), None))
+                .collect(),
+            apply,
+        };
+        self.tree.plugins.borrow_mut().insert(name.clone(), plugin);
+        Ok(name)
     }
 
     /// The fiber of the entry with the given id (test helper).

@@ -15,6 +15,7 @@ members = [
     "fixtures/hello-plugin",
     "fixtures/bad-version",
     "fixtures/spawn-fixture",
+    "fixtures/e5-meta",
 ]
 
 [workspace.package]

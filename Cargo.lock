@@ -48,6 +48,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cordis-fixture-e5"
+version = "0.1.0"
+dependencies = [
+ "cordis-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cordis-fixture-hello"
 version = "0.1.0"
 dependencies = [
