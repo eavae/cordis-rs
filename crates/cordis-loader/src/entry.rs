@@ -589,6 +589,27 @@ impl Entry {
         self.init_task.set(false);
     }
 
+    /// Reloads the entry with the plugin currently registered under its name
+    /// (story card F3): disposes the old fiber and re-applies.
+    pub async fn reload(self: &Rc<Self>) -> Result<(), String> {
+        // Clear the fiber first so the loader's self-dispose hook does not
+        // mistake this intentional reload for a plugin self-dispose.
+        let fiber = self.fiber.borrow().clone();
+        *self.fiber.borrow_mut() = None;
+        if let Some(fiber) = fiber {
+            let _ = tokio::task::spawn_local(fiber.dispose()).await;
+        }
+        self.init_task.set(false);
+        self.init().await;
+        match self.fiber.borrow().clone() {
+            Some(fiber) if fiber.state.get() == cordis_core::FiberState::Failed => {
+                Err(format!("entry {} failed to reload", self.id()))
+            }
+            Some(_) => Ok(()),
+            None => Err(format!("entry {} failed to reload", self.id())),
+        }
+    }
+
     /// Ungated initialization used by `create` (the pending flag is set by
     /// the caller).
     pub(crate) async fn init_inner(self: &Rc<Self>) {

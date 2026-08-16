@@ -3,6 +3,9 @@
 //! F1: file watching with debounce and ignored globs; config files owned by
 //! the include plugin are refreshed instead of triggering a reload.
 
+pub mod graph;
+pub mod reload;
+
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;

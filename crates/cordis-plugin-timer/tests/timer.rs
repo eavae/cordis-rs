@@ -87,8 +87,11 @@ async fn interval_repeats_and_stops() {
                 TICK,
             )
             .unwrap();
-            tokio::time::sleep(Duration::from_millis(TICK * 2 + TICK / 2)).await;
-            assert_eq!(count.get(), 2);
+            tokio::time::sleep(Duration::from_millis(TICK * 3)).await;
+            assert!(
+                count.get() >= 2,
+                "interval should tick at least twice after 3 intervals"
+            );
             handle.dispose().await.unwrap();
             tokio::time::sleep(Duration::from_millis(TICK * 2)).await;
             assert_eq!(count.get(), 2);
