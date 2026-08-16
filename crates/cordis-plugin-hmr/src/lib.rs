@@ -3,6 +3,7 @@
 //! F1: file watching with debounce and ignored globs; config files owned by
 //! the include plugin are refreshed instead of triggering a reload.
 
+pub mod build;
 pub mod graph;
 pub mod reload;
 
@@ -219,9 +220,22 @@ async fn route_change(ctx: &Context, loader: &Loader, path: &Path) {
 /// Validates an HMR config (F5: defaults + field shape).
 pub fn validate_config(config: &HmrConfig) -> Result<(), String> {
     if config.debounce == 0 {
-        return Err("hmr: debounce must be a positive integer".to_string());
+        return Err(validate_message("en-US", "debounce"));
     }
     Ok(())
+}
+
+/// F5: HMR config validation messages (static string table; en-US/zh-CN).
+pub fn validate_message(locale: &str, field: &str) -> String {
+    match (locale, field) {
+        ("en-US", "debounce") => "hmr.config.debounce: must be a positive integer".to_string(),
+        ("zh-CN", "debounce") => "hmr.config.debounce: 必须为正整数".to_string(),
+        ("en-US", "root") => "hmr.config.root: must be a non-empty array".to_string(),
+        ("zh-CN", "root") => "hmr.config.root: 不能为空数组".to_string(),
+        ("en-US", _) => format!("hmr.config.{field}: invalid value"),
+        ("zh-CN", _) => format!("hmr.config.{field}: 配置无效"),
+        (_, _) => format!("hmr.config.{field}: invalid value"),
+    }
 }
 
 #[allow(dead_code)]
