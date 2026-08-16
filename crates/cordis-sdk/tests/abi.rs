@@ -48,6 +48,11 @@ fn host_loads_fixture_and_round_trips() {
     let vtable = HostVtable {
         log: log_message,
         spawn: noop_spawn,
+        provide: noop_provide,
+        get: noop_get,
+        on: noop_on,
+        emit: noop_emit,
+        effect_disposer: noop_effect_disposer,
         data: std::ptr::null_mut(),
         host_version: PLUGIN_API_VERSION,
     };
@@ -79,6 +84,11 @@ fn host_rejects_version_mismatch() {
     let vtable = HostVtable {
         log: noop_log,
         spawn: noop_spawn,
+        provide: noop_provide,
+        get: noop_get,
+        on: noop_on,
+        emit: noop_emit,
+        effect_disposer: noop_effect_disposer,
         data: std::ptr::null_mut(),
         host_version: PLUGIN_API_VERSION,
     };
@@ -90,3 +100,36 @@ fn host_rejects_version_mismatch() {
 }
 
 extern "C" fn noop_log(_message: *const c_char) {}
+
+unsafe extern "C" fn noop_provide(
+    _handle: *mut PluginHandle,
+    _name: *const c_char,
+    _payload: *const c_char,
+) -> i32 {
+    0
+}
+
+unsafe extern "C" fn noop_get(_handle: *mut PluginHandle, _name: *const c_char) -> *const c_char {
+    std::ptr::null()
+}
+
+unsafe extern "C" fn noop_on(
+    _handle: *mut PluginHandle,
+    _event: *const c_char,
+    _callback: cordis_sdk::PluginEventCallback,
+) -> *mut std::ffi::c_void {
+    std::ptr::null_mut()
+}
+
+unsafe extern "C" fn noop_emit(
+    _handle: *mut PluginHandle,
+    _event: *const c_char,
+    _payload: *const c_char,
+) {
+}
+
+unsafe extern "C" fn noop_effect_disposer(
+    _handle: *mut PluginHandle,
+    _disposer: cordis_sdk::PluginDisposer,
+) {
+}

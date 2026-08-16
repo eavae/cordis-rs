@@ -4,6 +4,7 @@
 //! group/include semantics, and `!expr` config evaluation via minijinja.
 
 pub mod config;
+pub mod context_bridge;
 pub mod entry;
 pub mod evaluator;
 pub mod host_runtime;

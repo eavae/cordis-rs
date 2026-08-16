@@ -6,7 +6,7 @@
 //! futures to the host runtime; the host polls and drops them via function
 //! pointers, so no future object or allocator crosses the boundary.
 
-use std::ffi::c_char;
+use std::ffi::{CString, c_char};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +14,10 @@ use std::sync::mpsc;
 use std::task::{Context as TaskContext, Poll, RawWaker, RawWakerVTable, Waker};
 
 /// The ABI version implemented by this SDK.
-pub const PLUGIN_API_VERSION: u32 = 2;
+///
+/// v3 adds the Context bridge (`provide`/`get`/`on`/`emit`/
+/// `effect_disposer`) to the host vtable (story card E9).
+pub const PLUGIN_API_VERSION: u32 = 3;
 
 /// Polls a plugin-owned boxed future.
 pub type BoxedPoll = unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void) -> u8;
@@ -30,6 +33,45 @@ pub type ValidateConfig = unsafe extern "C" fn(*const c_char) -> i32;
 
 /// Applies a config payload (JSON string); 0 = ok, non-zero = failed.
 pub type ApplyConfig = unsafe extern "C" fn(*mut PluginHandle, *const c_char) -> i32;
+
+/// A plugin-side event listener invoked by the host (story card E9).
+///
+/// `handle` identifies the plugin instance; `args` is a NUL-terminated JSON
+/// array of the event arguments, valid only for the duration of the call.
+/// The plugin should copy anything it keeps.
+pub type PluginEventCallback = unsafe extern "C" fn(*mut PluginHandle, *const c_char);
+
+/// A plugin-side disposer invoked when the fiber unloads (story card E9).
+pub type PluginDisposer = unsafe extern "C" fn(*mut PluginHandle);
+
+/// Provides a service: `name` and `payload` are NUL-terminated strings; the
+/// payload is a JSON value the host copies during the call. Returns 0 on
+/// success, non-zero on failure (missing session, duplicate registration).
+pub type HostProvide = unsafe extern "C" fn(*mut PluginHandle, *const c_char, *const c_char) -> i32;
+
+/// Reads a service back as a JSON string.
+///
+/// The returned pointer is host-owned and valid only until the next host
+/// call into the same plugin session; the plugin must copy it immediately.
+/// Returns null when the service is missing or not JSON-serializable.
+pub type HostGet = unsafe extern "C" fn(*mut PluginHandle, *const c_char) -> *const c_char;
+
+/// Registers an event listener; returns an opaque host-owned listener handle
+/// (null on failure). The listener is an effect of the plugin's fiber and is
+/// removed automatically when the fiber unloads.
+pub type HostOn = unsafe extern "C" fn(
+    *mut PluginHandle,
+    *const c_char,
+    PluginEventCallback,
+) -> *mut std::ffi::c_void;
+
+/// Emits an event with a JSON payload (a JSON array of arguments) the host
+/// copies during the call.
+pub type HostEmit = unsafe extern "C" fn(*mut PluginHandle, *const c_char, *const c_char);
+
+/// Registers a disposer on the plugin's current fiber; it runs when the
+/// fiber unloads, in reverse registration order.
+pub type HostEffectDisposer = unsafe extern "C" fn(*mut PluginHandle, PluginDisposer);
 
 /// A future owned by the plugin, polled by the host.
 ///
@@ -52,6 +94,16 @@ pub struct HostVtable {
     pub log: extern "C" fn(message: *const c_char),
     /// Spawns a boxed plugin future on the host runtime (story card E4).
     pub spawn: HostSpawn,
+    /// Provides a service from plugin apply (story card E9).
+    pub provide: HostProvide,
+    /// Reads a service back into the plugin (story card E9).
+    pub get: HostGet,
+    /// Registers an event listener (story card E9).
+    pub on: HostOn,
+    /// Emits an event (story card E9).
+    pub emit: HostEmit,
+    /// Registers a fiber-bound disposer (story card E9).
+    pub effect_disposer: HostEffectDisposer,
     /// Host-side runtime handle passed back into `spawn`.
     pub data: *mut std::ffi::c_void,
     /// The host ABI version (validated by the plugin).
@@ -347,5 +399,107 @@ where
     unsafe { (vtable.spawn)(vtable.data, Box::into_raw(Box::new(wrapped)).cast()) };
     Spawned {
         receiver: Some(receiver),
+    }
+}
+
+/// The plugin-side view of the host's [`Context`](crate::Context) surface
+/// (story card E9): services, events and fiber-bound disposers, all bridged
+/// through the host vtable.
+///
+/// A bridge is only valid while the host is calling into the plugin (apply,
+/// an event callback, or a disposer); the host pushes a session for the
+/// plugin's handle for the duration of those calls, and every vtable call
+/// must happen on the host thread.
+///
+/// Values cross the boundary as JSON strings: the host copies them during
+/// the call, so no allocation crosses the ABI.
+pub struct ContextBridge<'a> {
+    vtable: &'a HostVtable,
+    handle: *mut PluginHandle,
+}
+
+impl<'a> ContextBridge<'a> {
+    /// Creates a bridge for the current host call.
+    ///
+    /// # Safety
+    ///
+    /// `vtable` must be the host vtable this plugin was created with and
+    /// `handle` the handle the host passed into the current call.
+    pub unsafe fn new(vtable: &'a HostVtable, handle: *mut PluginHandle) -> Self {
+        ContextBridge { vtable, handle }
+    }
+
+    /// Provides a service (`ctx.provide(name, value)` in the core).
+    ///
+    /// `payload` is the JSON encoding of the value; the host stores it as a
+    /// `serde_yaml_ng::Value` and disposes the registration with the fiber.
+    pub fn provide(&self, name: &str, payload: &str) -> Result<(), String> {
+        let name = CString::new(name).map_err(|error| error.to_string())?;
+        let payload = CString::new(payload).map_err(|error| error.to_string())?;
+        // SAFETY: the vtable and handle are valid for the current host call.
+        let result = unsafe { (self.vtable.provide)(self.handle, name.as_ptr(), payload.as_ptr()) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(format!("host rejected ctx.provide({name:?})"))
+        }
+    }
+
+    /// Reads a service (`ctx.get(name)` in the core).
+    ///
+    /// The host serializes the value to JSON; non-serializable services
+    /// (e.g. Rust object services) come back as `None`.
+    pub fn get(&self, name: &str) -> Option<String> {
+        let name = CString::new(name).ok()?;
+        // SAFETY: the vtable and handle are valid for the current host call;
+        // the returned string is copied before the next host call.
+        let ptr = unsafe { (self.vtable.get)(self.handle, name.as_ptr()) };
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: the host returns a NUL-terminated string.
+        Some(
+            unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
+    /// Registers an event listener (`ctx.on(event, cb)` in the core).
+    ///
+    /// Returns an opaque host-owned listener handle; the listener is removed
+    /// automatically when the plugin's fiber unloads.
+    pub fn on(
+        &self,
+        event: &str,
+        callback: PluginEventCallback,
+    ) -> Result<*mut std::ffi::c_void, String> {
+        let event = CString::new(event).map_err(|error| error.to_string())?;
+        // SAFETY: the vtable and handle are valid for the current host call.
+        let listener = unsafe { (self.vtable.on)(self.handle, event.as_ptr(), callback) };
+        if listener.is_null() {
+            Err(format!("host rejected ctx.on({event:?})"))
+        } else {
+            Ok(listener)
+        }
+    }
+
+    /// Emits an event (`ctx.emit(event, ...)` in the core).
+    ///
+    /// `payload` must be a JSON array encoding the event arguments.
+    pub fn emit(&self, event: &str, payload: &str) {
+        let event = CString::new(event).expect("event has no NUL");
+        let payload = CString::new(payload).expect("payload has no NUL");
+        // SAFETY: the vtable and handle are valid for the current host call.
+        unsafe { (self.vtable.emit)(self.handle, event.as_ptr(), payload.as_ptr()) };
+    }
+
+    /// Registers a fiber-bound disposer (`Effect::Disposer` in the core).
+    ///
+    /// The disposer runs when the plugin's fiber unloads, in reverse
+    /// registration order, with a session pushed for `handle`.
+    pub fn effect_disposer(&self, disposer: PluginDisposer) {
+        // SAFETY: the vtable and handle are valid for the current host call.
+        unsafe { (self.vtable.effect_disposer)(self.handle, disposer) };
     }
 }

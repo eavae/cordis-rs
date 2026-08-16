@@ -380,7 +380,7 @@ impl Loader {
             .ok_or_else(|| "plugin instance is not created".to_string())?;
         let name = metadata.name.clone();
         let name_for_error = name.clone();
-        let apply: ApplyFn = Rc::new(move |_ctx: &Context, config: &Rc<dyn std::any::Any>| {
+        let apply: ApplyFn = Rc::new(move |ctx: &Context, config: &Rc<dyn std::any::Any>| {
             let config = config
                 .downcast_ref::<serde_yaml_ng::Value>()
                 .cloned()
@@ -393,9 +393,19 @@ impl Loader {
                 return Effect::Error(format!("config rejected by plugin {name_for_error}").into());
             }
             if let Some(apply_entry) = apply_entry {
+                if !crate::context_bridge::is_handle_live(handle) {
+                    return Effect::Error(
+                        format!("plugin {name_for_error} instance is disposed").into(),
+                    );
+                }
                 // SAFETY: the handle came from plugin_create and stays valid
                 // while the owning SoPlugin is alive (held by the tree).
-                let _ = unsafe { apply_entry(handle, json.as_ptr()) };
+                // The session binds the handle to this fiber's context for
+                // the duration of the call (story card E9).
+                crate::context_bridge::with_session(handle, ctx, || {
+                    // SAFETY: handle and vtable are valid (live check above).
+                    unsafe { apply_entry(handle, json.as_ptr()) };
+                });
             }
             Effect::None
         });

@@ -1,0 +1,16 @@
+[package]
+name = "cordis-fixture-e9"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cordis-sdk = { path = "../../crates/cordis-sdk", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints.rust]
+unsafe_code = "allow"

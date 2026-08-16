@@ -127,12 +127,16 @@ fn version_mismatch_is_rejected() {
     assert!(matches!(
         error,
         LoadError::VersionMismatch {
-            found: 3,
+            found,
             expected: PLUGIN_API_VERSION,
             ..
-        }
+        } if found == PLUGIN_API_VERSION + 1
     ));
-    assert!(error.to_string().contains("exports ABI version 3"));
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("exports ABI version {}", PLUGIN_API_VERSION + 1))
+    );
 }
 
 /// E3.5: name classification routes `cordis:` builtins vs native paths.

@@ -17,4 +17,8 @@ pub struct PluginMeta {
     /// Declared provided services.
     #[serde(default)]
     pub provide: Vec<String>,
+    /// Declared dependencies (story card F2): host crates/services this
+    /// plugin links against.
+    #[serde(default)]
+    pub deps: Vec<String>,
 }

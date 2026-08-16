@@ -10,6 +10,7 @@ use cordis_sdk::{
 };
 use libloading::{Library, Symbol};
 
+use crate::context_bridge;
 use crate::host_runtime::{HostRuntime, host_spawn};
 use crate::plugin_meta::PluginMeta;
 
@@ -247,6 +248,11 @@ impl SoPlugin {
         let vtable: &HostVtable = self.vtable.as_ref().expect("vtable");
         let handle = unsafe { (self.create)(vtable) };
         self.handle = if handle.is_null() { None } else { Some(handle) };
+        if !handle.is_null() {
+            // The bridge resolves vtable calls by handle; keep it alive in
+            // the registry until this instance is dropped.
+            context_bridge::register_handle(handle);
+        }
         handle
     }
 }
@@ -263,6 +269,11 @@ pub fn host_vtable(
     HostVtable {
         log,
         spawn: host_spawn,
+        provide: context_bridge::host_provide,
+        get: context_bridge::host_get,
+        on: context_bridge::host_on,
+        emit: context_bridge::host_emit,
+        effect_disposer: context_bridge::host_effect_disposer,
         data: runtime as *const HostRuntime as *mut std::ffi::c_void,
         host_version: PLUGIN_API_VERSION,
     }
@@ -274,6 +285,7 @@ impl Drop for SoPlugin {
             // SAFETY: the handle came from plugin_create; the symbols are
             // still valid (the library is alive until after this call).
             unsafe { (self.dispose)(handle) };
+            context_bridge::unregister_handle(handle);
         }
         // Cancel pending spawned futures (their boxed futures are dropped
         // through the plugin's drop function).
