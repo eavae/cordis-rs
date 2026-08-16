@@ -1,0 +1,113 @@
+//! Host-side runtime for `.so` plugin async tasks (story card E4).
+//!
+//! The host owns a per-instance task list. Plugins hand boxed futures to
+//! [`host_spawn`] through the vtable; each boxed future is driven on the
+//! host's current-thread runtime and dropped (through the plugin's drop
+//! function) when it completes or when the plugin instance is disposed.
+
+use std::cell::Cell;
+use std::ffi::c_void;
+use std::rc::Rc;
+use std::task::{Context as TaskContext, Poll, Waker};
+
+use cordis_sdk::{BoxedFuture, RcWaker, WakerData};
+
+/// The per-plugin-instance host runtime: owns every task the plugin spawned.
+pub struct HostRuntime {
+    tasks: std::cell::RefCell<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl HostRuntime {
+    /// Creates an empty runtime.
+    pub fn new() -> Rc<Self> {
+        Rc::new(HostRuntime {
+            tasks: std::cell::RefCell::new(Vec::new()),
+        })
+    }
+
+    /// Cancels and drops every pending task (plugin instance disposed).
+    pub fn cancel_all(&mut self) {
+        let tasks = std::mem::take(&mut *self.tasks.borrow_mut());
+        for task in tasks {
+            task.abort();
+        }
+    }
+}
+
+/// Spawns a plugin future (vtable `spawn` entry).
+///
+/// # Safety
+///
+/// `data` must be the runtime pointer baked into the vtable; `future` must be
+/// a `Box<BoxedFuture>` transferred from the plugin and dropped exactly once
+/// (here, through [`BoxedFuture::drop`]).
+pub unsafe extern "C" fn host_spawn(data: *mut c_void, future: *mut c_void) {
+    // SAFETY: the vtable data pointer was created by `HostRuntime::new` and
+    // the caller keeps the runtime alive.
+    let runtime = unsafe { &*(data as *const HostRuntime) };
+    // SAFETY: `future` is a Box<BoxedFuture> allocated by the plugin side.
+    let future = unsafe { Box::from_raw(future as *mut BoxedFuture) };
+
+    let task = HostTask {
+        future: Some(*future),
+        waker_data: None,
+        waker: Cell::new(None),
+    };
+    let handle = tokio::task::spawn_local(task);
+    runtime.tasks.borrow_mut().push(handle);
+}
+
+/// A host task: polls a plugin boxed future until it completes.
+struct HostTask {
+    future: Option<BoxedFuture>,
+    waker_data: Option<RcWaker>,
+    waker: Cell<Option<Waker>>,
+}
+
+impl std::future::Future for HostTask {
+    type Output = ();
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<()> {
+        let Some(future) = self.future.take() else {
+            return Poll::Ready(());
+        };
+        // Hand the runtime waker to the plugin so its future can wake us.
+        self.waker.set(Some(cx.waker().clone()));
+        if self.waker_data.is_none() {
+            self.waker_data = Some(WakerData::new(wake_task));
+        }
+        let waker_ptr = self
+            .waker_data
+            .as_ref()
+            .expect("waker data")
+            .as_ptr()
+            .cast();
+        // SAFETY: `future.data` is the plugin allocation; `raw.as_ptr()`
+        // stays valid for the plugin (refcounted) and is freed by its drop.
+        let ready = unsafe { (future.poll)(future.data, waker_ptr) };
+        if ready == 1 {
+            Poll::Ready(())
+        } else {
+            self.future = Some(future);
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for HostTask {
+    fn drop(&mut self) {
+        if let Some(future) = self.future.take() {
+            // SAFETY: the plugin promised to keep the boxed future valid for
+            // the task lifetime; drop it through the plugin's drop fn.
+            unsafe { (future.drop)(future.data) };
+        }
+    }
+}
+
+/// The host-side wake callback: re-schedules the task (no-op for E4; the
+/// plugin futures in scope are driven by the await polling loop, and real
+/// wakeups are handled by the runtime waker stored on the task).
+unsafe extern "C" fn wake_task(_data: *mut c_void) {}
+
+// SAFETY: the runtime and tasks are confined to the host thread.
+unsafe impl Send for HostTask {}

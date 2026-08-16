@@ -2,9 +2,12 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use cordis_sdk::{HostVtable, PLUGIN_API_VERSION, PluginHandle};
 use libloading::{Library, Symbol};
+
+use crate::host_runtime::{HostRuntime, host_spawn};
 
 type ApiVersion = unsafe extern "C" fn() -> u32;
 type Create = unsafe extern "C" fn(*const HostVtable) -> *mut PluginHandle;
@@ -63,6 +66,12 @@ pub struct SoPlugin {
     // Heap-pinned so the symbol references below stay valid after the struct
     // moves; the library is unloaded when the box is dropped.
     _library: Box<Library>,
+    /// Per-instance host runtime: owns every task the plugin spawned
+    /// (story card E4); disposed together with the plugin handle.
+    runtime: Rc<HostRuntime>,
+    /// The vtable handed to the plugin; kept alive for the plugin's lifetime
+    /// (the plugin stores a raw pointer to it).
+    vtable: Option<Box<HostVtable>>,
     handle: Option<*mut PluginHandle>,
     create: Symbol<'static, Create>,
     dispose: Symbol<'static, Dispose>,
@@ -131,6 +140,8 @@ impl SoPlugin {
             path: path.to_path_buf(),
             version: found,
             _library: library,
+            runtime: HostRuntime::new(),
+            vtable: None,
             handle: None,
             create,
             dispose,
@@ -147,16 +158,41 @@ impl SoPlugin {
         &self.path
     }
 
-    /// Calls `plugin_create` with `vtable`; returns the opaque handle.
+    /// Calls `plugin_create` with a vtable built for this instance; returns
+    /// the opaque handle.
     ///
     /// # Safety
     ///
-    /// `vtable` must be valid and outlive the returned handle.
-    pub unsafe fn create(&mut self, vtable: &HostVtable) -> *mut PluginHandle {
-        // SAFETY: the create symbol is valid for the library lifetime.
+    /// `log` must be callable for the plugin's lifetime.
+    pub unsafe fn create(
+        &mut self,
+        log: extern "C" fn(*const std::ffi::c_char),
+    ) -> *mut PluginHandle {
+        let vtable = host_vtable(log, &self.runtime);
+        self.vtable = Some(Box::new(vtable));
+        // SAFETY: the create symbol is valid for the library lifetime; the
+        // vtable stays alive because the runtime is owned by this instance.
+        let vtable: &HostVtable = self.vtable.as_ref().expect("vtable");
         let handle = unsafe { (self.create)(vtable) };
         self.handle = if handle.is_null() { None } else { Some(handle) };
         handle
+    }
+}
+
+/// Builds a host vtable wired to `runtime` (story card E4).
+///
+/// The returned vtable's `data` points to the runtime; the caller must keep
+/// `runtime` alive for as long as the vtable (and any plugin created with it)
+/// is used.
+pub fn host_vtable(
+    log: extern "C" fn(*const std::ffi::c_char),
+    runtime: &HostRuntime,
+) -> HostVtable {
+    HostVtable {
+        log,
+        spawn: host_spawn,
+        data: runtime as *const HostRuntime as *mut std::ffi::c_void,
+        host_version: PLUGIN_API_VERSION,
     }
 }
 
@@ -166,6 +202,11 @@ impl Drop for SoPlugin {
             // SAFETY: the handle came from plugin_create; the symbols are
             // still valid (the library is alive until after this call).
             unsafe { (self.dispose)(handle) };
+        }
+        // Cancel pending spawned futures (their boxed futures are dropped
+        // through the plugin's drop function).
+        if let Some(runtime) = Rc::get_mut(&mut self.runtime) {
+            runtime.cancel_all();
         }
     }
 }

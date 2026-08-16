@@ -47,6 +47,8 @@ fn host_loads_fixture_and_round_trips() {
     }
     let vtable = HostVtable {
         log: log_message,
+        spawn: noop_spawn,
+        data: std::ptr::null_mut(),
         host_version: PLUGIN_API_VERSION,
     };
     LOGGED.lock().unwrap().clear();
@@ -59,6 +61,8 @@ fn host_loads_fixture_and_round_trips() {
     unsafe { dispose(handle) };
 }
 
+unsafe extern "C" fn noop_spawn(_data: *mut std::ffi::c_void, _future: *mut std::ffi::c_void) {}
+
 #[test]
 fn host_rejects_version_mismatch() {
     // SAFETY: fixture built by the workspace.
@@ -68,12 +72,14 @@ fn host_rejects_version_mismatch() {
     assert_ne!(
         unsafe { version() },
         PLUGIN_API_VERSION,
-        "fixture must export v2"
+        "fixture must export a different version"
     );
 
     let create: libloading::Symbol<Create> = unsafe { library.get(b"plugin_create") }.unwrap();
     let vtable = HostVtable {
         log: noop_log,
+        spawn: noop_spawn,
+        data: std::ptr::null_mut(),
         host_version: PLUGIN_API_VERSION,
     };
     let handle = unsafe { create(&vtable) };

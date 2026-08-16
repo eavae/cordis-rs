@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use cordis_loader::{LoadError, SoPlugin, is_plugin_path};
-use cordis_sdk::{HostVtable, PLUGIN_API_VERSION};
+use cordis_sdk::PLUGIN_API_VERSION;
 use libloading::Library;
 
 static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -34,18 +34,12 @@ fn fixture_path(name: &str) -> PathBuf {
     path
 }
 
-fn vtable() -> HostVtable {
-    extern "C" fn log_message(message: *const std::ffi::c_char) {
-        // SAFETY: the plugin passes a NUL-terminated string.
-        let text = unsafe { std::ffi::CStr::from_ptr(message) }
-            .to_string_lossy()
-            .to_string();
-        LOGGED.lock().unwrap().push(text);
-    }
-    HostVtable {
-        log: log_message,
-        host_version: PLUGIN_API_VERSION,
-    }
+extern "C" fn log_message(message: *const std::ffi::c_char) {
+    // SAFETY: the plugin passes a NUL-terminated string.
+    let text = unsafe { std::ffi::CStr::from_ptr(message) }
+        .to_string_lossy()
+        .to_string();
+    LOGGED.lock().unwrap().push(text);
 }
 
 /// E3.1: loading succeeds, `create` returns a callable handle and the
@@ -61,7 +55,7 @@ fn load_create_and_drop_disposes() {
 
     LOGGED.lock().unwrap().clear();
     // SAFETY: `vtable` outlives the call and the fixture expects it.
-    let handle = unsafe { plugin.create(&vtable()) };
+    let handle = unsafe { plugin.create(log_message) };
     assert!(!handle.is_null(), "plugin_create must return a handle");
     assert_eq!(
         LOGGED.lock().unwrap().as_slice(),
@@ -96,8 +90,8 @@ fn repeated_loads_are_independent() {
     let mut second = unsafe { SoPlugin::load(&path) }.unwrap();
     let before = dispose_count(&path);
     // SAFETY: vtables outlive the calls.
-    let a = unsafe { first.create(&vtable()) };
-    let b = unsafe { second.create(&vtable()) };
+    let a = unsafe { first.create(log_message) };
+    let b = unsafe { second.create(log_message) };
     assert!(!a.is_null() && !b.is_null());
     drop(first);
     assert_eq!(dispose_count(&path), before + 1, "one drop → one dispose");
@@ -133,12 +127,12 @@ fn version_mismatch_is_rejected() {
     assert!(matches!(
         error,
         LoadError::VersionMismatch {
-            found: 2,
+            found: 3,
             expected: PLUGIN_API_VERSION,
             ..
         }
     ));
-    assert!(error.to_string().contains("exports ABI version 2"));
+    assert!(error.to_string().contains("exports ABI version 3"));
 }
 
 /// E3.5: name classification routes `cordis:` builtins vs native paths.

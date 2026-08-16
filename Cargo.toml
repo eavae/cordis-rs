@@ -14,6 +14,7 @@ members = [
     "crates/cordis-cli",
     "fixtures/hello-plugin",
     "fixtures/bad-version",
+    "fixtures/spawn-fixture",
 ]
 
 [workspace.package]

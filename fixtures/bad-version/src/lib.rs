@@ -4,7 +4,7 @@ use cordis_sdk::{HostVtable, PluginHandle};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn plugin_api_version() -> u32 {
-    2
+    3
 }
 
 /// # Safety

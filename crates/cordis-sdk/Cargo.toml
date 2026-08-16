@@ -7,6 +7,10 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[features]
+default = ["abi-exports"]
+abi-exports = []
+
 [lints.rust]
 unsafe_code = "allow"
 
@@ -16,6 +20,7 @@ all = "warn"
 [dependencies]
 cordis-core = { path = "../cordis-core" }
 cordis-macros = { path = "../cordis-macros" }
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 libloading.workspace = true

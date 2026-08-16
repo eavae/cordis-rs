@@ -55,6 +55,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cordis-fixture-spawn"
+version = "0.1.0"
+dependencies = [
+ "cordis-sdk",
+]
+
+[[package]]
 name = "cordis-loader"
 version = "0.1.0"
 dependencies = [
@@ -123,6 +130,7 @@ dependencies = [
  "cordis-core",
  "cordis-macros",
  "libloading",
+ "tokio",
 ]
 
 [[package]]

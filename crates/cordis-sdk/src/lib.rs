@@ -12,8 +12,11 @@ pub use cordis_macros::{inject, service};
 
 pub mod abi;
 pub use abi::{
-    HostVtable, PLUGIN_API_VERSION, PluginHandle, plugin_api_version, plugin_create, plugin_dispose,
+    BoxedFuture, HostVtable, PLUGIN_API_VERSION, PluginHandle, RcWaker, Spawned, WAKER_VTABLE,
+    WakerData, spawn, waker_from_raw,
 };
+#[cfg(feature = "abi-exports")]
+pub use abi::{plugin_api_version, plugin_create, plugin_dispose};
 
 #[cfg(test)]
 mod tests {
@@ -21,12 +24,16 @@ mod tests {
 
     extern "C" fn noop_log(_message: *const std::ffi::c_char) {}
 
+    unsafe extern "C" fn noop_spawn(_data: *mut std::ffi::c_void, _future: *mut std::ffi::c_void) {}
+
     #[test]
     fn abi_symbols_are_exported() {
         assert_eq!(plugin_api_version(), PLUGIN_API_VERSION);
         // SAFETY: the vtable is valid for the call.
         let vtable = abi::HostVtable {
             log: noop_log,
+            spawn: noop_spawn,
+            data: std::ptr::null_mut(),
             host_version: PLUGIN_API_VERSION,
         };
         let handle = unsafe { plugin_create(&vtable) };

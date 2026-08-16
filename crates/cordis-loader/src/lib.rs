@@ -6,6 +6,7 @@
 pub mod config;
 pub mod entry;
 pub mod evaluator;
+pub mod host_runtime;
 pub mod loader;
 pub mod so;
 
@@ -14,5 +15,6 @@ pub use entry::{Entry, EntryGroup, EntryOptions, EntryTree, IsolateValue, Partia
 pub use evaluator::{
     ConfigEvaluator, EvalEnv, EvalError, MinijinjaEvaluator, evaluate_config, reject_exprs,
 };
+pub use host_runtime::{HostRuntime, host_spawn};
 pub use loader::{Loader, LoaderIntercept};
-pub use so::{LoadError, SoPlugin, is_plugin_path};
+pub use so::{LoadError, SoPlugin, host_vtable, is_plugin_path};
