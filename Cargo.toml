@@ -15,6 +15,7 @@ members = [
     "crates/cordis-cli",
     "fixtures/hello-plugin",
     "fixtures/bad-version",
+    "fixtures/not-a-plugin",
     "fixtures/spawn-fixture",
     "fixtures/e5-meta",
     "fixtures/e9-context",

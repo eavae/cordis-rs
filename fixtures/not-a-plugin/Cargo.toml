@@ -1,0 +1,11 @@
+[package]
+name = "cordis-fixture-not-a-plugin"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints.rust]
+unsafe_code = "allow"

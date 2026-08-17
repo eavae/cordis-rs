@@ -139,6 +139,30 @@ fn version_mismatch_is_rejected() {
     );
 }
 
+/// E3.3: a loadable library that is not a Cordis plugin is rejected with a
+/// `MissingSymbol` error naming the missing symbol — the Rust counterpart of
+/// the JS "invalid plugin" shape check at the dynamic boundary.
+#[test]
+fn missing_symbol_is_rejected() {
+    let _guard = lock_fixture();
+    let path = fixture_path("cordis_fixture_not_a_plugin");
+    // SAFETY: fixture used on one thread.
+    let error = match unsafe { SoPlugin::load(&path) } {
+        Ok(_) => panic!("a non-plugin library must fail to load"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        LoadError::MissingSymbol {
+            symbol: "plugin_api_version",
+            ..
+        }
+    ));
+    let text = error.to_string();
+    assert!(text.contains("missing symbol plugin_api_version"), "{text}");
+    assert!(text.contains("cordis_fixture_not_a_plugin"), "{text}");
+}
+
 /// E3.5: name classification routes `cordis:` builtins vs native paths.
 #[test]
 fn plugin_name_classification() {
