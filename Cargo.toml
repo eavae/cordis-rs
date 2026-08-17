@@ -47,6 +47,7 @@ anyhow = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+missing_docs = "warn"
 
 [workspace.lints.clippy]
 all = "warn"

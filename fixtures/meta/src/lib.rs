@@ -1,5 +1,7 @@
 //! Fixture plugin: metadata, config validation and apply bridge.
 
+#![allow(missing_docs)]
+
 use std::ffi::c_char;
 use std::sync::atomic::{AtomicU32, Ordering};
 

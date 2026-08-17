@@ -13,6 +13,7 @@ abi-exports = []
 
 [lints.rust]
 unsafe_code = "allow"
+missing_docs = "warn"
 
 [lints.clippy]
 all = "warn"

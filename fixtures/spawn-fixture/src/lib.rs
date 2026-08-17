@@ -1,5 +1,7 @@
 //! Fixture exercising the host async bridge through the ABI.
 
+#![allow(missing_docs)]
+
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_sdk::{HostVtable, PLUGIN_API_VERSION, PluginHandle, spawn};

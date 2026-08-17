@@ -4,6 +4,8 @@
 //! fiber-bound disposers: `provide`/`get`, `on`/`emit` and
 //! `effect_disposer`.
 
+#![allow(missing_docs)]
+
 use std::ffi::{CStr, CString, c_char};
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 

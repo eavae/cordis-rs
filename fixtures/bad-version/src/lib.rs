@@ -1,5 +1,7 @@
 //! A fixture exporting an unsupported ABI version (version-mismatch test).
 
+#![allow(missing_docs)]
+
 use cordis_sdk::{HostVtable, PLUGIN_API_VERSION, PluginHandle};
 
 #[unsafe(no_mangle)]
