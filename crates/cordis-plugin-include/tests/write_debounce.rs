@@ -1,6 +1,7 @@
 //! Include write debounce and the `loader/config-update` event.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fs;
 use std::rc::Rc;
 
@@ -18,7 +19,7 @@ fn include_opts(config: IncludeConfig) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 
@@ -128,8 +129,7 @@ async fn same_turn_writes_coalesce_but_events_fire() {
             tokio::task::yield_now().await;
             wait_until(|| {
                 fs::read_to_string(dir.join("base.yml"))
-                    .map(|content| content.contains("value: 3"))
-                    .unwrap_or(false)
+                    .is_ok_and(|content| content.contains("value: 3"))
             })
             .await;
             let content = fs::read_to_string(dir.join("base.yml")).unwrap();
@@ -177,8 +177,7 @@ async fn cross_turn_writes_flush_separately() {
             tree.write();
             wait_until(|| {
                 fs::read_to_string(dir.join("base.yml"))
-                    .map(|content| content.contains("value: 2"))
-                    .unwrap_or(false)
+                    .is_ok_and(|content| content.contains("value: 2"))
             })
             .await;
 
@@ -187,8 +186,7 @@ async fn cross_turn_writes_flush_separately() {
             tree.write();
             wait_until(|| {
                 fs::read_to_string(dir.join("base.yml"))
-                    .map(|content| content.contains("value: 4"))
-                    .unwrap_or(false)
+                    .is_ok_and(|content| content.contains("value: 4"))
             })
             .await;
             fs::remove_dir_all(&dir).unwrap();

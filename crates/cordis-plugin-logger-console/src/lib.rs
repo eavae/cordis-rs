@@ -70,7 +70,7 @@ fn default_show_time() -> String {
 
 impl Default for ConsoleConfig {
     fn default() -> Self {
-        ConsoleConfig {
+        Self {
             colors: 0,
             max_length: 10240,
             levels: None,
@@ -94,7 +94,7 @@ pub struct ConsoleExporter {
 impl ConsoleExporter {
     /// Creates an exporter writing rendered lines to `writer`.
     pub fn new(config: ConsoleConfig, writer: Rc<dyn Fn(&str)>) -> Rc<Self> {
-        let exporter = Rc::new(ConsoleExporter {
+        let exporter = Rc::new(Self {
             config,
             formatters: RefCell::new(HashMap::new()),
             timestamp: Cell::new(0),
@@ -107,7 +107,7 @@ impl ConsoleExporter {
     /// Renders a message to its console representation.
     pub fn render(&self, message: &Message) -> String {
         let prefix = format!("[{}]", type_char(message.r#type));
-        let margin = self.config.label.as_ref().map(|l| l.margin).unwrap_or(1);
+        let margin = self.config.label.as_ref().map_or(1, |l| l.margin);
         let space = " ".repeat(margin);
         let mut output = String::new();
         let mut indent = 3 + space.len();
@@ -124,12 +124,9 @@ impl ConsoleExporter {
 
         let code = LoggerService::code(&message.name, self.config.colors);
         let label = LoggerService::color(self.config.colors, code, &message.name, ";1");
-        let pad_length = self
-            .config
-            .label
-            .as_ref()
-            .map(|l| l.width + label.chars().count() - message.name.chars().count())
-            .unwrap_or(0);
+        let pad_length = self.config.label.as_ref().map_or(0, |l| {
+            l.width + label.chars().count() - message.name.chars().count()
+        });
 
         match self.config.label.as_ref().map(|l| l.align) {
             Some(Align::Right) => {
@@ -141,8 +138,7 @@ impl ConsoleExporter {
                     .config
                     .label
                     .as_ref()
-                    .map(|l| l.width + space.len())
-                    .unwrap_or(0);
+                    .map_or(0, |l| l.width + space.len());
             }
             _ => {
                 output.push_str(&prefix);

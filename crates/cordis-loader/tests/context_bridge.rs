@@ -53,7 +53,7 @@ fn opts(greeting: &str) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 

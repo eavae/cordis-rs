@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use cordis_core::{Context, Effect, Fiber, FiberState, Plugin};
@@ -17,7 +18,7 @@ fn opts(id: &str, name: &str, inject: Option<Vec<String>>) -> EntryOptions {
         inject,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 

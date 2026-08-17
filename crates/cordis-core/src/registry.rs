@@ -126,7 +126,7 @@ impl RegistryService {
 
         let callback = plugin.apply.clone();
         let key = Rc::as_ptr(&callback) as *const () as usize;
-        let registry_rc = parent.get::<RegistryService>().expect("registry service");
+        let registry_rc = parent.get::<Self>().expect("registry service");
         let mut runtimes = self.runtimes.borrow_mut();
         let runtime = runtimes
             .entry(key)
@@ -164,7 +164,7 @@ impl RegistryService {
             epoch: RefCell::new(Epoch::Inactive),
             resolved: RefCell::new(HashMap::new()),
             disposables: RefCell::new(Vec::new()),
-            inertia: RefCell::new(Default::default()),
+            inertia: RefCell::new(crate::fiber::Inertia::default()),
             inertia_notify: Rc::new(tokio::sync::Notify::new()),
             dispose: RefCell::new(None),
             _hooks: RefCell::new(HashMap::new()),
@@ -187,9 +187,9 @@ impl RegistryService {
                             Some(Box::new(crate::fiber::FiberError::new(error.to_string())));
                         *fiber_for_effect.epoch.borrow_mut() = Epoch::Inactive;
                         fiber_for_effect.update_state(Some(FiberState::Failed));
-                        let fiber = fiber_for_effect.clone();
+                        let fiber = fiber_for_effect;
                         return Effect::Disposer(Box::new(move || {
-                            let fiber = fiber.clone();
+                            let fiber = fiber;
                             Box::pin(async move {
                                 unregister_dispose(fiber).await;
                                 Ok(())
@@ -200,9 +200,9 @@ impl RegistryService {
                         fiber_for_effect.check_impl(name);
                     }
                     fiber_for_effect.refresh();
-                    let fiber = fiber_for_effect.clone();
+                    let fiber = fiber_for_effect;
                     Effect::Disposer(Box::new(move || {
-                        let fiber = fiber.clone();
+                        let fiber = fiber;
                         Box::pin(async move {
                             unregister_dispose(fiber).await;
                             Ok(())
@@ -289,8 +289,7 @@ impl RegistryService {
             .borrow()
             .by_label
             .get(&provider_label.clone().unwrap_or_default())
-            .map(|entry| entry.value.clone())
-            .unwrap_or_else(|| Rc::new(()) as Rc<dyn Any>);
+            .map_or_else(|| Rc::new(()) as Rc<dyn Any>, |entry| entry.value.clone());
         if let Some(events) = provider
             .inner
             .get_service_non_strict::<crate::EventsService>("events")

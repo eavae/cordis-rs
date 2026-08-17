@@ -15,7 +15,7 @@ struct FooConfig {
 
 impl Config for FooConfig {
     fn merge(&self, other: &Self) -> Self {
-        FooConfig {
+        Self {
             a: other.a.or(self.a),
             b: other.b.or(self.b),
             c: other.c.or(self.c),
@@ -41,8 +41,8 @@ impl Service for Foo {
 }
 
 impl Foo {
-    fn extend_with(&self, config: FooConfig) -> Rc<Foo> {
-        Rc::new(Foo {
+    fn extend_with(&self, config: FooConfig) -> Rc<Self> {
+        Rc::new(Self {
             config: self.config.merge(&config),
         })
     }
@@ -138,7 +138,7 @@ async fn functional_service() {
                 ..Default::default()
             });
             let result = foo3
-                .invoke(&ShadowContext::new(root.clone(), ctx1.clone()), None)
+                .invoke(&ShadowContext::new(root.clone(), ctx1), None)
                 .expect("foo")
                 .downcast_ref::<FooConfig>()
                 .cloned()

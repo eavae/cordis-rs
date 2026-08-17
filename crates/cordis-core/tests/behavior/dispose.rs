@@ -20,7 +20,7 @@ struct Seq {
 
 impl Seq {
     fn new() -> Self {
-        Seq {
+        Self {
             values: Rc::new(RefCell::new(Vec::new())),
         }
     }
@@ -192,7 +192,7 @@ async fn effects_yield_dispose() {
                         EventOptions::default(),
                     )
                     .unwrap();
-                let seq2 = seq.clone();
+                let seq2 = seq;
                 root.effect(
                     move || {
                         Effect::Iterable(vec![
@@ -219,7 +219,7 @@ async fn effects_yield_dispose() {
                             Ok(EffectItem::Disposer(sync_disposer(move || {
                                 seq2.push(2);
                             }))),
-                            Ok(EffectItem::Nested(nested.clone())),
+                            Ok(EffectItem::Nested(nested)),
                         ])
                     },
                     "anonymous",
@@ -349,7 +349,7 @@ async fn effects_async_yield_1() {
                     move || {
                         Effect::AsyncIterable(Box::pin(YieldStream {
                             timers: timers.clone(),
-                            seq: seq.clone(),
+                            seq,
                             step: 0,
                             pending: None,
                         }))
@@ -382,7 +382,7 @@ async fn effects_async_yield_2_aborted() {
                     move || {
                         Effect::AsyncIterable(Box::pin(YieldStream {
                             timers: timers.clone(),
-                            seq: seq.clone(),
+                            seq,
                             step: 0,
                             pending: None,
                         }))
@@ -416,7 +416,7 @@ async fn effects_async_yield_3_aborted() {
                     move || {
                         Effect::AsyncIterable(Box::pin(YieldStream {
                             timers: timers.clone(),
-                            seq: seq.clone(),
+                            seq,
                             step: 0,
                             pending: None,
                         }))
@@ -452,7 +452,7 @@ async fn effects_async_yield_4_await_dispose() {
                     move || {
                         Effect::AsyncIterable(Box::pin(YieldStream {
                             timers: timers.clone(),
-                            seq: seq.clone(),
+                            seq,
                             step: 0,
                             pending: None,
                         }))
@@ -569,7 +569,7 @@ async fn effects_async_yield_with_error() {
                     move || {
                         Effect::AsyncIterable(Box::pin(ErrorStream {
                             timers: timers_for_stream.clone(),
-                            seq: seq.clone(),
+                            seq,
                             step: 0,
                             pending: None,
                         }))
@@ -617,7 +617,7 @@ impl AsyncDisposerStream for ErrorStream {
                         self.step = 1;
                         let seq = self.seq.clone();
                         Poll::Ready(Some(Ok(Box::new(move || {
-                            let seq = seq.clone();
+                            let seq = seq;
                             Box::pin(async move {
                                 seq.push(1);
                                 Ok(())

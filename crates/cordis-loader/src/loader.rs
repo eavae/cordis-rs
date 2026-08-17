@@ -51,16 +51,15 @@ impl Loader {
     pub fn with_shared(ctx: &Context, shared: Option<String>) -> Rc<Self> {
         let env_data = shared
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .unwrap_or(serde_json::json!({}));
+            .unwrap_or_else(|| serde_json::json!({}));
         let tree = EntryTree::new(ctx);
-        let loader = Rc::new(Loader {
+        let loader = Rc::new(Self {
             ctx: ctx.clone(),
             tree,
             env_data,
             base_url: RefCell::new(
                 std::env::current_dir()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|_| ".".to_string()),
+                    .map_or_else(|_| ".".to_string(), |path| path.display().to_string()),
             ),
         });
         let group_plugin = group_plugin(&loader);
@@ -221,8 +220,7 @@ impl Loader {
                 .fiber
                 .borrow()
                 .as_ref()
-                .map(|candidate| Rc::ptr_eq(candidate, fiber))
-                .unwrap_or(false)
+                .is_some_and(|candidate| Rc::ptr_eq(candidate, fiber))
         })
     }
 
@@ -246,8 +244,7 @@ impl Loader {
         fiber
             .parent
             .as_ref()
-            .map(|parent| Rc::ptr_eq(parent.fiber(), &root))
-            .unwrap_or(false)
+            .is_some_and(|parent| Rc::ptr_eq(parent.fiber(), &root))
     }
 
     /// The builtin group plugin: syncs the entry's subgroup from its config.
@@ -499,8 +496,7 @@ impl Loader {
                 .fiber
                 .borrow()
                 .as_ref()
-                .map(|candidate| Rc::ptr_eq(candidate, fiber))
-                .unwrap_or(false);
+                .is_some_and(|candidate| Rc::ptr_eq(candidate, fiber));
             if matches { Some(entry.id()) } else { None }
         })
     }
@@ -552,7 +548,7 @@ pub struct LoaderIntercept {
 impl LoaderIntercept {
     /// An intercept that makes the loader unavailable while tasks are pending.
     pub fn awaiting() -> Self {
-        LoaderIntercept {
+        Self {
             await_enabled: true,
         }
     }
@@ -560,7 +556,7 @@ impl LoaderIntercept {
 
 impl cordis_core::Config for LoaderIntercept {
     fn merge(&self, other: &Self) -> Self {
-        LoaderIntercept {
+        Self {
             await_enabled: other.await_enabled || self.await_enabled,
         }
     }

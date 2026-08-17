@@ -66,7 +66,7 @@ pub struct EntryGroup {
     /// layers.
     pub ctx: Context,
     /// The parent group, if any (`None` for the root group).
-    pub parent: Option<Rc<EntryGroup>>,
+    pub parent: Option<Rc<Self>>,
     /// Direct child entries of this group.
     pub entries: RefCell<Vec<Rc<Entry>>>,
     /// The group plugin's fiber, once initialized.
@@ -78,8 +78,8 @@ pub struct EntryGroup {
 impl EntryGroup {
     /// Creates an empty group under `parent` (or the root group when
     /// `parent` is `None`).
-    pub fn new(tree: Rc<EntryTree>, ctx: Context, parent: Option<Rc<EntryGroup>>) -> Rc<Self> {
-        Rc::new(EntryGroup {
+    pub fn new(tree: Rc<EntryTree>, ctx: Context, parent: Option<Rc<Self>>) -> Rc<Self> {
+        Rc::new(Self {
             tree,
             ctx,
             parent,
@@ -125,7 +125,7 @@ impl EntryTree {
 
     /// Creates a tree with an empty root group.
     pub fn new(ctx: &Context) -> Rc<Self> {
-        let tree = Rc::new(EntryTree {
+        let tree = Rc::new(Self {
             ctx: ctx.clone(),
             enable_logs: true,
             plugins: Rc::new(RefCell::new(HashMap::new())),
@@ -185,8 +185,7 @@ impl EntryTree {
                         .fiber
                         .borrow()
                         .as_ref()
-                        .map(|fiber| fiber.inertia_active())
-                        .unwrap_or(false)
+                        .is_some_and(|fiber| fiber.inertia_active())
                     || (entry.fiber.borrow().is_none()
                         && !entry.disabled()
                         && entry.options.borrow().group != Some(true))
@@ -213,7 +212,7 @@ impl EntryTree {
     /// Resolves an entry by id, walking nested groups via `:` separators.
     pub fn resolve_path(&self, id: &str) -> Result<Rc<Entry>, String> {
         let parts: Vec<&str> = id.split(Self::SEP).collect();
-        let tree: &EntryTree = self;
+        let tree: &Self = self;
         let mut current: Rc<EntryGroup> = tree
             .root
             .borrow()
@@ -409,7 +408,7 @@ impl EntryTree {
             }
             if !entry.disabled() && entry.options.borrow().group != Some(true) {
                 entry.init_task.set(true);
-                let this = entry.clone();
+                let this = entry;
                 let notify: Vec<(String, Vec<cordis_core::Label>)> = changed
                     .iter()
                     .map(|(name, old, new)| {
@@ -439,7 +438,7 @@ impl EntryTree {
             }
         } else if entry.fiber.borrow().is_none() && entry.options.borrow().group != Some(true) {
             entry.init_task.set(true);
-            let this = entry.clone();
+            let this = entry;
             tokio::task::spawn_local(async move {
                 this.init_inner().await;
                 this.init_task.set(false);
@@ -458,7 +457,7 @@ impl EntryTree {
             && entry.options.borrow().disabled != Some(true)
         {
             entry.init_task.set(true);
-            let this = entry.clone();
+            let this = entry;
             tokio::task::spawn_local(async move {
                 this.init_inner().await;
                 this.init_task.set(false);
@@ -525,8 +524,7 @@ fn fast_random() -> u64 {
         let next = if seed == 0 {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(1)
+                .map_or(1, |d| d.as_nanos() as u64)
         } else {
             seed
         };
@@ -571,7 +569,7 @@ impl Entry {
     pub fn new(tree: Rc<EntryTree>, parent: Rc<EntryGroup>, options: EntryOptions) -> Rc<Self> {
         let ctx = parent.ctx.clone();
         let ctx = ctx.with_isolate_layer().with_intercept_layer();
-        let entry = Rc::new(Entry {
+        let entry = Rc::new(Self {
             tree,
             ctx: RefCell::new(ctx),
             parent: RefCell::new(parent),
@@ -634,7 +632,7 @@ impl Entry {
         }
     }
 
-    fn ancestor_entry(&self) -> Option<Rc<Entry>> {
+    fn ancestor_entry(&self) -> Option<Rc<Self>> {
         self.parent.borrow().entry.borrow().clone()
     }
 
@@ -667,9 +665,7 @@ impl Entry {
         {
             let mut current = self.options.borrow_mut();
             if create {
-                *current = options
-                    .clone()
-                    .into_options(current.id.clone(), current.name.clone());
+                *current = options.into_options(current.id.clone(), current.name.clone());
             } else if clear_missing {
                 options.apply_full(&mut current);
             } else {
@@ -880,7 +876,7 @@ impl Entry {
     /// The outer stack lines for error reporting (mirrors `getOuterStack`).
     pub fn get_outer_stack(&self) -> Vec<String> {
         let mut result = Vec::new();
-        let mut entry: Option<Rc<Entry>> = self.ancestor_entry();
+        let mut entry: Option<Rc<Self>> = self.ancestor_entry();
         let mut own_id = self.options.borrow().id.clone();
         loop {
             let base = "cordis";
@@ -995,7 +991,7 @@ impl PartialEntryOptions {
 
     /// Builds a partial update from a full options set (used by `read`).
     pub fn from_options(options: &EntryOptions) -> Self {
-        PartialEntryOptions {
+        Self {
             id: Some(options.id.clone()),
             name: Some(options.name.clone()),
             config: options.config.clone(),
@@ -1011,7 +1007,7 @@ impl PartialEntryOptions {
 
 impl EntryOptions {
     /// Returns the keys whose values differ from `legacy`.
-    fn diff(&self, legacy: &EntryOptions) -> Vec<&'static str> {
+    fn diff(&self, legacy: &Self) -> Vec<&'static str> {
         let mut changed = Vec::new();
         if self.config != legacy.config {
             changed.push("config");

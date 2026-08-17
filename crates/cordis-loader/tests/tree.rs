@@ -1,6 +1,7 @@
 //! EntryTree。
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use cordis_core::{Context, Effect};
@@ -16,7 +17,7 @@ fn opts(id: &str, name: &str) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 

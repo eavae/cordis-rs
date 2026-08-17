@@ -206,7 +206,7 @@ impl WakerData {
     /// Creates a waker data cell owned by the caller.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(wake: unsafe extern "C" fn(*mut std::ffi::c_void)) -> RcWaker {
-        RcWaker(Box::into_raw(Box::new(WakerData {
+        RcWaker(Box::into_raw(Box::new(Self {
             refs: AtomicUsize::new(1),
             wake,
         })))
@@ -241,7 +241,7 @@ impl Clone for RcWaker {
         unsafe {
             (*self.0).refs.fetch_add(1, Ordering::AcqRel);
         }
-        RcWaker(self.0)
+        Self(self.0)
     }
 }
 

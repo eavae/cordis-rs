@@ -84,8 +84,7 @@ impl Loader {
 fn dep_string(value: &Rc<dyn Any>) -> &str {
     value
         .downcast_ref::<String>()
-        .map(String::as_str)
-        .unwrap_or("<not a string>")
+        .map_or("<not a string>", String::as_str)
 }
 
 fn dep_owned(value: &Rc<dyn Any>) -> String {
@@ -137,8 +136,7 @@ async fn invoke_uses_service_shadow() {
                 shadow
                     .ctx
                     .get_str("dep")
-                    .map(|value| dep_owned(&value))
-                    .unwrap_or_else(|| "<none>".to_string()),
+                    .map_or_else(|| "<none>".to_string(), |value| dep_owned(&value)),
                 "x"
             );
             assert!(
@@ -204,7 +202,7 @@ async fn bound_ctx_contract() {
             // Explicit escape hatch: with a different `own`, the same method
             // resolves in that scope — `own` is explicit, never inferred.
             let bare = root.get::<Probe>().expect("probe");
-            let result = bare.dep(&ShadowContext::new(root.clone(), root.clone()));
+            let result = bare.dep(&ShadowContext::new(root.clone(), root));
             assert_eq!(result.as_deref(), Some("root"));
         })
         .await;

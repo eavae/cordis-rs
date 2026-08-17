@@ -23,7 +23,7 @@ pub struct List<T> {
 impl<T: 'static> List<T> {
     /// Creates an empty list.
     pub fn new() -> Rc<Self> {
-        Rc::new(List::default())
+        Rc::new(Self::default())
     }
 
     /// The number of items.
@@ -86,7 +86,7 @@ impl<T: 'static> List<T> {
 
 impl<T> Default for List<T> {
     fn default() -> Self {
-        List {
+        Self {
             sn: Cell::new(0),
             inner: Rc::new(RefCell::new(Vec::new())),
         }

@@ -53,7 +53,7 @@ fn default_ignored() -> Vec<String> {
 
 impl Default for HmrConfig {
     fn default() -> Self {
-        HmrConfig {
+        Self {
             base: None,
             root: default_root(),
             debounce: default_debounce(),
@@ -85,12 +85,11 @@ pub fn hmr_plugin() -> cordis_core::Plugin {
                 .downcast_ref::<serde_yaml_ng::Value>()
                 .and_then(|value| serde_yaml_ng::from_value::<HmrConfig>(value.clone()).ok())
                 .unwrap_or_default();
-            let base_dir = config
-                .base
-                .as_deref()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            let watcher = FileWatcher::start(ctx.clone(), loader, config.clone(), base_dir);
+            let base_dir = config.base.as_deref().map_or_else(
+                || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                PathBuf::from,
+            );
+            let watcher = FileWatcher::start(ctx.clone(), loader, config, base_dir);
             Effect::Disposer(sync_disposer(move || {
                 watcher.stop();
             }))
@@ -112,7 +111,7 @@ impl FileWatcher {
         loader: Rc<Loader>,
         config: HmrConfig,
         base_dir: PathBuf,
-    ) -> Rc<FileWatcher> {
+    ) -> Rc<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<PathBuf>(64);
         let watcher = match RecommendedWatcher::new(
@@ -122,7 +121,7 @@ impl FileWatcher {
             Ok(watcher) => watcher,
             Err(error) => {
                 ctx.logger().error(format!("cannot start watcher: {error}"));
-                return Rc::new(FileWatcher {
+                return Rc::new(Self {
                     handle: None,
                     watcher: Rc::new(RefCell::new(None)),
                     watched: Vec::new(),
@@ -168,7 +167,7 @@ impl FileWatcher {
             }
         });
 
-        Rc::new(FileWatcher {
+        Rc::new(Self {
             handle: Some(handle),
             watcher,
             watched,

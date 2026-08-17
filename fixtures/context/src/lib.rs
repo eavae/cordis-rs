@@ -111,7 +111,7 @@ pub unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, config: *const 
     let vtable = unsafe { &*instance.vtable };
     // SAFETY: the caller passes a NUL-terminated string.
     let raw = unsafe { CStr::from_ptr(config) }.to_string_lossy();
-    let config: Config = serde_json::from_str(&raw).unwrap_or(Config {
+    let config: Config = serde_json::from_str(&raw).unwrap_or_else(|_| Config {
         greeting: default_greeting(),
     });
     // SAFETY: the vtable is the one the host provided for this handle.

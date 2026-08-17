@@ -21,13 +21,15 @@ fn eval_str(expr: &str, env: &EvalEnv) -> String {
         .evaluate(expr, env)
         .unwrap()
         .as_str()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            serde_yaml_ng::to_string(&MinijinjaEvaluator.evaluate(expr, env).unwrap())
-                .unwrap()
-                .trim()
-                .to_string()
-        })
+        .map_or_else(
+            || {
+                serde_yaml_ng::to_string(&MinijinjaEvaluator.evaluate(expr, env).unwrap())
+                    .unwrap()
+                    .trim()
+                    .to_string()
+            },
+            String::from,
+        )
 }
 
 #[test]

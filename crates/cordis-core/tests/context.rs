@@ -26,7 +26,7 @@ struct FooConfig {
 
 impl Config for FooConfig {
     fn merge(&self, other: &Self) -> Self {
-        FooConfig {
+        Self {
             a: other.a.or(self.a),
             b: other.b.or(self.b),
             c: other.c.or(self.c),

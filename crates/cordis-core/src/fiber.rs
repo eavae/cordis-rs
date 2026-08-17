@@ -55,7 +55,7 @@ pub struct CordisError {
 impl CordisError {
     /// Error raised when creating an effect on a disposed context.
     pub fn inactive_effect() -> Self {
-        CordisError {
+        Self {
             code: "INACTIVE_EFFECT",
             message: "cannot create effect on inactive context".to_string(),
         }
@@ -78,7 +78,7 @@ pub struct FiberError {
 
 impl FiberError {
     pub(crate) fn new(message: impl Into<String>) -> Self {
-        FiberError {
+        Self {
             message: message.into(),
         }
     }
@@ -94,7 +94,7 @@ impl Error for FiberError {}
 
 impl From<CordisError> for FiberError {
     fn from(error: CordisError) -> Self {
-        FiberError::new(error.message)
+        Self::new(error.message)
     }
 }
 
@@ -104,7 +104,7 @@ pub struct EffectMeta {
     /// The label passed to [`Fiber::effect`].
     pub label: String,
     /// Nested effects collected during this effect's execution.
-    pub children: Vec<EffectMeta>,
+    pub children: Vec<Self>,
 }
 
 /// An entry of a fiber's (or an effect's) disposables list.
@@ -139,7 +139,7 @@ pub struct EffectHandle {
 
 impl EffectHandle {
     fn new(label: &str) -> Rc<Self> {
-        Rc::new(EffectHandle {
+        Rc::new(Self {
             label: label.to_string(),
             epoch: Cell::new(true),
             disposables: RefCell::new(Vec::new()),
@@ -227,7 +227,7 @@ impl EffectHandle {
     fn spawn_dispose_with_task(self: Rc<Self>) -> BoxFuture<'static, Result<(), Box<dyn Error>>> {
         let done = self.task_done.clone();
         let task_notify = self.task_notify.clone();
-        let this = self.clone();
+        let this = self;
         let cleanup_done = Rc::new(Cell::new(false));
         let cleanup_done_waiter = cleanup_done.clone();
         let cleanup_notify = Rc::new(Notify::new());
@@ -337,7 +337,7 @@ pub struct Fiber {
 impl Fiber {
     /// Creates the root fiber of a context tree.
     pub(crate) fn root(ctx: Rc<ContextInner>) -> Rc<Self> {
-        Rc::new(Fiber {
+        Rc::new(Self {
             uid: Cell::new(Some(0)),
             ctx,
             parent: None,
@@ -360,7 +360,7 @@ impl Fiber {
     /// Resolves the fiber name: runtime name → nearest parent fiber name →
     /// `root`.
     pub fn name(&self) -> String {
-        let mut fiber: Option<&Fiber> = Some(self);
+        let mut fiber: Option<&Self> = Some(self);
         while let Some(current) = fiber {
             if let Some(name) = current
                 .runtime
@@ -847,8 +847,7 @@ impl Fiber {
                 entry
                     .fiber
                     .upgrade()
-                    .map(|fiber| Rc::ptr_eq(&fiber, self))
-                    .unwrap_or(false)
+                    .is_some_and(|fiber| Rc::ptr_eq(&fiber, self))
             })
             .map(|entry| entry.name.clone())
             .collect();
@@ -906,7 +905,7 @@ impl Fiber {
             }
             Effect::Async(future) => {
                 let handle = handle.clone();
-                let fiber = fiber.clone();
+                let fiber = fiber;
                 Ok(Some(Box::pin(async move {
                     match future.await {
                         Ok(disposer) => {
@@ -933,7 +932,7 @@ impl Fiber {
             }
             Effect::AsyncIterable(stream) => {
                 let handle = handle.clone();
-                let fiber = fiber.clone();
+                let fiber = fiber;
                 let mut stream = stream;
                 let mut stream_pending = false;
                 Ok(Some(Box::pin(async move {

@@ -24,7 +24,7 @@ fn opts(id: &str, name: &str) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 
@@ -38,7 +38,7 @@ fn group_opts(id: &str, config: Vec<EntryOptions>) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 
@@ -221,9 +221,18 @@ async fn group_intercept_chain() {
 
             let chain = captured.borrow();
             assert_eq!(chain.len(), 3, "intercept chain must have 3 layers");
-            assert_eq!(chain[0].get("c").and_then(|v| v.as_i64()), Some(3));
-            assert_eq!(chain[1].get("b").and_then(|v| v.as_i64()), Some(2));
-            assert_eq!(chain[2].get("a").and_then(|v| v.as_i64()), Some(1));
+            assert_eq!(
+                chain[0].get("c").and_then(serde_yaml_ng::Value::as_i64),
+                Some(3)
+            );
+            assert_eq!(
+                chain[1].get("b").and_then(serde_yaml_ng::Value::as_i64),
+                Some(2)
+            );
+            assert_eq!(
+                chain[2].get("a").and_then(serde_yaml_ng::Value::as_i64),
+                Some(1)
+            );
         })
         .await;
 }
@@ -295,8 +304,7 @@ async fn loader_intercept_await_fiber_states() {
                     .iter()
                     .find(|entry| entry.options.borrow().id == "1")
                     .and_then(|entry| entry.fiber.borrow().clone())
-                    .map(|fiber| fiber.state.get() == FiberState::Loading)
-                    .unwrap_or(false)
+                    .is_some_and(|fiber| fiber.state.get() == FiberState::Loading)
             })
             .await;
             assert_eq!(

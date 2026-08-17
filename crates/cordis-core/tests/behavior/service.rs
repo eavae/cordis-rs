@@ -20,7 +20,7 @@ struct Gate {
 
 impl Gate {
     fn new() -> Self {
-        Gate {
+        Self {
             fired: Rc::new(Cell::new(false)),
             waker: Rc::new(RefCell::new(None)),
         }
@@ -332,7 +332,7 @@ async fn service_macro_accessor_uses_shadow() {
             // service's own scope (JS: `this.ctx['database']`), not the
             // caller's.
             let shadow = ctx_own.shadow_of("database").expect("shadow");
-            let service_ctx = ShadowContext::new(shadow.ctx.clone(), ctx_caller.clone());
+            let service_ctx = ShadowContext::new(shadow.ctx, ctx_caller);
             let accessor = service_ctx.database().expect("database via own scope");
             assert_eq!(accessor.url, "cordis://own");
             // The caller chain still resolves nothing: the accessor did not

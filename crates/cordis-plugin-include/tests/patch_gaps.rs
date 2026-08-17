@@ -29,7 +29,7 @@ fn include_opts(config: IncludeConfig) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 
@@ -222,9 +222,7 @@ async fn patch_writes_arbitrary_extra_key_and_round_trips() {
             // The unknown key must survive a write-back cycle.
             loader.tree_handle().write();
             wait_until(|| {
-                fs::read_to_string(&path)
-                    .map(|content| content.contains("custom: x"))
-                    .unwrap_or(false)
+                fs::read_to_string(&path).is_ok_and(|content| content.contains("custom: x"))
             })
             .await;
             let content = fs::read_to_string(&path).unwrap();
@@ -301,7 +299,7 @@ async fn patch_inserts_into_nested_subgroup() {
                     inject: None,
                     isolate: None,
                     intercept: None,
-                    extra: Default::default(),
+                    extra: HashMap::default(),
                 }]),
                 ..Default::default()
             };
@@ -371,7 +369,7 @@ async fn patch_after_root_insert_matches_js_semantics() {
                     inject: None,
                     isolate: None,
                     intercept: None,
-                    extra: Default::default(),
+                    extra: HashMap::default(),
                 }]),
                 ..Default::default()
             };
@@ -527,7 +525,7 @@ async fn patch_insert_into_non_group_warns() {
                     inject: None,
                     isolate: None,
                     intercept: None,
-                    extra: Default::default(),
+                    extra: HashMap::default(),
                 }]),
                 ..Default::default()
             };

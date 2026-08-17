@@ -175,7 +175,7 @@ fn crate_path(crate_name: &str) -> String {
     let workspace = Path::new(&manifest)
         .parent()
         .and_then(|path| path.parent())
-        .unwrap_or(Path::new("."));
+        .unwrap_or_else(|| Path::new("."));
     let root = workspace.join("crates").join(crate_name);
     let root = std::fs::canonicalize(&root).unwrap_or(root);
     root.to_string_lossy().into_owned()
@@ -286,8 +286,7 @@ fn load_so_plugins(loader: &Loader, dir: &Path) -> anyhow::Result<Vec<SoPlugin>>
         let path = entry.path();
         let is_plugin = path
             .extension()
-            .map(|ext| ext == "so" || ext == "dylib")
-            .unwrap_or(false);
+            .is_some_and(|ext| ext == "so" || ext == "dylib");
         if !is_plugin {
             continue;
         }
@@ -334,7 +333,7 @@ impl ExitSignals {
     fn register() -> Self {
         #[cfg(unix)]
         {
-            ExitSignals {
+            Self {
                 sigint: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
                     .expect("sigint handler"),
                 sigterm: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

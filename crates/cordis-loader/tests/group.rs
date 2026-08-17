@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use cordis_core::{Context, Effect, sync_disposer};
@@ -17,7 +18,7 @@ fn group_opts(id: &str, config: Vec<EntryOptions>) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 
@@ -31,7 +32,7 @@ fn foo_opts() -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 
@@ -288,7 +289,7 @@ async fn group_config_stays_raw_and_children_evaluate() {
                 "foo",
                 Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
                     if let Some(value) = config.downcast_ref::<serde_yaml_ng::Value>() {
-                        *sink_apply.borrow_mut() = value.as_str().map(|s| s.to_string());
+                        *sink_apply.borrow_mut() = value.as_str().map(String::from);
                     }
                     Effect::None
                 }),

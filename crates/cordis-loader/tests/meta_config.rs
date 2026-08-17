@@ -1,5 +1,6 @@
 //! `.so` plugin metadata, config validation and the apply bridge.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -43,7 +44,7 @@ fn opts(name: &str, config: serde_yaml_ng::Value) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 

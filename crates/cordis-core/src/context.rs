@@ -63,7 +63,7 @@ pub type Label = Rc<str>;
 #[derive(Debug, Default)]
 pub(crate) struct IsolateLayer {
     entries: RefCell<HashMap<String, Label>>,
-    parent: RefCell<Option<Rc<IsolateLayer>>>,
+    parent: RefCell<Option<Rc<Self>>>,
 }
 
 impl IsolateLayer {
@@ -75,7 +75,7 @@ impl IsolateLayer {
     }
 
     /// Returns the bottom-most (root) layer of the chain.
-    fn bottom(self: &Rc<IsolateLayer>) -> Rc<IsolateLayer> {
+    fn bottom(self: &Rc<Self>) -> Rc<Self> {
         let mut layer = self.clone();
         loop {
             let next = layer.parent.borrow().clone();
@@ -95,7 +95,7 @@ impl IsolateLayer {
 #[derive(Debug, Default)]
 pub(crate) struct InterceptLayer {
     pub(crate) entries: RefCell<HashMap<String, Rc<dyn Any>>>,
-    pub(crate) parent: RefCell<Option<Rc<InterceptLayer>>>,
+    pub(crate) parent: RefCell<Option<Rc<Self>>>,
 }
 
 /// An entry of the shared service store.
@@ -164,8 +164,7 @@ impl ContextInner {
         let active = entry
             .fiber
             .upgrade()
-            .map(|fiber| fiber.state.get() == FiberState::Active)
-            .unwrap_or(false);
+            .is_some_and(|fiber| fiber.state.get() == FiberState::Active);
         if active { Some(entry) } else { None }
     }
 
@@ -244,8 +243,8 @@ pub struct ShadowContext {
 impl ShadowContext {
     /// Creates a service-method context from the service's own shadow
     /// context and the caller's context.
-    pub fn new(own: Context, caller: Context) -> ShadowContext {
-        ShadowContext { own, caller }
+    pub fn new(own: Context, caller: Context) -> Self {
+        Self { own, caller }
     }
 
     /// The service's own shadow context (dependency-resolution scope).
@@ -262,8 +261,8 @@ impl ShadowContext {
     /// method: the callee's shadow becomes `own`, while the caller chain
     /// stays unchanged (mirrors the JS trace, where each service hop only
     /// replaces the shadow and keeps the original access chain).
-    pub fn for_service(&self, next_own: Context) -> ShadowContext {
-        ShadowContext {
+    pub fn for_service(&self, next_own: Context) -> Self {
+        Self {
             own: next_own,
             caller: self.caller.clone(),
         }
@@ -319,7 +318,7 @@ impl ShadowContext {
             fiber: entry.fiber.upgrade()?,
         };
         invoke(
-            &ShadowContext {
+            &Self {
                 own,
                 caller: self.caller.clone(),
             },
@@ -375,7 +374,7 @@ impl Context {
     ///
     /// The root owns an `ACTIVE` fiber and provides the four framework
     /// services (`events`, `logger`, `reflect`, `registry`).
-    pub fn new() -> Context {
+    pub fn new() -> Self {
         let isolate = Rc::new(IsolateLayer::default());
         let intercept = Rc::new(InterceptLayer::default());
         let store = Rc::new(RefCell::new(Store::default()));
@@ -387,7 +386,7 @@ impl Context {
             props: Rc::new(RefCell::new(HashMap::new())),
         });
         let fiber = Fiber::root(inner.clone());
-        let ctx = Context { inner, fiber };
+        let ctx = Self { inner, fiber };
 
         // Framework services are visible on every context (context.ts).
         ctx.provide_inner(EventsService::default());
@@ -407,7 +406,7 @@ impl Context {
 
     /// Whether both contexts share the same inner state segment (used by the
     /// loader to identify an entry's own context).
-    pub fn shares_inner(&self, other: &Context) -> bool {
+    pub fn shares_inner(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.inner, &other.inner)
     }
 
@@ -417,8 +416,8 @@ impl Context {
     }
 
     /// Returns a context sharing this context's state but bound to `fiber`.
-    pub fn with_fiber(&self, fiber: Rc<Fiber>) -> Context {
-        Context {
+    pub fn with_fiber(&self, fiber: Rc<Fiber>) -> Self {
+        Self {
             inner: self.inner.clone(),
             fiber,
         }
@@ -494,9 +493,9 @@ impl Context {
         let fiber = entry.fiber.upgrade()?;
         Some(ServiceShadow {
             name: entry.name.clone(),
-            ctx: Context {
+            ctx: Self {
                 inner: entry.shadow_inner.clone(),
-                fiber: fiber.clone(),
+                fiber,
             },
             fiber: entry.fiber.clone(),
         })
@@ -521,8 +520,7 @@ impl Context {
         let owned_by = entry
             .fiber
             .upgrade()
-            .map(|fiber| Rc::ptr_eq(&fiber, provider))
-            .unwrap_or(false);
+            .is_some_and(|fiber| Rc::ptr_eq(&fiber, provider));
         if !owned_by || store.by_label.contains_key(new_label) {
             return false;
         }
@@ -542,17 +540,12 @@ impl Context {
         if entry.name != name || store.by_label.contains_key(new_label) {
             return false;
         }
-        let provider_moved = entry
-            .fiber
-            .upgrade()
-            .map(|fiber| {
-                fiber
-                    .ctx
-                    .isolate_label(name)
-                    .map(|label| &label == new_label)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
+        let provider_moved = entry.fiber.upgrade().is_some_and(|fiber| {
+            fiber
+                .ctx
+                .isolate_label(name)
+                .is_some_and(|label| &label == new_label)
+        });
         if !provider_moved {
             return false;
         }
@@ -695,7 +688,7 @@ impl Context {
 
     /// Whether the value is a [`Context`] (mirrors `Context.is(value)`).
     pub fn is_context(value: &dyn Any) -> bool {
-        value.is::<Context>()
+        value.is::<Self>()
     }
 
     /// Looks up a typed service.
@@ -747,8 +740,7 @@ impl Context {
                     existing
                         .fiber
                         .upgrade()
-                        .map(|f| f.name())
-                        .unwrap_or_else(|| "?".to_string())
+                        .map_or_else(|| "?".to_string(), |f| f.name())
                 ));
             }
         }
@@ -781,7 +773,7 @@ impl Context {
                     Effect::Disposer(Box::new(move || {
                         let ctx = ctx.clone();
                         let name = name.clone();
-                        let label = label.clone();
+                        let label = label;
                         Box::pin(async move {
                             ctx.inner.store.borrow_mut().by_label.remove(&label);
                             let fibers = ctx.notify(&name);
@@ -805,7 +797,7 @@ impl Context {
     pub fn provide<S: Service>(&self, value: Rc<S>) -> Result<Rc<EffectHandle>, String> {
         let check = {
             let value = value.clone();
-            Rc::new(move |ctx: &Context| value.check(ctx)) as ServiceCheck
+            Rc::new(move |ctx: &Self| value.check(ctx)) as ServiceCheck
         };
         let invoke = {
             let value = value.clone();
@@ -824,7 +816,7 @@ impl Context {
     pub fn invoke_str(&self, name: &str, init: Option<Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
         let entry = self.inner.lookup_strict(name)?;
         let invoke = entry.invoke.as_ref()?;
-        let own = Context {
+        let own = Self {
             inner: entry.shadow_inner.clone(),
             fiber: entry.fiber.upgrade()?,
         };
@@ -848,7 +840,7 @@ impl Context {
     /// `label`. Services provided by the child are invisible to the parent,
     /// while services already visible to the parent remain visible to the
     /// child unless the child isolates the same name with a different label.
-    pub fn isolate(&self, name: &str, label: Label) -> Context {
+    pub fn isolate(&self, name: &str, label: Label) -> Self {
         let layer = Rc::new(IsolateLayer {
             entries: RefCell::new(HashMap::from([(name.to_string(), label)])),
             parent: RefCell::new(Some(self.inner.isolate.clone())),
@@ -858,7 +850,7 @@ impl Context {
 
     /// Returns a context with an empty isolate layer on top (used by the
     /// loader to scope entry services per-realm).
-    pub fn with_isolate_layer(&self) -> Context {
+    pub fn with_isolate_layer(&self) -> Self {
         let layer = Rc::new(IsolateLayer {
             entries: RefCell::new(HashMap::new()),
             parent: RefCell::new(Some(self.inner.isolate.clone())),
@@ -886,7 +878,7 @@ impl Context {
     }
 
     /// Returns a context with an empty intercept layer on top.
-    pub fn with_intercept_layer(&self) -> Context {
+    pub fn with_intercept_layer(&self) -> Self {
         let layer = Rc::new(InterceptLayer {
             entries: RefCell::new(HashMap::new()),
             parent: RefCell::new(Some(self.inner.intercept.clone())),
@@ -917,7 +909,7 @@ impl Context {
     ///
     /// Config entries registered here override entries from parent layers
     /// when [`Context::resolve_config`] merges the chain.
-    pub fn intercept<C: Config>(&self, name: &str, config: C) -> Context {
+    pub fn intercept<C: Config>(&self, name: &str, config: C) -> Self {
         let layer = Rc::new(InterceptLayer {
             entries: RefCell::new(HashMap::from([(
                 name.to_string(),
@@ -932,7 +924,7 @@ impl Context {
     ///
     /// Metadata entries are appended to those of the parent; lookups prefer
     /// the nearest entry with the same key.
-    pub fn extend(&self, meta: &[(&str, Rc<dyn Any>)]) -> Context {
+    pub fn extend(&self, meta: &[(&str, Rc<dyn Any>)]) -> Self {
         let ctx = self.spawn(self.inner.isolate.clone(), self.inner.intercept.clone());
         let mut entries = self.inner.meta.borrow().clone();
         for (key, value) in meta {
@@ -1002,7 +994,7 @@ impl Context {
     /// Re-points the top isolate and intercept layers at `new_parent`'s
     /// chains (mirrors `Object.setPrototypeOf(ctx, parent.ctx)` when an entry
     /// moves between groups; the fiber keeps running).
-    pub fn reparent(&self, new_parent: &Context) {
+    pub fn reparent(&self, new_parent: &Self) {
         *self.inner.isolate.parent.borrow_mut() = Some(new_parent.inner.isolate.clone());
         *self.inner.intercept.parent.borrow_mut() = Some(new_parent.inner.intercept.clone());
     }
@@ -1076,7 +1068,7 @@ impl Context {
                         .borrow_mut()
                         .insert(name.clone(), Rc::new(MixinAccessor { get, set }));
                     let this_for_dispose = this.clone();
-                    let name_for_dispose = name.clone();
+                    let name_for_dispose = name;
                     Effect::Disposer(sync_disposer(move || {
                         this_for_dispose
                             .inner
@@ -1348,8 +1340,8 @@ impl Context {
         registry.notify_with_labels(name, labels)
     }
 
-    fn spawn(&self, isolate: Rc<IsolateLayer>, intercept: Rc<InterceptLayer>) -> Context {
-        Context {
+    fn spawn(&self, isolate: Rc<IsolateLayer>, intercept: Rc<InterceptLayer>) -> Self {
+        Self {
             inner: Rc::new(ContextInner {
                 isolate,
                 intercept,
@@ -1382,6 +1374,6 @@ impl Context {
 
 impl Default for Context {
     fn default() -> Self {
-        Context::new()
+        Self::new()
     }
 }

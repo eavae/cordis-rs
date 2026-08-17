@@ -38,8 +38,7 @@ fn is_no_forward(attr: &syn::Attribute) -> bool {
     attr.path()
         .segments
         .last()
-        .map(|segment| segment.ident == "no_forward")
-        .unwrap_or(false)
+        .is_some_and(|segment| segment.ident == "no_forward")
 }
 
 /// Whether the type is `&ShadowContext` (any path ending in `ShadowContext`).
@@ -51,8 +50,7 @@ fn is_shadow_ctx(ty: &Type) -> bool {
             .path
             .segments
             .last()
-            .map(|segment| segment.ident == "ShadowContext")
-            .unwrap_or(false);
+            .is_some_and(|segment| segment.ident == "ShadowContext");
     }
     false
 }
@@ -294,7 +292,7 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
         return expand_struct(input).into();
     }
-    if let Ok(input) = parse2::<ItemImpl>(item.clone().into()) {
+    if let Ok(input) = parse2::<ItemImpl>(item.into()) {
         return expand_impl(input).into();
     }
     quote!(compile_error!(

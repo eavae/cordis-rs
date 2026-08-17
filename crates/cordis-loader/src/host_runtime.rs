@@ -31,7 +31,7 @@ pub struct HostRuntime {
 impl HostRuntime {
     /// Creates an empty runtime.
     pub fn new() -> Rc<Self> {
-        HostRuntime::with_library(None)
+        Self::with_library(None)
     }
 
     /// Creates a runtime that keeps `library` mapped until every spawned
@@ -39,7 +39,7 @@ impl HostRuntime {
     /// plugin's boxed futures are always dropped (through the plugin's drop
     /// function) while the library is still loaded.
     pub fn with_library(library: Option<Arc<Library>>) -> Rc<Self> {
-        Rc::new(HostRuntime {
+        Rc::new(Self {
             tasks: RefCell::new(Vec::new()),
             library,
         })

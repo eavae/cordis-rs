@@ -49,10 +49,10 @@ impl TryFrom<u8> for LoggerLevel {
 
     fn try_from(value: u8) -> Result<Self, UnknownLoggerLevel> {
         match value {
-            0 => Ok(LoggerLevel::Error),
-            1 => Ok(LoggerLevel::Warn),
-            2 => Ok(LoggerLevel::Info),
-            3 => Ok(LoggerLevel::Debug),
+            0 => Ok(Self::Error),
+            1 => Ok(Self::Warn),
+            2 => Ok(Self::Info),
+            3 => Ok(Self::Debug),
             other => Err(UnknownLoggerLevel { value: other }),
         }
     }
@@ -60,7 +60,7 @@ impl TryFrom<u8> for LoggerLevel {
 
 impl From<LoggerLevel> for u8 {
     fn from(level: LoggerLevel) -> Self {
-        level as u8
+        level as Self
     }
 }
 
@@ -70,7 +70,7 @@ impl<'de> Deserialize<'de> for LoggerLevel {
         D: Deserializer<'de>,
     {
         let value = u8::deserialize(deserializer)?;
-        LoggerLevel::try_from(value).map_err(serde::de::Error::custom)
+        Self::try_from(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -91,10 +91,10 @@ impl LoggerType {
     /// The level of this log type.
     pub fn level(self) -> LoggerLevel {
         match self {
-            LoggerType::Error => LoggerLevel::Error,
-            LoggerType::Warn => LoggerLevel::Warn,
-            LoggerType::Info => LoggerLevel::Info,
-            LoggerType::Debug => LoggerLevel::Debug,
+            Self::Error => LoggerLevel::Error,
+            Self::Warn => LoggerLevel::Warn,
+            Self::Info => LoggerLevel::Info,
+            Self::Debug => LoggerLevel::Debug,
         }
     }
 }
@@ -122,19 +122,19 @@ pub enum LogValue {
 
 impl From<&str> for LogValue {
     fn from(value: &str) -> Self {
-        LogValue::Str(value.to_string())
+        Self::Str(value.to_string())
     }
 }
 
 impl From<String> for LogValue {
     fn from(value: String) -> Self {
-        LogValue::Str(value)
+        Self::Str(value)
     }
 }
 
 impl From<i64> for LogValue {
     fn from(value: i64) -> Self {
-        LogValue::Num(value as f64)
+        Self::Num(value as f64)
     }
 }
 
@@ -142,11 +142,11 @@ impl LogValue {
     /// The string used by the `%o` formatter (JSON-ish inspection).
     pub fn inspect(&self) -> String {
         match self {
-            LogValue::Str(value) => value.clone(),
-            LogValue::Num(value) => format!("{value}"),
-            LogValue::Object(value) => value.clone(),
-            LogValue::Error(value) => value.clone(),
-            LogValue::Empty => String::new(),
+            Self::Str(value) => value.clone(),
+            Self::Num(value) => format!("{value}"),
+            Self::Object(value) => value.clone(),
+            Self::Error(value) => value.clone(),
+            Self::Empty => String::new(),
         }
     }
 }
@@ -218,7 +218,7 @@ pub struct SimpleExporter {
 impl SimpleExporter {
     /// Creates an exporter that records messages into a shared vector.
     pub fn capturing(captured: Rc<RefCell<Vec<Message>>>) -> Rc<Self> {
-        Rc::new(SimpleExporter {
+        Rc::new(Self {
             colors: 0,
             max_length: 10240,
             levels: None,
@@ -261,7 +261,7 @@ pub struct LoggerIntercept {
 
 impl Config for LoggerIntercept {
     fn merge(&self, other: &Self) -> Self {
-        LoggerIntercept {
+        Self {
             name: other.name.clone().or_else(|| self.name.clone()),
             level: other.level.or(self.level),
         }
@@ -279,7 +279,7 @@ pub struct LoggerService {
 
 impl Default for LoggerService {
     fn default() -> Self {
-        let service = LoggerService {
+        let service = Self {
             buffer: Rc::new(RefCell::new(Vec::new())),
             buffer_size: Rc::new(Cell::new(1000)),
             exporters: Rc::new(RefCell::new(HashMap::new())),
@@ -398,11 +398,11 @@ impl LoggerService {
         for exporter in exporters.values() {
             let target = exporter
                 .levels()
-                .and_then(|levels| levels.get(name).cloned())
+                .and_then(|levels| levels.get(name).copied())
                 .or_else(|| {
                     exporter
                         .levels()
-                        .and_then(|levels| levels.get("default").cloned())
+                        .and_then(|levels| levels.get("default").copied())
                 })
                 .unwrap_or(LoggerLevel::Info);
             if target < level {
@@ -481,30 +481,30 @@ pub struct Logger {
 impl Logger {
     /// Creates a logger for `ctx` with an explicit name. Both the intercept
     /// chain and the fallback fiber name come from `ctx`.
-    pub fn new(ctx: &Context, explicit: Option<&str>) -> Logger {
-        Logger::traced(ctx, ctx, explicit)
+    pub fn new(ctx: &Context, explicit: Option<&str>) -> Self {
+        Self::traced(ctx, ctx, explicit)
     }
 
     /// Creates a traced logger for a service method: the intercept chain
     /// comes from the caller's context while the fallback name comes from
     /// the service's own shadow fiber (mirrors the TS logger's traceable
     /// naming).
-    pub fn traced(caller: &Context, own: &Context, explicit: Option<&str>) -> Logger {
+    pub fn traced(caller: &Context, own: &Context, explicit: Option<&str>) -> Self {
         let service = caller
             .get::<LoggerService>()
             .expect("logger service must be present");
         let name = service.resolve_name(caller, own, explicit);
-        Logger {
+        Self {
             service,
             ctx: caller.clone(),
             fiber_ctx: own.clone(),
             name,
-            explicit: explicit.map(|name| name.to_string()),
+            explicit: explicit.map(String::from),
         }
     }
 
     /// Returns a logger with an explicit name.
-    pub fn named(&self, name: &str) -> Logger {
+    pub fn named(&self, name: &str) -> Self {
         let mut logger = self.clone();
         logger.explicit = Some(name.to_string());
         logger.name = self
@@ -757,8 +757,7 @@ fn now_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 /// Records an error into the buffer sink (kept for compatibility).

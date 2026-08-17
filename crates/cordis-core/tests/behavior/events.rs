@@ -30,8 +30,7 @@ fn flag_filter(expected: bool) -> ListenerFilter {
         session
             .as_any()
             .downcast_ref::<Session>()
-            .map(|session| session.flag == expected)
-            .unwrap_or(true)
+            .is_none_or(|session| session.flag == expected)
     })
 }
 

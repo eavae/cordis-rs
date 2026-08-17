@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use cordis_core::{Context, Effect};
@@ -17,7 +18,7 @@ fn opts(id: &str, name: &str, disabled: bool) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 
@@ -31,7 +32,7 @@ fn counter_plugin(count: Rc<Cell<u32>>) -> cordis_core::ApplyFn {
 fn capture_plugin(sink: Rc<RefCell<Option<String>>>) -> cordis_core::ApplyFn {
     Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
         if let Some(value) = config.downcast_ref::<serde_yaml_ng::Value>() {
-            *sink.borrow_mut() = value.as_str().map(|s| s.to_string());
+            *sink.borrow_mut() = value.as_str().map(String::from);
         }
         Effect::None
     })

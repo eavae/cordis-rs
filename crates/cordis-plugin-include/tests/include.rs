@@ -1,6 +1,7 @@
 //! The include plugin.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::fs;
 use std::rc::Rc;
 
@@ -25,7 +26,7 @@ fn include_opts(config: IncludeConfig) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 

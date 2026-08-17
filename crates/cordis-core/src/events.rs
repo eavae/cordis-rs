@@ -170,7 +170,7 @@ pub struct EventsService {
 
 impl Default for EventsService {
     fn default() -> Self {
-        EventsService {
+        Self {
             hooks: Rc::new(RefCell::new(HashMap::new())),
         }
     }
@@ -292,15 +292,12 @@ impl EventsService {
         let event = event.to_string();
         let callback = callback.clone();
         let called = Rc::new(Cell::new(false));
-        let wrapper: EventCallback = {
-            let called = called.clone();
-            Rc::new(move |args: &[Rc<dyn Any>]| {
-                if called.replace(true) {
-                    return Box::pin(async { Ok(None) });
-                }
-                callback(args)
-            })
-        };
+        let wrapper: EventCallback = Rc::new(move |args: &[Rc<dyn Any>]| {
+            if called.replace(true) {
+                return Box::pin(async { Ok(None) });
+            }
+            callback(args)
+        });
         self.on(ctx, &event, wrapper, options)
     }
 

@@ -108,7 +108,7 @@ pub unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, config: *const 
     let vtable = unsafe { &*instance.vtable };
     // SAFETY: the caller passes a NUL-terminated string.
     let raw = unsafe { std::ffi::CStr::from_ptr(config) }.to_string_lossy();
-    let config = serde_json::from_str::<Config>(&raw).unwrap_or(Config {
+    let config = serde_json::from_str::<Config>(&raw).unwrap_or_else(|_| Config {
         value: serde_json::Value::Number(0.into()),
     });
     let value = config.number();

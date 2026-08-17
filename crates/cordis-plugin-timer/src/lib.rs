@@ -120,8 +120,7 @@ impl TimerService {
             let elapsed_ok = state
                 .borrow()
                 .last
-                .map(|last| now.duration_since(last) >= Duration::from_millis(delay))
-                .unwrap_or(true);
+                .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(delay));
             if elapsed_ok {
                 state.borrow_mut().last = Some(now);
                 state.borrow_mut().pending = false;

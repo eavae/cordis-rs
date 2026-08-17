@@ -24,7 +24,7 @@ pub struct ValidationError {
 impl ValidationError {
     /// Creates an error from a single message.
     pub fn new(message: impl Into<String>) -> Self {
-        ValidationError {
+        Self {
             issues: vec![ValidationIssue {
                 message: message.into(),
                 path: None,

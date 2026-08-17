@@ -50,13 +50,13 @@ pub enum Override<T> {
 impl<T> Override<T> {
     /// Whether the patch does not touch this field.
     pub fn is_absent(&self) -> bool {
-        matches!(self, Override::Absent)
+        matches!(self, Self::Absent)
     }
 
     /// The resulting `Option`: `Set` keeps the value, everything else clears.
     pub fn into_option(self) -> Option<T> {
         match self {
-            Override::Set(value) => Some(value),
+            Self::Set(value) => Some(value),
             _ => None,
         }
     }
@@ -68,9 +68,9 @@ impl<T: Serialize> Serialize for Override<T> {
         S: serde::Serializer,
     {
         match self {
-            Override::Absent => serializer.serialize_none(),
-            Override::Set(value) => value.serialize(serializer),
-            Override::Clear => serializer.serialize_none(),
+            Self::Absent => serializer.serialize_none(),
+            Self::Set(value) => value.serialize(serializer),
+            Self::Clear => serializer.serialize_none(),
         }
     }
 }
@@ -84,7 +84,7 @@ impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Override<T> {
         // `Clear`, any other value to `Set`.
         let value = Option::<serde_yaml_ng::Value>::deserialize(deserializer)?;
         match value {
-            None => Ok(Override::Clear),
+            None => Ok(Self::Clear),
             Some(value) => serde_yaml_ng::from_value(value)
                 .map(Override::Set)
                 .map_err(serde::de::Error::custom),
@@ -147,8 +147,7 @@ pub fn include_plugin() -> Plugin {
                         .fiber
                         .borrow()
                         .as_ref()
-                        .map(|candidate| Rc::ptr_eq(candidate, &fiber))
-                        .unwrap_or(false)
+                        .is_some_and(|candidate| Rc::ptr_eq(candidate, &fiber))
                 })
                 .expect("include entry");
             let subgroup = {
@@ -166,7 +165,7 @@ pub fn include_plugin() -> Plugin {
                     subgroup
                 }
             };
-            let loader = loader.clone();
+            let loader = loader;
             Effect::Async(Box::pin(async move {
                 mount_include(&loader, &subgroup, &config, &entry).await;
                 Ok(sync_disposer(|| {}))
@@ -217,7 +216,7 @@ async fn mount_include(
     state.readonly.set(!check_writable(&state.filename));
     let loader_ctx = loader.ctx.clone();
     let tree = loader.tree_handle();
-    let state_for_write = state.clone();
+    let state_for_write = state;
     let subgroup_for_write = subgroup.clone();
     *tree.write_callback.borrow_mut() = Some(Rc::new(move || {
         loader_ctx.emit("loader/config-update", &[]);

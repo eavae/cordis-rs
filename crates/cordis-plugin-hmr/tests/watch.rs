@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -47,7 +48,7 @@ fn config_defaults_and_validation() {
     );
     assert!(validate_config(&config).is_ok());
 
-    let mut invalid = config.clone();
+    let mut invalid = config;
     invalid.debounce = 0;
     assert!(validate_config(&invalid).is_err());
 }
@@ -179,7 +180,7 @@ async fn include_config_refresh() {
                     inject: None,
                     isolate: None,
                     intercept: None,
-                    extra: Default::default(),
+                    extra: HashMap::default(),
                 },
                 None,
                 0,

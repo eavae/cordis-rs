@@ -18,7 +18,7 @@ fn message(r#type: LoggerType, name: &str, ts: u64, args: Vec<LogValue>) -> Mess
 }
 
 fn exporter(config: ConsoleConfig, lines: Rc<RefCell<Vec<String>>>) -> Rc<ConsoleExporter> {
-    let lines2 = lines.clone();
+    let lines2 = lines;
     let exporter = ConsoleExporter::new(
         config,
         Rc::new(move |line| lines2.borrow_mut().push(line.to_string())),
@@ -41,7 +41,7 @@ fn formats_error() {
             show_time: String::new(),
             ..Default::default()
         },
-        lines.clone(),
+        lines,
     );
     exp.set_timestamp(base);
     let rendered = exp.render(&message(

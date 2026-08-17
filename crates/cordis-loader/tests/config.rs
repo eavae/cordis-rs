@@ -1,5 +1,6 @@
 //! Config file parsing and atomic write-back.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -15,7 +16,7 @@ fn sample_config() -> Vec<EntryOptions> {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }]
 }
 
@@ -52,7 +53,7 @@ fn sorted_yaml_key_order() {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     };
     let value = to_sorted_value(&options);
     let mapping = value.as_mapping().unwrap();

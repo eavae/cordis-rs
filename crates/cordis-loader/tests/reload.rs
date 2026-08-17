@@ -1,6 +1,7 @@
 //! `.so` reload semantics — dispose the old instance, load a new one;
 //! per-instance state does not survive.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -43,7 +44,7 @@ fn opts(name: &str, config: serde_yaml_ng::Value) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
-        extra: Default::default(),
+        extra: HashMap::default(),
     }
 }
 

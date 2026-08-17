@@ -53,15 +53,15 @@ pub enum LoadError {
 impl fmt::Display for LoadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LoadError::Open { path, error } => {
+            Self::Open { path, error } => {
                 write!(f, "cannot open plugin {path:?}: {error}")
             }
-            LoadError::MissingSymbol {
+            Self::MissingSymbol {
                 path,
                 symbol,
                 error,
             } => write!(f, "plugin {path:?} is missing symbol {symbol}: {error}"),
-            LoadError::VersionMismatch {
+            Self::VersionMismatch {
                 path,
                 found,
                 expected,
@@ -115,7 +115,7 @@ impl SoPlugin {
     /// # Safety
     ///
     /// The returned plugin must only be used from one thread.
-    pub unsafe fn load(path: &Path) -> Result<SoPlugin, LoadError> {
+    pub unsafe fn load(path: &Path) -> Result<Self, LoadError> {
         // SAFETY: libloading requires the caller to keep the path valid.
         let library = unsafe { Library::new(path) }.map_err(|error| LoadError::Open {
             path: path.to_path_buf(),
@@ -194,7 +194,7 @@ impl SoPlugin {
                         )
                     }
                 });
-        Ok(SoPlugin {
+        Ok(Self {
             path: path.to_path_buf(),
             version: found,
             runtime: HostRuntime::with_library(Some(Arc::clone(&library))),
