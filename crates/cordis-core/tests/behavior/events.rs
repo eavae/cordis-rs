@@ -1,7 +1,7 @@
 //! Ported cases from `packages/core/tests/events.spec.ts`.
 
 use std::any::Any;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cordis_core::{
@@ -301,7 +301,7 @@ async fn internal_update_hook() {
     local
         .run_until(async {
             let root = Context::new();
-            let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let seen = Rc::new(RefCell::new(Vec::new()));
             let applied_seen = seen.clone();
             let fiber = root.plugin(
                 &Plugin {

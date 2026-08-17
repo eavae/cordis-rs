@@ -1,5 +1,7 @@
 //! The Loader service itself.
 
+use std::any::Any;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use cordis_core::{Context, Effect, LoggerLevel, SimpleExporter};
@@ -74,7 +76,7 @@ async fn show_log_emits_apply_and_reload() {
     local
         .run_until(async {
             let root = Context::new();
-            let captured = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let captured = Rc::new(RefCell::new(Vec::new()));
             drop(
                 root.logger()
                     .exporter(Rc::new(SimpleExporter {
@@ -110,7 +112,7 @@ async fn show_log_emits_apply_and_reload() {
             let config = serde_yaml_ng::to_value(serde_yaml_ng::Mapping::new()).unwrap();
             loader
                 .expect_fiber("1")
-                .update_with(Some(Rc::new(config) as Rc<dyn std::any::Any>), false)
+                .update_with(Some(Rc::new(config) as Rc<dyn Any>), false)
                 .await
                 .unwrap();
             tokio::task::yield_now().await;

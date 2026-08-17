@@ -1,5 +1,6 @@
 //! EntryGroup and the Group plugin.
 
+use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -285,7 +286,7 @@ async fn group_config_stays_raw_and_children_evaluate() {
             let sink_apply = sink.clone();
             loader.mock(
                 "foo",
-                Rc::new(move |_ctx: &Context, config: &Rc<dyn std::any::Any>| {
+                Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
                     if let Some(value) = config.downcast_ref::<serde_yaml_ng::Value>() {
                         *sink_apply.borrow_mut() = value.as_str().map(|s| s.to_string());
                     }

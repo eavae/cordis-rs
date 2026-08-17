@@ -1,6 +1,7 @@
 //! TS spec parity fill-ins: behavioral cases in loader/group/isolate not yet
 //! covered 1:1 (corresponding to `packages/loader/tests/{group,index,isolate}.spec.ts`).
 
+use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -50,7 +51,7 @@ fn bar_value_config(value: &str) -> serde_yaml_ng::Value {
 }
 
 fn bar_plugin() -> cordis_core::ApplyFn {
-    Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {
+    Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
         let value = config
             .downcast_ref::<serde_yaml_ng::Value>()
             .and_then(|value| value.get("value"))
@@ -58,7 +59,7 @@ fn bar_plugin() -> cordis_core::ApplyFn {
             .unwrap_or("default")
             .to_string();
         drop(
-            ctx.provide_str("bar", Rc::new(BarValue { value }) as Rc<dyn std::any::Any>)
+            ctx.provide_str("bar", Rc::new(BarValue { value }) as Rc<dyn Any>)
                 .unwrap(),
         );
         Effect::None

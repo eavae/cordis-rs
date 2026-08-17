@@ -1,5 +1,6 @@
 //! The include plugin.
 
+use std::any::Any;
 use std::fs;
 use std::rc::Rc;
 
@@ -35,7 +36,7 @@ fn setup_loader(loader: &Loader) {
         .insert("@cordisjs/plugin-include".to_string(), include_plugin());
     loader.mock(
         "greeter",
-        Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {
+        Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
             let value = config
                 .downcast_ref::<serde_yaml_ng::Value>()
                 .and_then(|value| value.get("value"))

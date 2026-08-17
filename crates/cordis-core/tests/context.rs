@@ -1,5 +1,6 @@
 //! Context skeleton: dual-track Service access and chained isolation.
 
+use std::any::Any;
 use std::rc::Rc;
 
 use cordis_core::{
@@ -216,7 +217,7 @@ async fn extend_carries_metadata() {
     let root = Context::new();
     let child = root.extend(&[(
         "loader/entry-init",
-        Rc::new(MetaValue("demo".into())) as Rc<dyn std::any::Any>,
+        Rc::new(MetaValue("demo".into())) as Rc<dyn Any>,
     )]);
 
     let meta = child

@@ -2,6 +2,7 @@
 //! dynamic-access completion (`set` ownership, `get` three states, `has`,
 //! `accessor`).
 
+use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -123,7 +124,7 @@ async fn reflect_set_ownership_check() {
             drop(
                 root.on(
                     "internal/service",
-                    Rc::new(move |args: &[Rc<dyn std::any::Any>]| {
+                    Rc::new(move |args: &[Rc<dyn Any>]| {
                         let name = args[0].downcast_ref::<String>().unwrap().clone();
                         let value = args[1].downcast_ref::<i32>().copied().unwrap_or_default();
                         updates.borrow_mut().push(format!("{name}={value}"));

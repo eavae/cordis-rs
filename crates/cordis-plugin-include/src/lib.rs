@@ -3,6 +3,7 @@
 //! Port of `@cordisjs/plugin-include`: reads yaml/json config files into an
 //! entry tree and applies patches.
 
+use std::any::Any;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -131,7 +132,7 @@ pub fn include_plugin() -> Plugin {
         name: Some("include".to_string()),
         inject: vec![("loader".to_string(), None)],
         is_group: false,
-        apply: Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {
+        apply: Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
             let loader = ctx.get::<Loader>().expect("loader");
             let config = config
                 .downcast_ref::<serde_yaml_ng::Value>()

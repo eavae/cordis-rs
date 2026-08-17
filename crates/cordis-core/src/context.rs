@@ -12,7 +12,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::ConfigValidator;
@@ -99,7 +99,7 @@ pub(crate) struct InterceptLayer {
 pub(crate) struct StoreEntry {
     pub name: String,
     pub value: Rc<dyn Any>,
-    pub fiber: std::rc::Weak<Fiber>,
+    pub fiber: Weak<Fiber>,
     /// The inner state of the context on which the service was provided
     /// (the JS `symbols.shadow`). Only the inner is kept: holding a full
     /// [`Context`] here would strongly pin the provider fiber and create an
@@ -207,7 +207,7 @@ pub struct ServiceShadow {
     pub ctx: Context,
     /// The provider fiber (weak, mirroring how the TS runtime keeps fiber
     /// references in `Message`).
-    pub fiber: std::rc::Weak<Fiber>,
+    pub fiber: Weak<Fiber>,
 }
 
 /// The service-method context (the explicit counterpart of `this.ctx`

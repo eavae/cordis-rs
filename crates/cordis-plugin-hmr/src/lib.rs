@@ -7,6 +7,7 @@ pub mod build;
 pub mod graph;
 pub mod reload;
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -78,7 +79,7 @@ pub fn hmr_plugin() -> cordis_core::Plugin {
         is_group: false,
         name: Some("hmr".to_string()),
         inject: vec![("loader".to_string(), None)],
-        apply: Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {
+        apply: Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
             let loader = ctx.get::<Loader>().expect("loader");
             let config = config
                 .downcast_ref::<serde_yaml_ng::Value>()

@@ -1,6 +1,7 @@
 //! Ported cases from `packages/core/tests/plugin.spec.ts`.
 
-use std::cell::Cell;
+use std::any::Any;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cordis_core::{
@@ -23,10 +24,10 @@ async fn apply_functional_plugin() {
     local
         .run_until(async {
             let root = Context::new();
-            let calls = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let calls = Rc::new(RefCell::new(Vec::new()));
             let apply = {
                 let calls = calls.clone();
-                Rc::new(move |_ctx: &Context, config: &Rc<dyn std::any::Any>| {
+                Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
                     let options = config.downcast_ref::<Options>().expect("config").foo;
                     calls.borrow_mut().push(options);
                     Effect::None
@@ -53,7 +54,7 @@ async fn apply_object_plugin() {
     local
         .run_until(async {
             let root = Context::new();
-            let calls = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let calls = Rc::new(RefCell::new(Vec::new()));
             // The `Plugin` struct is the Rust equivalent of the TS object
             // plugin form `{ apply, name, inject }`.
             let plugin = Plugin {
@@ -62,7 +63,7 @@ async fn apply_object_plugin() {
                 inject: Vec::new(),
                 apply: {
                     let calls = calls.clone();
-                    Rc::new(move |_ctx: &Context, config: &Rc<dyn std::any::Any>| {
+                    Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
                         let bar = config.downcast_ref::<BarOptions>().expect("config").bar;
                         calls.borrow_mut().push(bar);
                         Effect::None
@@ -89,7 +90,7 @@ async fn inactive_context() {
                 inject: Vec::new(),
                 apply: {
                     let other_calls = other_calls.clone();
-                    Rc::new(move |_ctx: &Context, _config: &Rc<dyn std::any::Any>| {
+                    Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
                         other_calls.set(other_calls.get() + 1);
                         Effect::None
                     })
@@ -101,7 +102,7 @@ async fn inactive_context() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(move |ctx: &Context, _config: &Rc<dyn std::any::Any>| {
+                    apply: Rc::new(move |ctx: &Context, _config: &Rc<dyn Any>| {
                         let ctx = ctx.clone();
                         let other = Plugin {
                             is_group: false,
@@ -229,7 +230,7 @@ async fn nested_plugins() {
             let callback_hit = Rc::new(Cell::new(0u32));
             let listener = {
                 let callback_hit = callback_hit.clone();
-                move |_args: &[Rc<dyn std::any::Any>]| {
+                move |_args: &[Rc<dyn Any>]| {
                     callback_hit.set(callback_hit.get() + 1);
                 }
             };
@@ -486,7 +487,7 @@ async fn shared_runtime_multiple_fibers() {
     local
         .run_until(async {
             let root = Context::new();
-            let apply = Rc::new(|_ctx: &Context, _config: &Rc<dyn std::any::Any>| Effect::None);
+            let apply = Rc::new(|_ctx: &Context, _config: &Rc<dyn Any>| Effect::None);
             let plugin = Plugin {
                 is_group: false,
                 name: Some("shared".to_string()),

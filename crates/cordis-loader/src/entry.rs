@@ -1,5 +1,6 @@
 //! Entry, EntryGroup and EntryTree.
 
+use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -726,7 +727,7 @@ impl Entry {
     /// Resolves the config for the currently registered plugin (mirrors the
     /// TS `_resolveConfig(this.fiber.runtime!.callback)`), falling back to the
     /// raw config when the plugin cannot be re-imported.
-    fn resolve_applied_config(&self) -> Option<Rc<dyn std::any::Any>> {
+    fn resolve_applied_config(&self) -> Option<Rc<dyn Any>> {
         match self.tree.import(&self.options.borrow().name) {
             Ok(plugin) => match self.resolve_config_value(&plugin) {
                 Ok(config) => config,
@@ -741,10 +742,7 @@ impl Entry {
         }
     }
 
-    fn resolve_config_value(
-        &self,
-        plugin: &Plugin,
-    ) -> Result<Option<Rc<dyn std::any::Any>>, String> {
+    fn resolve_config_value(&self, plugin: &Plugin) -> Result<Option<Rc<dyn Any>>, String> {
         // Group plugins receive their config list as-is (mirrors the TS
         // `_resolveConfig` check against `EntryGroup.key`).
         if plugin.is_group {
@@ -756,19 +754,19 @@ impl Entry {
             return Ok(None);
         };
         let Some(loader) = self.tree.ctx.get::<crate::Loader>() else {
-            return Ok(Some(Rc::new(config) as Rc<dyn std::any::Any>));
+            return Ok(Some(Rc::new(config) as Rc<dyn Any>));
         };
         evaluate_config(&config, &MinijinjaEvaluator, &loader.eval_env())
-            .map(|value| Some(Rc::new(value) as Rc<dyn std::any::Any>))
+            .map(|value| Some(Rc::new(value) as Rc<dyn Any>))
             .map_err(|error| format!("config evaluation failed: {error}"))
     }
 
-    fn raw_config(&self) -> Option<Rc<dyn std::any::Any>> {
+    fn raw_config(&self) -> Option<Rc<dyn Any>> {
         self.options
             .borrow()
             .config
             .clone()
-            .map(|value| Rc::new(value) as Rc<dyn std::any::Any>)
+            .map(|value| Rc::new(value) as Rc<dyn Any>)
     }
 
     /// Initializes the entry: imports the plugin and creates its fiber

@@ -1,5 +1,6 @@
 //! Include write debounce and the `loader/config-update` event.
 
+use std::cell::Cell;
 use std::fs;
 use std::rc::Rc;
 
@@ -72,7 +73,7 @@ async fn same_turn_writes_coalesce_but_events_fire() {
                 .join(format!("cordis-include-debounce-a-{}", std::process::id()));
             let path = fixture_yaml(&dir, 1);
             let root = Context::new();
-            let updates = Rc::new(std::cell::Cell::new(0u32));
+            let updates = Rc::new(Cell::new(0u32));
             drop(
                 root.on(
                     "loader/config-update",

@@ -1,5 +1,6 @@
 //! Entry-level `inject` merging and `noSave` write-back skipping.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -66,10 +67,7 @@ async fn entry_inject_keeps_fiber_pending_until_provider() {
             loader.mock(
                 "provider",
                 Rc::new(|ctx: &Context, _config| {
-                    drop(
-                        ctx.provide_str("slot", Rc::new(()) as Rc<dyn std::any::Any>)
-                            .unwrap(),
-                    );
+                    drop(ctx.provide_str("slot", Rc::new(()) as Rc<dyn Any>).unwrap());
                     Effect::None
                 }),
             );
@@ -118,10 +116,7 @@ async fn no_save_skips_write_back() {
 
             let fiber = loader.expect_fiber("1");
             fiber
-                .update_with(
-                    Some(Rc::new(yaml_value(&[("a", 3)])) as Rc<dyn std::any::Any>),
-                    true,
-                )
+                .update_with(Some(Rc::new(yaml_value(&[("a", 3)])) as Rc<dyn Any>), true)
                 .await
                 .unwrap();
             let data = loader.data();
@@ -165,10 +160,7 @@ async fn child_fiber_does_not_write_back() {
 
             let child = child.borrow().clone().expect("child fiber must be created");
             child
-                .update_with(
-                    Some(Rc::new(yaml_value(&[("x", 9)])) as Rc<dyn std::any::Any>),
-                    false,
-                )
+                .update_with(Some(Rc::new(yaml_value(&[("x", 9)])) as Rc<dyn Any>), false)
                 .await
                 .unwrap();
             let data = loader.data();
@@ -195,10 +187,7 @@ async fn normal_update_still_writes_back() {
 
             let fiber = loader.expect_fiber("1");
             fiber
-                .update_with(
-                    Some(Rc::new(yaml_value(&[("a", 3)])) as Rc<dyn std::any::Any>),
-                    false,
-                )
+                .update_with(Some(Rc::new(yaml_value(&[("a", 3)])) as Rc<dyn Any>), false)
                 .await
                 .unwrap();
             let data = loader.data();

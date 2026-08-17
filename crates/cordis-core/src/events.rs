@@ -2,7 +2,7 @@
 //! `serial`, `bail`, `waterfall`), listener lifecycle and filters.
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
@@ -220,7 +220,7 @@ impl EventsService {
     ) -> Result<Rc<EffectHandle>, CordisError> {
         let event = event.to_string();
         let callback = callback.clone();
-        let called = Rc::new(std::cell::Cell::new(false));
+        let called = Rc::new(Cell::new(false));
         let wrapper: EventCallback = {
             let called = called.clone();
             Rc::new(

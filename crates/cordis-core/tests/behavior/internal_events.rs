@@ -6,7 +6,7 @@
 //! `fiber.ts` `_updateState`).
 
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cordis_core::{AnyNext, Context, Effect, EventCallback, EventOptions, FiberState, Plugin};
@@ -106,7 +106,7 @@ fn internal_set_hook_intercepts_write() {
     let root = Context::new();
     drop(root.provide_str("foo", Rc::new(1u32)).unwrap());
 
-    let intercept = Rc::new(std::cell::Cell::new(false));
+    let intercept = Rc::new(Cell::new(false));
     let hook_intercept = intercept.clone();
     let set_hook: EventCallback = Rc::new(move |args: &[Rc<dyn Any>]| {
         let name = args[1].downcast_ref::<String>().unwrap();

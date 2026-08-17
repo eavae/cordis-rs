@@ -1,7 +1,9 @@
 //! Error types shared by the core runtime.
 
+use std::any::Any;
 use std::error::Error;
 use std::fmt;
+use std::rc::Rc;
 
 /// A single validation issue (mirrors `StandardSchemaV1.Issue`).
 #[derive(Debug, Clone, PartialEq)]
@@ -47,5 +49,4 @@ impl fmt::Display for ValidationError {
 impl Error for ValidationError {}
 
 /// A config validator (`fn(&Rc<dyn Any>) -> Result<(), ValidationError>`).
-pub type ConfigValidator =
-    std::rc::Rc<dyn Fn(&std::rc::Rc<dyn std::any::Any>) -> Result<(), ValidationError>>;
+pub type ConfigValidator = Rc<dyn Fn(&Rc<dyn Any>) -> Result<(), ValidationError>>;

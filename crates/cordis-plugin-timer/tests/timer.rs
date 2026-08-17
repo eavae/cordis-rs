@@ -1,6 +1,6 @@
 //! Timer plugin.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -140,7 +140,7 @@ async fn throttle_first_immediate_then_delayed() {
     local
         .run_until(async {
             let root = Context::new();
-            let calls = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let calls = Rc::new(RefCell::new(Vec::new()));
             let throttled = TimerService::throttle(
                 &root,
                 {

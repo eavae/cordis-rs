@@ -3,7 +3,7 @@
 //! Port of `@cordisjs/plugin-logger-console`: renders log messages in the
 //! console format.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -87,7 +87,7 @@ pub struct ConsoleExporter {
     pub config: ConsoleConfig,
     /// Custom formatters (`%x`).
     pub formatters: RefCell<HashMap<char, LogFormatter>>,
-    timestamp: std::cell::Cell<u64>,
+    timestamp: Cell<u64>,
     writer: Rc<dyn Fn(&str)>,
 }
 
@@ -97,7 +97,7 @@ impl ConsoleExporter {
         let exporter = Rc::new(ConsoleExporter {
             config,
             formatters: RefCell::new(HashMap::new()),
-            timestamp: std::cell::Cell::new(0),
+            timestamp: Cell::new(0),
             writer,
         });
         exporter.timestamp.set(Message::now_millis());

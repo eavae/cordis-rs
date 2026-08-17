@@ -1,5 +1,6 @@
 //! Loader-level isolate realms。
 
+use std::any::Any;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -49,7 +50,7 @@ fn isolate_map(entries: &[(&str, IsolateValue)]) -> HashMap<String, IsolateValue
 fn setup(loader: &Loader, foo_count: Rc<Cell<u32>>, dispose_count: Rc<Cell<u32>>) {
     loader.mock(
         "bar",
-        Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {
+        Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
             let value = config
                 .downcast_ref::<serde_yaml_ng::Value>()
                 .and_then(|value| value.get("value"))
@@ -230,7 +231,7 @@ async fn realm_global_labels_share() {
             tree.await_tree().await;
             assert_eq!(foo_count.get(), 2);
 
-            let value = |fiber: &std::rc::Rc<cordis_core::Fiber>| {
+            let value = |fiber: &Rc<cordis_core::Fiber>| {
                 fiber
                     .context()
                     .get_str("bar")

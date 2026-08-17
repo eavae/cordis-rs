@@ -1,5 +1,6 @@
 //! Entry and EntryOptions (basic loader cases).
 
+use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -21,14 +22,14 @@ fn opts(id: &str, name: &str, disabled: bool) -> EntryOptions {
 }
 
 fn counter_plugin(count: Rc<Cell<u32>>) -> cordis_core::ApplyFn {
-    Rc::new(move |_ctx: &Context, _config: &Rc<dyn std::any::Any>| {
+    Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
         count.set(count.get() + 1);
         Effect::None
     })
 }
 
 fn capture_plugin(sink: Rc<RefCell<Option<String>>>) -> cordis_core::ApplyFn {
-    Rc::new(move |_ctx: &Context, config: &Rc<dyn std::any::Any>| {
+    Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
         if let Some(value) = config.downcast_ref::<serde_yaml_ng::Value>() {
             *sink.borrow_mut() = value.as_str().map(|s| s.to_string());
         }
@@ -158,10 +159,7 @@ async fn plugin_self_update_writes_back_config() {
             };
             let fiber = loader.expect_fiber("1");
             fiber
-                .update_with(
-                    Some(Rc::new(config.clone()) as Rc<dyn std::any::Any>),
-                    false,
-                )
+                .update_with(Some(Rc::new(config.clone()) as Rc<dyn Any>), false)
                 .await
                 .unwrap();
 

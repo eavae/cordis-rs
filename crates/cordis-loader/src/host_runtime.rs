@@ -13,7 +13,7 @@
 //! unloads and dropping a plugin with pending tasks would otherwise call
 //! into unmapped code.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -40,7 +40,7 @@ impl HostRuntime {
     /// function) while the library is still loaded.
     pub fn with_library(library: Option<Arc<Library>>) -> Rc<Self> {
         Rc::new(HostRuntime {
-            tasks: std::cell::RefCell::new(Vec::new()),
+            tasks: RefCell::new(Vec::new()),
             library,
         })
     }

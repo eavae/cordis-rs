@@ -115,8 +115,8 @@ pub trait Service: Any {
     fn invoke(
         &self,
         _ctx: &crate::ShadowContext,
-        _init: Option<&std::rc::Rc<dyn Any>>,
-    ) -> Option<std::rc::Rc<dyn Any>> {
+        _init: Option<&Rc<dyn Any>>,
+    ) -> Option<Rc<dyn Any>> {
         None
     }
 }

@@ -4,6 +4,7 @@
 //! `effect_disposer`) end to end through the loader, plus entry-level
 //! isolate visibility and the host-thread discipline.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -139,8 +140,7 @@ async fn provide_get_event_and_disposers() {
             // Host emits an event; the plugin listener responds and writes
             // back through the vtable logger, including a `get` round-trip
             // (the fiber is ACTIVE during dispatch).
-            let args: Rc<dyn std::any::Any> =
-                Rc::new(serde_yaml_ng::Value::String("world".to_string()));
+            let args: Rc<dyn Any> = Rc::new(serde_yaml_ng::Value::String("world".to_string()));
             entry.ctx.borrow().emit("demo/event", &[args]);
             let logged = LOGGED.lock().unwrap().clone();
             assert!(

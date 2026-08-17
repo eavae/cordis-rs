@@ -1,5 +1,6 @@
 //! Reload execution (entry re-apply) and rollback.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use cordis_core::{Context, Effect, Plugin};
@@ -19,7 +20,7 @@ fn opts(name: &str) -> EntryOptions {
     }
 }
 
-fn plugin(applied: Rc<std::cell::Cell<u32>>) -> Plugin {
+fn plugin(applied: Rc<Cell<u32>>) -> Plugin {
     Plugin {
         is_group: false,
         name: None,
@@ -40,7 +41,7 @@ async fn entry_reload_reapplies_with_new_plugin() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(std::cell::Cell::new(0u32));
+            let applied = Rc::new(Cell::new(0u32));
             loader
                 .tree
                 .plugins
@@ -77,7 +78,7 @@ async fn reload_rolls_back_on_failure() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(std::cell::Cell::new(0u32));
+            let applied = Rc::new(Cell::new(0u32));
             loader
                 .tree
                 .plugins

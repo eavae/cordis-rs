@@ -1,5 +1,6 @@
 //! Ported cases from `packages/core/tests/invoke.spec.ts`.
 
+use std::any::Any;
 use std::rc::Rc;
 
 use cordis_core::{Config, Context, Effect, Plugin, Service, ShadowContext};
@@ -30,11 +31,7 @@ struct Foo {
 impl Service for Foo {
     const NAME: &'static str = "foo";
 
-    fn invoke(
-        &self,
-        ctx: &ShadowContext,
-        init: Option<&Rc<dyn std::any::Any>>,
-    ) -> Option<Rc<dyn std::any::Any>> {
+    fn invoke(&self, ctx: &ShadowContext, init: Option<&Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
         let init_config: Option<FooConfig> =
             init.and_then(|value| value.downcast_ref::<FooConfig>().cloned());
         let merged =
@@ -62,7 +59,7 @@ async fn functional_service() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {
+                    apply: Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
                         let config = config
                             .downcast_ref::<FooConfig>()
                             .cloned()

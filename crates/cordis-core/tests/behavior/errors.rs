@@ -1,6 +1,7 @@
 //! Ported behaviors from `fiber.ts`: ValidationError formatting, config
 //! validation on registration/update, and entry location in apply errors.
 
+use std::any::Any;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -15,21 +16,19 @@ struct Config {
 }
 
 fn value_must_be_positive() -> ConfigValidator {
-    Rc::new(
-        |config: &Rc<dyn std::any::Any>| -> Result<(), ValidationError> {
-            let config = config.downcast_ref::<Config>().expect("config");
-            if config.value > 0 {
-                Ok(())
-            } else {
-                Err(ValidationError {
-                    issues: vec![ValidationIssue {
-                        message: "value must be positive".to_string(),
-                        path: Some("value".to_string()),
-                    }],
-                })
-            }
-        },
-    )
+    Rc::new(|config: &Rc<dyn Any>| -> Result<(), ValidationError> {
+        let config = config.downcast_ref::<Config>().expect("config");
+        if config.value > 0 {
+            Ok(())
+        } else {
+            Err(ValidationError {
+                issues: vec![ValidationIssue {
+                    message: "value must be positive".to_string(),
+                    path: Some("value".to_string()),
+                }],
+            })
+        }
+    })
 }
 
 #[test]
@@ -66,7 +65,7 @@ async fn config_validation_rejects_registration() {
                     inject: Vec::new(),
                     apply: {
                         let applied = applied.clone();
-                        Rc::new(move |_ctx: &Context, _config: &Rc<dyn std::any::Any>| {
+                        Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
                             applied.set(applied.get() + 1);
                             Effect::None
                         })
@@ -101,7 +100,7 @@ async fn config_validation_rejects_update() {
                     inject: Vec::new(),
                     apply: {
                         let applied = applied.clone();
-                        Rc::new(move |_ctx: &Context, _config: &Rc<dyn std::any::Any>| {
+                        Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
                             applied.set(applied.get() + 1);
                             Effect::None
                         })

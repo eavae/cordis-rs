@@ -1,6 +1,6 @@
 //! Ported cases from `packages/core/tests/dispose.spec.ts`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -89,7 +89,7 @@ async fn effects_dispose_by_plugin() {
     local
         .run_until(async {
             let root = Context::new();
-            let dispose_called = Rc::new(std::cell::Cell::new(0u32));
+            let dispose_called = Rc::new(Cell::new(0u32));
             let dispose_called_apply = dispose_called.clone();
             let fiber = root.plugin(
                 &Plugin {
@@ -139,7 +139,7 @@ async fn effects_dispose_manually() {
     local
         .run_until(async {
             let root = Context::new();
-            let dispose_called = Rc::new(std::cell::Cell::new(0u32));
+            let dispose_called = Rc::new(Cell::new(0u32));
             let handle = {
                 let dispose_called = dispose_called.clone();
                 root.effect(

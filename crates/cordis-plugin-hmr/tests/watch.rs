@@ -1,5 +1,7 @@
 //! File watching, debounce, ignored globs and include refresh.
 
+use std::any::Any;
+use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -60,7 +62,7 @@ async fn change_event_and_ignored() {
             let dir = temp_dir("event");
             let root = Context::new();
             let loader = Loader::new(&root);
-            let changes = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let changes = Rc::new(RefCell::new(Vec::new()));
             drop(
                 root.on(
                     "hmr/change",
@@ -132,7 +134,7 @@ async fn include_config_refresh() {
                 .insert("@cordisjs/plugin-include".to_string(), include_plugin());
             loader.mock(
                 "greeter",
-                Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {
+                Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
                     let value = config
                         .downcast_ref::<serde_yaml_ng::Value>()
                         .and_then(|value| value.get("value"))
@@ -143,7 +145,7 @@ async fn include_config_refresh() {
                     Effect::None
                 }),
             );
-            let changes = Rc::new(std::cell::RefCell::new(0u32));
+            let changes = Rc::new(RefCell::new(0u32));
             drop(
                 root.on(
                     "hmr/change",

@@ -1,5 +1,6 @@
 //! Include patch gap regressions (8 cases).
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
@@ -39,7 +40,7 @@ fn setup_loader(loader: &Loader) {
         .insert("@cordisjs/plugin-include".to_string(), include_plugin());
     loader.mock(
         "greeter",
-        Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {
+        Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
             let value = config
                 .downcast_ref::<serde_yaml_ng::Value>()
                 .and_then(|value| value.get("value"))

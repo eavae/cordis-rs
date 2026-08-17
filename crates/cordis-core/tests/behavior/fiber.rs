@@ -4,7 +4,8 @@
 //! schedules fiber state-machine tasks on a `LocalSet` (`spawn_local`), so
 //! these tests run inside one and observe the same state transitions.
 
-use std::cell::Cell;
+use std::any::Any;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use cordis_core::{
@@ -192,7 +193,7 @@ async fn fiber_plugin_error() {
             let callback_hit = Rc::new(Cell::new(0u32));
             let apply = {
                 let callback_hit = callback_hit.clone();
-                Rc::new(move |ctx: &Context, config: &Rc<dyn std::any::Any>| {
+                Rc::new(move |ctx: &Context, config: &Rc<dyn Any>| {
                     let callback_hit = callback_hit.clone();
                     drop(
                         ctx.on(
@@ -259,7 +260,7 @@ async fn fiber_dispose_error() {
             let dispose_called = Rc::new(Cell::new(0u32));
             let apply = {
                 let dispose_called = dispose_called.clone();
-                Rc::new(move |_ctx: &Context, _config: &Rc<dyn std::any::Any>| {
+                Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
                     let dispose_called = dispose_called.clone();
                     Effect::Disposer(async_disposer(move || async move {
                         dispose_called.set(dispose_called.get() + 1);
@@ -295,10 +296,10 @@ async fn fiber_update_config_on_wrapped_fiber() {
     local
         .run_until(async {
             let root = Context::new();
-            let calls = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let calls = Rc::new(RefCell::new(Vec::new()));
             let apply = {
                 let calls = calls.clone();
-                Rc::new(move |_ctx: &Context, config: &Rc<dyn std::any::Any>| {
+                Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
                     let msg = config.downcast_ref::<Msg>().expect("config").msg;
                     calls.borrow_mut().push(msg);
                     Effect::None
@@ -343,7 +344,7 @@ async fn fiber_restart_wrapped_fiber() {
             let calls = Rc::new(Cell::new(0u32));
             let apply = {
                 let calls = calls.clone();
-                Rc::new(move |_ctx: &Context, _config: &Rc<dyn std::any::Any>| {
+                Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
                     calls.set(calls.get() + 1);
                     Effect::None
                 })
@@ -472,9 +473,9 @@ async fn fiber_update_config_while_injected_service_reloads() {
     local
         .run_until(async {
             let root = Context::new();
-            let applied = Rc::new(std::cell::RefCell::new(Vec::new()));
+            let applied = Rc::new(RefCell::new(Vec::new()));
 
-            let provider_apply = Rc::new(|ctx: &Context, config: &Rc<dyn std::any::Any>| {
+            let provider_apply = Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
                 let value = config
                     .downcast_ref::<ProviderConfig>()
                     .expect("config")
@@ -498,7 +499,7 @@ async fn fiber_update_config_while_injected_service_reloads() {
 
             let consumer_apply = {
                 let applied = applied.clone();
-                Rc::new(move |ctx: &Context, config: &Rc<dyn std::any::Any>| {
+                Rc::new(move |ctx: &Context, config: &Rc<dyn Any>| {
                     let mode = config
                         .downcast_ref::<ConsumerConfig>()
                         .expect("config")

@@ -347,7 +347,7 @@ async fn service_macro_accessor_uses_shadow() {
 /// service.spec.ts.
 #[service]
 struct TraceableCounter {
-    value: Rc<std::cell::Cell<i32>>,
+    value: Rc<Cell<i32>>,
 }
 
 #[service]

@@ -1,5 +1,6 @@
 //! The Loader service.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
@@ -246,7 +247,7 @@ impl Loader {
             is_group: true,
             name: Some("group".to_string()),
             inject: Vec::new(),
-            apply: Rc::new(move |ctx: &Context, config: &Rc<dyn std::any::Any>| {
+            apply: Rc::new(move |ctx: &Context, config: &Rc<dyn Any>| {
                 let fiber = ctx.fiber().clone();
                 if let Some(entry) = loader.find_entry_for_fiber(&fiber) {
                     let configs: Vec<EntryOptions> = match config
@@ -419,7 +420,7 @@ impl Loader {
             .ok_or_else(|| "plugin instance is not created".to_string())?;
         let name = metadata.name.clone();
         let name_for_error = name.clone();
-        let apply: ApplyFn = Rc::new(move |ctx: &Context, config: &Rc<dyn std::any::Any>| {
+        let apply: ApplyFn = Rc::new(move |ctx: &Context, config: &Rc<dyn Any>| {
             let config = config
                 .downcast_ref::<serde_yaml_ng::Value>()
                 .cloned()

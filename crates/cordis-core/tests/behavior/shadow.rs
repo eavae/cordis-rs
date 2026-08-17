@@ -9,6 +9,7 @@
 //! context. These tests pin the behavioural contract so the two stay
 //! aligned.
 
+use std::any::Any;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -24,11 +25,7 @@ struct Callable;
 impl Service for Callable {
     const NAME: &'static str = "callable";
 
-    fn invoke(
-        &self,
-        ctx: &ShadowContext,
-        _init: Option<&Rc<dyn std::any::Any>>,
-    ) -> Option<Rc<dyn std::any::Any>> {
+    fn invoke(&self, ctx: &ShadowContext, _init: Option<&Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
         // `get_str` routes to `own` — the callable's own realm, not the
         // caller's (JS: `this.ctx['dependency']` → the service shadow).
         ctx.get_str("dep")
@@ -44,7 +41,7 @@ struct Outer;
 
 #[service]
 impl Outer {
-    pub fn call(&self, ctx: &ShadowContext) -> Option<Rc<dyn std::any::Any>> {
+    pub fn call(&self, ctx: &ShadowContext) -> Option<Rc<dyn Any>> {
         ctx.invoke::<Callable>(None)
     }
 }
@@ -84,14 +81,14 @@ impl Loader {
     }
 }
 
-fn dep_string(value: &Rc<dyn std::any::Any>) -> &str {
+fn dep_string(value: &Rc<dyn Any>) -> &str {
     value
         .downcast_ref::<String>()
         .map(String::as_str)
         .unwrap_or("<not a string>")
 }
 
-fn dep_owned(value: &Rc<dyn std::any::Any>) -> String {
+fn dep_owned(value: &Rc<dyn Any>) -> String {
     dep_string(value).to_string()
 }
 
