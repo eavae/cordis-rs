@@ -8,20 +8,32 @@
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use cordis_sdk::{BoxedFuture, RcWaker, WakerData};
+use libloading::Library;
 
 /// The per-plugin-instance host runtime: owns every task the plugin spawned.
 pub struct HostRuntime {
     tasks: std::cell::RefCell<Vec<tokio::task::JoinHandle<()>>>,
+    library: Option<Arc<Library>>,
 }
 
 impl HostRuntime {
     /// Creates an empty runtime.
     pub fn new() -> Rc<Self> {
+        HostRuntime::with_library(None)
+    }
+
+    /// Creates a runtime that keeps `library` mapped until every spawned
+    /// task is dropped: pending tasks hold their own `Arc` clone, so the
+    /// plugin's boxed futures are always dropped (through the plugin's drop
+    /// function) while the library is still loaded.
+    pub fn with_library(library: Option<Arc<Library>>) -> Rc<Self> {
         Rc::new(HostRuntime {
             tasks: std::cell::RefCell::new(Vec::new()),
+            library,
         })
     }
 
@@ -52,6 +64,7 @@ pub unsafe extern "C" fn host_spawn(data: *mut c_void, future: *mut c_void) {
         future: Some(*future),
         waker_data: None,
         waker: Cell::new(None),
+        _library: runtime.library.clone(),
     };
     let handle = tokio::task::spawn_local(task);
     runtime.tasks.borrow_mut().push(handle);
@@ -62,6 +75,10 @@ struct HostTask {
     future: Option<BoxedFuture>,
     waker_data: Option<RcWaker>,
     waker: Cell<Option<Waker>>,
+    /// Keeps the plugin library mapped until this task is dropped: the
+    /// boxed future is dropped in [`Drop for HostTask`] while the library is
+    /// still loaded.
+    _library: Option<Arc<Library>>,
 }
 
 impl std::future::Future for HostTask {

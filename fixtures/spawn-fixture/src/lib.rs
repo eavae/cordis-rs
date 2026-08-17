@@ -142,6 +142,15 @@ pub extern "C" fn plugin_completed() -> u32 {
     COMPLETED.load(Ordering::SeqCst)
 }
 
+/// Resets the process-wide counters (the host keeps the library loaded
+/// across tests, so counters accumulate otherwise).
+#[unsafe(no_mangle)]
+pub extern "C" fn plugin_reset_counters() {
+    CREATE_COUNT.store(0, Ordering::SeqCst);
+    CANCELLED_DROPS.store(0, Ordering::SeqCst);
+    COMPLETED.store(0, Ordering::SeqCst);
+}
+
 /// Counts drops of a never-completing future (cancellation detection).
 struct CancelledGuard;
 

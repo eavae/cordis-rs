@@ -3,6 +3,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use cordis_sdk::{
     HostVtable, PLUGIN_API_VERSION, PluginHandle,
@@ -80,9 +81,12 @@ impl std::error::Error for LoadError {}
 pub struct SoPlugin {
     path: PathBuf,
     version: u32,
-    // Heap-pinned so the symbol references below stay valid after the struct
-    // moves; the library is unloaded when the box is dropped.
-    _library: Box<Library>,
+    // Heap-pinned (`Arc`) so the symbol references below stay valid after
+    // the struct moves; the pending host tasks also hold clones, so the
+    // library stays mapped until the last task drops (the plugin's boxed
+    // futures are dropped through the plugin's drop function while the
+    // library is still loaded).
+    _library: Arc<Library>,
     /// Per-instance host runtime: owns every task the plugin spawned;
     /// disposed together with the plugin handle.
     runtime: Rc<HostRuntime>,
@@ -113,10 +117,10 @@ impl SoPlugin {
             path: path.to_path_buf(),
             error: error.to_string(),
         })?;
-        // Heap-pinning lets the symbols borrow the library with a static
-        // lifetime; the box is moved into the struct without moving the
-        // library itself.
-        let library = Box::new(library);
+        // Heap-pinning (via `Arc`) lets the symbols borrow the library with
+        // a static lifetime; the `Arc` is moved into the struct (and cloned
+        // into the host runtime) without moving the library itself.
+        let library = Arc::new(library);
         let version: Symbol<ApiVersion> =
             unsafe { library.get(b"plugin_api_version") }.map_err(|error| {
                 LoadError::MissingSymbol {
@@ -189,8 +193,8 @@ impl SoPlugin {
         Ok(SoPlugin {
             path: path.to_path_buf(),
             version: found,
+            runtime: HostRuntime::with_library(Some(Arc::clone(&library))),
             _library: library,
-            runtime: HostRuntime::new(),
             vtable: None,
             handle: None,
             create,
