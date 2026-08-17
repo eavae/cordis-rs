@@ -106,9 +106,15 @@ pub trait Service: Any {
     /// Callable-service invocation (mirrors `[Service.invoke]`).
     ///
     /// The default returns `None` (not callable).
+    ///
+    /// The [`ShadowContext`](crate::ShadowContext) carries both scopes the
+    /// TS proxy provides through `this.ctx`: dependency reads (e.g.
+    /// [`get_str`](crate::ShadowContext::get_str)) resolve through the
+    /// service's own shadow, while everything else (intercept, fiber,
+    /// effects, plugins) follows the caller's context.
     fn invoke(
         &self,
-        _ctx: &crate::Context,
+        _ctx: &crate::ShadowContext,
         _init: Option<&std::rc::Rc<dyn Any>>,
     ) -> Option<std::rc::Rc<dyn Any>> {
         None

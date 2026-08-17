@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use cordis_core::{Config, Context, Effect, Plugin, Service};
+use cordis_core::{Config, Context, Effect, Plugin, Service, ShadowContext};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 struct FooConfig {
@@ -32,7 +32,7 @@ impl Service for Foo {
 
     fn invoke(
         &self,
-        ctx: &Context,
+        ctx: &ShadowContext,
         init: Option<&Rc<dyn std::any::Any>>,
     ) -> Option<Rc<dyn std::any::Any>> {
         let init_config: Option<FooConfig> =
@@ -122,7 +122,7 @@ async fn functional_service() {
                 ..Default::default()
             });
             let result = foo2
-                .invoke(&root, None)
+                .invoke(&ShadowContext::new(root.clone(), root.clone()), None)
                 .expect("foo")
                 .downcast_ref::<FooConfig>()
                 .cloned()
@@ -141,7 +141,7 @@ async fn functional_service() {
                 ..Default::default()
             });
             let result = foo3
-                .invoke(&ctx1, None)
+                .invoke(&ShadowContext::new(root.clone(), ctx1.clone()), None)
                 .expect("foo")
                 .downcast_ref::<FooConfig>()
                 .cloned()

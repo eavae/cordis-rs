@@ -11,6 +11,7 @@
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -35,7 +36,7 @@ pub type MixinSet = Rc<dyn Fn(&Context, Rc<dyn Any>)>;
 
 /// A callable-service invocation handler (`[Service.invoke]` in the TS
 /// reference).
-pub type InvokeFn = Rc<dyn Fn(&Context, Option<&Rc<dyn Any>>) -> Option<Rc<dyn Any>>>;
+pub type InvokeFn = Rc<dyn Fn(&ShadowContext, Option<&Rc<dyn Any>>) -> Option<Rc<dyn Any>>>;
 
 /// A registered accessor (`Property.Accessor` in reflect.ts).
 pub struct MixinAccessor {
@@ -207,6 +208,137 @@ pub struct ServiceShadow {
     /// The provider fiber (weak, mirroring how the TS runtime keeps fiber
     /// references in `Message`).
     pub fiber: std::rc::Weak<Fiber>,
+}
+
+/// The service-method context (the explicit counterpart of `this.ctx`
+/// inside a JS service method).
+///
+/// In the TS reference, `this.ctx` inside a service method is a hybrid: its
+/// own `symbols.shadow` points at the service's own registration context
+/// (used for dependency resolution), while its prototype chain points at the
+/// caller's context (used for intercept, fiber and other chain reads).
+/// [`ShadowContext`] models the same split explicitly:
+///
+/// - dependency reads ([`get_str`](Self::get_str), [`get`](Self::get),
+///   [`has_str`](Self::has_str), ...) resolve through the service's own
+///   shadow context (`own`);
+/// - everything else dereferences to the caller's context (`caller`), so
+///   `resolve_config`, `fiber`, `plugin`, `effect`, events and other
+///   `Context` APIs behave as if called from the caller's scope.
+///
+/// The framework constructs a [`ShadowContext`] for callable invocations
+/// ([`Context::invoke_str`]); callers of regular service methods construct
+/// one explicitly (typically with [`Self::for_service`] and the callee's
+/// shadow from [`Context::shadow_of`]).
+#[derive(Clone, Debug)]
+pub struct ShadowContext {
+    /// The service's own registration context (its shadow).
+    own: Context,
+    /// The caller's context (the original access chain).
+    caller: Context,
+}
+
+impl ShadowContext {
+    /// Creates a service-method context from the service's own shadow
+    /// context and the caller's context.
+    pub fn new(own: Context, caller: Context) -> ShadowContext {
+        ShadowContext { own, caller }
+    }
+
+    /// The service's own shadow context (dependency-resolution scope).
+    pub fn own(&self) -> &Context {
+        &self.own
+    }
+
+    /// The caller's context (intercept / fiber / chain-read scope).
+    pub fn caller(&self) -> &Context {
+        &self.caller
+    }
+
+    /// Returns the context for calling into another service from this
+    /// method: the callee's shadow becomes `own`, while the caller chain
+    /// stays unchanged (mirrors the JS trace, where each service hop only
+    /// replaces the shadow and keeps the original access chain).
+    pub fn for_service(&self, next_own: Context) -> ShadowContext {
+        ShadowContext {
+            own: next_own,
+            caller: self.caller.clone(),
+        }
+    }
+
+    /// Dynamic dependency read through the service's own scope (mirrors
+    /// `this.ctx[name]` in the TS reference).
+    pub fn get_str(&self, name: &str) -> Option<Rc<dyn Any>> {
+        self.own.get_str(name)
+    }
+
+    /// Strict dynamic dependency read through the service's own scope.
+    pub fn get_str_strict(&self, name: &str) -> Result<Rc<dyn Any>, String> {
+        self.own.get_str_strict(name)
+    }
+
+    /// Non-strict dynamic dependency read through the service's own scope.
+    pub fn get_str_non_strict(&self, name: &str) -> Option<Rc<dyn Any>> {
+        self.own.get_str_non_strict(name)
+    }
+
+    /// Typed dependency read through the service's own scope.
+    pub fn get<S: Service>(&self) -> Option<Rc<S>> {
+        self.own.get::<S>()
+    }
+
+    /// Whether `name` resolves as a property in the service's own scope.
+    pub fn has_str(&self, name: &str) -> bool {
+        self.own.has_str(name)
+    }
+
+    /// Whether any store entry with `name` exists in the service's own
+    /// scope.
+    pub fn provides(&self, name: &str) -> bool {
+        self.own.provides(name)
+    }
+
+    /// The recorded shadow of a service visible from the service's own
+    /// scope.
+    pub fn shadow_of(&self, name: &str) -> Option<ServiceShadow> {
+        self.own.shadow_of(name)
+    }
+
+    /// Invokes a callable service from this method (mirrors
+    /// `this.ctx[name](...)`): the callable is resolved through the
+    /// service's own scope and the invocation receives this method's caller
+    /// chain.
+    pub fn invoke_str(&self, name: &str, init: Option<Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
+        let entry = self.own.inner.lookup_strict(name)?;
+        let invoke = entry.invoke.as_ref()?;
+        let own = Context {
+            inner: entry.shadow_inner.clone(),
+            fiber: entry.fiber.upgrade()?,
+        };
+        invoke(
+            &ShadowContext {
+                own,
+                caller: self.caller.clone(),
+            },
+            init.as_ref(),
+        )
+    }
+
+    /// Typed variant of [`ShadowContext::invoke_str`].
+    pub fn invoke<S: Service>(&self, init: Option<Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
+        self.invoke_str(S::NAME, init)
+    }
+}
+
+impl Deref for ShadowContext {
+    type Target = Context;
+
+    /// Everything except dependency reads behaves as the caller's context:
+    /// intercept/fiber/plugin/effect/events all operate in the caller's
+    /// scope (mirrors the JS shadow's prototype chain).
+    fn deref(&self) -> &Context {
+        &self.caller
+    }
 }
 
 /// The core object handed to plugins.
@@ -626,17 +758,32 @@ impl Context {
         };
         let invoke = {
             let value = value.clone();
-            Rc::new(move |ctx: &Context, init: Option<&Rc<dyn Any>>| value.invoke(ctx, init))
+            Rc::new(move |ctx: &ShadowContext, init: Option<&Rc<dyn Any>>| value.invoke(ctx, init))
                 as InvokeFn
         };
         self.provide_inner_impl(S::NAME, value, Some(check), Some(invoke))
     }
 
     /// Invokes a callable service (mirrors `ctx[service](...)`).
+    ///
+    /// The invocation receives a [`ShadowContext`] whose `own` is the
+    /// callable's recorded shadow (its own registration context) and whose
+    /// caller is this context — the faithful counterpart of the JS proxy
+    /// injecting `this.ctx` into `[Service.invoke]`.
     pub fn invoke_str(&self, name: &str, init: Option<Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
         let entry = self.inner.lookup_strict(name)?;
         let invoke = entry.invoke.as_ref()?;
-        invoke(self, init.as_ref())
+        let own = Context {
+            inner: entry.shadow_inner.clone(),
+            fiber: entry.fiber.upgrade()?,
+        };
+        invoke(
+            &ShadowContext {
+                own,
+                caller: self.clone(),
+            },
+            init.as_ref(),
+        )
     }
 
     /// Invokes a typed callable service.
