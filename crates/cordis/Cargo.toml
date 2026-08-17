@@ -12,5 +12,3 @@ workspace = true
 
 [dependencies]
 cordis-core = { path = "../cordis-core" }
-cordis-loader = { path = "../cordis-loader" }
-
