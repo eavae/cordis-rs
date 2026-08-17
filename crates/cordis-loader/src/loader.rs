@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use cordis_core::{
     AnyNext, ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service, event_callback,
+    event_listener_async,
 };
 
 use crate::entry::{Entry, EntryGroup, EntryOptions, EntryTree, PartialEntryOptions};
@@ -113,23 +114,27 @@ impl Loader {
             self.ctx
                 .on(
                     "internal/update",
-                    event_callback(move |args| {
-                        let no_save = args[1].downcast_ref::<bool>().copied().unwrap_or(false);
-                        let fiber = args[2].clone().downcast::<Fiber>().ok();
-                        let next = &args[3].downcast_ref::<AnyNext>().expect("next").0;
-                        if let Some(fiber) = fiber
-                            && !no_save
-                            && let Some(entry) = loader.find_entry_for_fiber(&fiber)
-                            && !loader.fiber_is_root_of(&entry, &fiber)
-                            && let Ok(config) = args[0].clone().downcast::<serde_yaml_ng::Value>()
-                        {
-                            let mut options = entry.options.borrow().clone();
-                            options.config = Some((*config).clone());
-                            *entry.options.borrow_mut() = options;
-                            entry.tree.write();
+                    event_listener_async(move |args| {
+                        let loader = loader.clone();
+                        async move {
+                            let no_save = args[1].downcast_ref::<bool>().copied().unwrap_or(false);
+                            let fiber = args[2].clone().downcast::<Fiber>().ok();
+                            let next = args[3].downcast_ref::<AnyNext>().expect("next").0.clone();
+                            if let Some(fiber) = fiber
+                                && !no_save
+                                && let Some(entry) = loader.find_entry_for_fiber(&fiber)
+                                && !loader.fiber_is_root_of(&entry, &fiber)
+                                && let Ok(config) =
+                                    args[0].clone().downcast::<serde_yaml_ng::Value>()
+                            {
+                                let mut options = entry.options.borrow().clone();
+                                options.config = Some((*config).clone());
+                                *entry.options.borrow_mut() = options;
+                                entry.tree.write();
+                            }
+                            let _ = next().await;
+                            Ok(None)
                         }
-                        next();
-                        Ok(None)
                     }),
                     EventOptions {
                         prepend: true,
@@ -145,19 +150,22 @@ impl Loader {
             self.ctx
                 .on(
                     "internal/update",
-                    event_callback(move |args| {
-                        let no_save = args[1].downcast_ref::<bool>().copied().unwrap_or(false);
-                        let fiber = args[2].clone().downcast::<Fiber>().ok();
-                        let next = &args[3].downcast_ref::<AnyNext>().expect("next").0;
-                        if !no_save
-                            && let Some(fiber) = fiber
-                            && let Some(entry) = loader.find_entry_for_fiber(&fiber)
-                            && !loader.fiber_is_root_of(&entry, &fiber)
-                        {
-                            loader.show_log("reload", &entry);
+                    event_listener_async(move |args| {
+                        let loader = loader.clone();
+                        async move {
+                            let no_save = args[1].downcast_ref::<bool>().copied().unwrap_or(false);
+                            let fiber = args[2].clone().downcast::<Fiber>().ok();
+                            let next = args[3].downcast_ref::<AnyNext>().expect("next").0.clone();
+                            if !no_save
+                                && let Some(fiber) = fiber
+                                && let Some(entry) = loader.find_entry_for_fiber(&fiber)
+                                && !loader.fiber_is_root_of(&entry, &fiber)
+                            {
+                                loader.show_log("reload", &entry);
+                            }
+                            let _ = next().await;
+                            Ok(None)
                         }
-                        next();
-                        Ok(None)
                     }),
                     EventOptions {
                         prepend: false,

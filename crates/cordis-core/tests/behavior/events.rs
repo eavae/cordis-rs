@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use cordis_core::{
     AnyNext, Context, Effect, EventCallback, EventFilter, EventOptions, ListenerFilter, Plugin,
-    event_callback, event_listener, event_listener_async,
+    WaterfallNext, event_callback, event_listener, event_listener_async,
 };
 
 #[derive(Clone)]
@@ -503,19 +503,21 @@ async fn events_ctx_once_async() {
 }
 
 fn waterfall_step() -> EventCallback {
-    event_callback(|args| {
+    event_listener_async(|args| async move {
         let value = args[0].downcast_ref::<i64>().expect("value");
-        let next = &args[1].downcast_ref::<AnyNext>().expect("next").0;
-        let binding = next().expect("next result");
+        let next = args[1].downcast_ref::<AnyNext>().expect("next").0.clone();
+        let binding = next().await.expect("next result").expect("next value");
         let inner = binding.downcast_ref::<i64>().expect("i64");
-        Ok(Some(Rc::new(value + inner)))
+        let result: Option<Rc<dyn Any>> = Some(Rc::new(value + inner));
+        Ok(result)
     })
 }
 
 fn waterfall_stop() -> EventCallback {
-    event_callback(|args| {
+    event_listener_async(|args| async move {
         let value = args[0].downcast_ref::<i64>().expect("value");
-        Ok(Some(Rc::new(*value)))
+        let result: Option<Rc<dyn Any>> = Some(Rc::new(*value));
+        Ok(result)
     })
 }
 
@@ -533,8 +535,11 @@ async fn events_ctx_waterfall() {
         .waterfall(
             "test/waterfall",
             &[Rc::new(1i64)],
-            Rc::new(|| Some(Rc::new(2i64))),
+            Rc::new(|| {
+                Box::pin(async { Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new(2i64))) })
+            }),
         )
+        .await
         .unwrap()
         .expect("result");
     assert_eq!(result.downcast_ref::<i64>().unwrap(), &4);
@@ -551,11 +556,82 @@ async fn events_ctx_waterfall() {
         .waterfall(
             "test/waterfall",
             &[Rc::new(1i64)],
-            Rc::new(|| Some(Rc::new(2i64))),
+            Rc::new(|| {
+                Box::pin(async { Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new(2i64))) })
+            }),
         )
+        .await
         .unwrap()
         .expect("result");
     assert_eq!(result.downcast_ref::<i64>().unwrap(), &3);
+}
+
+#[tokio::test]
+async fn events_ctx_waterfall_async_chain() {
+    let root = Context::new();
+    // Listener 1 wraps the downstream result asynchronously (mirrors the
+    // harness's waterfall listeners, which `await next()`).
+    root.on(
+        "async-waterfall",
+        event_listener_async(|args| async move {
+            let input = args[0].downcast_ref::<String>().unwrap().clone();
+            let next = args[1].downcast_ref::<AnyNext>().unwrap().0.clone();
+            let downstream = next().await.expect("next result").expect("next value");
+            let value = downstream.downcast_ref::<String>().unwrap();
+            tokio::task::yield_now().await;
+            let result: Option<Rc<dyn Any>> = Some(Rc::new(format!("[{input}] {value}")));
+            Ok(result)
+        }),
+        EventOptions::default(),
+    )
+    .unwrap();
+    // Listener 2 short-circuits without calling `next` for blocked input.
+    root.on(
+        "async-waterfall",
+        event_listener_async(|args| async move {
+            let input = args[0].downcast_ref::<String>().unwrap().clone();
+            let next = args[1].downcast_ref::<AnyNext>().unwrap().0.clone();
+            if input.contains("blocked") {
+                let result: Option<Rc<dyn Any>> = Some(Rc::new("** blocked **".to_string()));
+                Ok(result)
+            } else {
+                next().await
+            }
+        }),
+        EventOptions::default(),
+    )
+    .unwrap();
+
+    let tail: WaterfallNext = Rc::new(|| {
+        Box::pin(async {
+            Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new("hello".to_string())))
+        })
+    });
+    let result = root
+        .waterfall("async-waterfall", &[Rc::new("hello".to_string())], tail)
+        .await
+        .unwrap()
+        .expect("result");
+    assert_eq!(result.downcast_ref::<String>().unwrap(), "[hello] hello");
+
+    let tail: WaterfallNext = Rc::new(|| {
+        Box::pin(async {
+            Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new("fallback".to_string())))
+        })
+    });
+    let result = root
+        .waterfall(
+            "async-waterfall",
+            &[Rc::new("blocked words".to_string())],
+            tail,
+        )
+        .await
+        .unwrap()
+        .expect("result");
+    assert_eq!(
+        result.downcast_ref::<String>().unwrap(),
+        "[blocked words] ** blocked **"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -586,12 +662,15 @@ async fn internal_update_hook() {
                 .context()
                 .on(
                     "internal/update",
-                    event_callback(move |args| {
-                        let config = args[0].downcast_ref::<Config>().expect("config").value;
-                        hook_seen.borrow_mut().push(("hook", config));
-                        let next = &args[3].downcast_ref::<AnyNext>().expect("next").0;
-                        next();
-                        Ok(None)
+                    event_listener_async(move |args| {
+                        let hook_seen = hook_seen.clone();
+                        async move {
+                            let config = args[0].downcast_ref::<Config>().expect("config").value;
+                            hook_seen.borrow_mut().push(("hook", config));
+                            let next = args[3].downcast_ref::<AnyNext>().expect("next").0.clone();
+                            let _ = next().await;
+                            Ok(None)
+                        }
                     }),
                     EventOptions::default(),
                 )

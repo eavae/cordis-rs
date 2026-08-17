@@ -80,7 +80,10 @@ where
 }
 
 /// The `next` function handed to waterfall listeners.
-pub type WaterfallNext = Rc<dyn Fn() -> Option<Rc<dyn Any>>>;
+///
+/// Resolves to the downstream listener's result; the chain is driven by
+/// whoever awaits the returned future.
+pub type WaterfallNext = Rc<dyn Fn() -> BoxFuture<'static, ListenerResult>>;
 
 /// The result type of a listener invocation.
 type ListenerResult = Result<Option<Rc<dyn Any>>, Box<dyn Error>>;
@@ -89,7 +92,7 @@ type ListenerResult = Result<Option<Rc<dyn Any>>, Box<dyn Error>>;
 ///
 /// Synchronous listeners always resolve on the first poll; an asynchronous
 /// listener reports `Pending` here and must be awaited by the dispatch mode.
-fn poll_once(future: &mut BoxFuture<'static, ListenerResult>) -> Poll<ListenerResult> {
+pub(crate) fn poll_once(future: &mut BoxFuture<'static, ListenerResult>) -> Poll<ListenerResult> {
     let waker = Waker::noop();
     let mut cx = TaskContext::from_waker(waker);
     future.as_mut().poll(&mut cx)
@@ -394,13 +397,17 @@ impl EventsService {
 
     /// Runs listeners in a waterfall chain; each listener receives `args`
     /// plus a `next` function, and the last call falls back to `tail`.
+    ///
+    /// The chain is awaited as a whole: listeners may be asynchronous and
+    /// `next()` returns a future (mirrors the JS waterfall, where async
+    /// listeners make the whole chain awaitable).
     pub fn waterfall(
         &self,
         ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
         tail: WaterfallNext,
-    ) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> {
+    ) -> BoxFuture<'static, ListenerResult> {
         let mut callbacks = self
             .resolve("waterfall", event, args, None, ctx)
             .into_iter()
@@ -413,26 +420,20 @@ impl EventsService {
         let callbacks = Rc::new(RefCell::new(callbacks));
         let args = args.to_vec();
         let args_for_inner = args.clone();
-        match first {
-            Some(callback) => {
-                let inner: WaterfallNext = Rc::new(move || {
-                    run_waterfall_step(callbacks.clone(), args_for_inner.clone(), tail.clone())
-                        .ok()
-                        .flatten()
-                });
-                let mut next_args = args.clone();
-                let next_any: Rc<dyn Any> = Rc::new(AnyNext(inner));
-                next_args.push(next_any);
-                let mut future = callback(&next_args);
-                match poll_once(&mut future) {
-                    Poll::Ready(result) => result,
-                    Poll::Pending => {
-                        Err("waterfall does not support asynchronous listeners yet".into())
-                    }
+        Box::pin(async move {
+            match first {
+                Some(callback) => {
+                    let inner: WaterfallNext = Rc::new(move || {
+                        run_waterfall_step(callbacks.clone(), args_for_inner.clone(), tail.clone())
+                    });
+                    let mut next_args = args.clone();
+                    let next_any: Rc<dyn Any> = Rc::new(AnyNext(inner));
+                    next_args.push(next_any);
+                    callback(&next_args).await
                 }
+                None => tail().await,
             }
-            None => Ok(tail()),
-        }
+        })
     }
 
     /// Dispatches to listeners with `emit` semantics.
@@ -514,25 +515,21 @@ pub(crate) fn run_waterfall_step(
     callbacks: Rc<RefCell<Vec<EventCallback>>>,
     args: Vec<Rc<dyn Any>>,
     tail: WaterfallNext,
-) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> {
-    let next_callback = callbacks.borrow_mut().first().cloned();
-    if let Some(callback) = next_callback {
-        callbacks.borrow_mut().remove(0);
-        let args_for_inner = args.clone();
-        let inner = Rc::new(move || {
-            run_waterfall_step(callbacks.clone(), args_for_inner.clone(), tail.clone())
-                .ok()
-                .flatten()
-        });
-        let mut next_args = args.clone();
-        let next_any: Rc<dyn Any> = Rc::new(AnyNext(inner));
-        next_args.push(next_any);
-        let mut future = callback(&next_args);
-        match poll_once(&mut future) {
-            Poll::Ready(result) => result,
-            Poll::Pending => Err("waterfall does not support asynchronous listeners yet".into()),
+) -> BoxFuture<'static, ListenerResult> {
+    Box::pin(async move {
+        let next_callback = callbacks.borrow_mut().first().cloned();
+        if let Some(callback) = next_callback {
+            callbacks.borrow_mut().remove(0);
+            let args_for_inner = args.clone();
+            let inner: WaterfallNext = Rc::new(move || {
+                run_waterfall_step(callbacks.clone(), args_for_inner.clone(), tail.clone())
+            });
+            let mut next_args = args.clone();
+            let next_any: Rc<dyn Any> = Rc::new(AnyNext(inner));
+            next_args.push(next_any);
+            callback(&next_args).await
+        } else {
+            tail().await
         }
-    } else {
-        Ok(tail())
-    }
+    })
 }

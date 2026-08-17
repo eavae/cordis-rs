@@ -11,6 +11,7 @@ use std::rc::Rc;
 
 use cordis_core::{
     AnyNext, Context, Effect, EventCallback, EventOptions, FiberState, Plugin, event_callback,
+    event_listener_async,
 };
 
 /// Records `(mode, name, arg_count)` for `internal/dispatch` payloads.
@@ -62,13 +63,19 @@ fn internal_get_hook_overrides_dynamic_access() {
     let root = Context::new();
     assert!(root.get_str("loader").is_none(), "no loader without a hook");
 
-    let get_hook: EventCallback = event_callback(|args: &[Rc<dyn Any>]| {
-        let name = args[1].downcast_ref::<String>().unwrap();
-        let next = &args[3].downcast_ref::<AnyNext>().unwrap().0;
+    let get_hook: EventCallback = event_listener_async(|args| async move {
+        let name = args[1].downcast_ref::<String>().unwrap().clone();
+        let next = args[3].downcast_ref::<AnyNext>().unwrap().0.clone();
         match name.as_str() {
-            "loader" => Ok(Some(Rc::new("mock loader".to_string()))),
-            "foo" => Ok(Some(Rc::new("overridden".to_string()))),
-            _ => Ok(next()),
+            "loader" => {
+                let value: Rc<dyn Any> = Rc::new("mock loader".to_string());
+                Ok(Some(value))
+            }
+            "foo" => {
+                let value: Rc<dyn Any> = Rc::new("overridden".to_string());
+                Ok(Some(value))
+            }
+            _ => next().await,
         }
     });
     drop(
@@ -110,13 +117,22 @@ fn internal_set_hook_intercepts_write() {
 
     let intercept = Rc::new(Cell::new(false));
     let hook_intercept = intercept.clone();
-    let set_hook: EventCallback = event_callback(move |args: &[Rc<dyn Any>]| {
-        let name = args[1].downcast_ref::<String>().unwrap();
-        let next = &args[4].downcast_ref::<AnyNext>().unwrap().0;
-        match name.as_str() {
-            "foo" if hook_intercept.get() => Ok(Some(Rc::new(true))),
-            "bar" => Ok(Some(Rc::new(false))),
-            _ => Ok(next()),
+    let set_hook: EventCallback = event_listener_async(move |args| {
+        let intercept = hook_intercept.clone();
+        async move {
+            let name = args[1].downcast_ref::<String>().unwrap().clone();
+            let next = args[4].downcast_ref::<AnyNext>().unwrap().0.clone();
+            match name.as_str() {
+                "foo" if intercept.get() => {
+                    let value: Rc<dyn Any> = Rc::new(true);
+                    Ok(Some(value))
+                }
+                "bar" => {
+                    let value: Rc<dyn Any> = Rc::new(false);
+                    Ok(Some(value))
+                }
+                _ => next().await,
+            }
         }
     });
     drop(

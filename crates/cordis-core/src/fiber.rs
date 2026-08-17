@@ -519,10 +519,15 @@ impl Fiber {
             let config_for_tail = config.clone();
             let applied_for_tail = applied.clone();
             let tail: WaterfallNext = Rc::new(move || {
-                *this_for_tail.config.borrow_mut() = config_for_tail.clone();
-                *this_for_tail.error.borrow_mut() = None;
-                applied_for_tail.set(true);
-                None
+                let this = this_for_tail.clone();
+                let config = config_for_tail.clone();
+                let applied = applied_for_tail.clone();
+                Box::pin(async move {
+                    *this.config.borrow_mut() = config;
+                    *this.error.borrow_mut() = None;
+                    applied.set(true);
+                    Ok(None)
+                })
             });
             let args: Vec<Rc<dyn Any>> = vec![
                 config.unwrap_or_else(|| Rc::new(()) as Rc<dyn Any>),
@@ -533,7 +538,7 @@ impl Fiber {
                 },
             ];
             let callbacks = Rc::new(RefCell::new(callbacks));
-            let _ = run_waterfall_step(callbacks, args, tail);
+            let _ = run_waterfall_step(callbacks, args, tail).await;
             if applied.get() {
                 this.restart().await
             } else {

@@ -14,9 +14,12 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::Poll;
 
 use crate::error::ConfigValidator;
-use crate::events::{EventCallback, EventFilter, EventOptions, ParallelError, WaterfallNext};
+use crate::events::{
+    EventCallback, EventFilter, EventOptions, ParallelError, WaterfallNext, poll_once,
+};
 use crate::fiber::{CordisError, EffectHandle, Fiber, FiberState};
 use crate::logger::Logger;
 use crate::registry::{Plugin, RegistryService};
@@ -439,11 +442,28 @@ impl Context {
         let this = self.clone();
         let name = name.to_string();
         let tail: WaterfallNext = Rc::new(move || {
-            this.inner
-                .lookup_strict(&name)
-                .map(|entry| entry.value.clone())
+            let this = this.clone();
+            let name = name.clone();
+            Box::pin(async move {
+                Ok(this
+                    .inner
+                    .lookup_strict(&name)
+                    .map(|entry| entry.value.clone()))
+            })
         });
-        self.waterfall("internal/get", &args, tail).ok().flatten()
+        let mut future =
+            self.events()
+                .expect("events service")
+                .waterfall(self, "internal/get", &args, tail);
+        match poll_once(&mut future) {
+            Poll::Ready(Ok(result)) => result,
+            Poll::Ready(Err(_)) => None,
+            Poll::Pending => {
+                self.logger()
+                    .warn("internal/get waterfall did not complete synchronously");
+                None
+            }
+        }
     }
 
     /// Whether any visible store entry with `name` exists (used by the
@@ -597,17 +617,38 @@ impl Context {
         ];
         let this = self.clone();
         let name = name.to_string();
-        let tail: WaterfallNext = Rc::new(move || match this.set_str_impl(&name, value.clone()) {
-            Ok(()) => Some(Rc::new(true)),
-            Err(message) => Some(Rc::new(SetError(message))),
+        let tail: WaterfallNext = Rc::new(move || {
+            let this = this.clone();
+            let name = name.clone();
+            let value = value.clone();
+            Box::pin(async move {
+                let result: Option<Rc<dyn Any>> = match this.set_str_impl(&name, value) {
+                    Ok(()) => Some(Rc::new(true)),
+                    Err(message) => Some(Rc::new(SetError(message))),
+                };
+                Ok(result)
+            })
         });
-        match self.waterfall("internal/set", &args, tail) {
-            Ok(Some(result)) if result.downcast_ref::<bool>().copied().unwrap_or(false) => Ok(()),
-            Ok(Some(result)) => Err(result
+        let mut future =
+            self.events()
+                .expect("events service")
+                .waterfall(self, "internal/set", &args, tail);
+        match poll_once(&mut future) {
+            Poll::Ready(Ok(Some(result)))
+                if result.downcast_ref::<bool>().copied().unwrap_or(false) =>
+            {
+                Ok(())
+            }
+            Poll::Ready(Ok(Some(result))) => Err(result
                 .downcast_ref::<SetError>()
-                .map(|error| error.0.clone())
+                .map(|set_error| set_error.0.clone())
                 .unwrap_or(error)),
-            _ => Err(error),
+            Poll::Ready(Ok(None)) | Poll::Ready(Err(_)) => Err(error),
+            Poll::Pending => {
+                self.logger()
+                    .warn("internal/set waterfall did not complete synchronously");
+                Err(error)
+            }
         }
     }
 
@@ -1274,7 +1315,11 @@ impl Context {
     }
 
     /// Runs listeners in a waterfall chain (mirrors `ctx.waterfall`).
-    pub fn waterfall(
+    ///
+    /// The chain is awaited as a whole; async listeners may call the `next`
+    /// function and await it (mirrors the JS waterfall, where async
+    /// listeners make the whole chain awaitable).
+    pub async fn waterfall(
         &self,
         event: &str,
         args: &[Rc<dyn Any>],
@@ -1283,6 +1328,7 @@ impl Context {
         self.events()
             .expect("events service")
             .waterfall(self, event, args, tail)
+            .await
     }
 
     /// Notifies fibers that depend on `name` (mirrors `ReflectService.notify`).
