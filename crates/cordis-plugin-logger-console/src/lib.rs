@@ -16,18 +16,23 @@ use serde::Deserialize;
 #[derive(Clone, Copy, Debug, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Align {
+    /// Aligns the label to the left.
     #[default]
     Left,
+    /// Aligns the label to the right.
     Right,
 }
 
 /// Label style (mirrors `LabelStyle`).
 #[derive(Clone, Debug, Deserialize)]
 pub struct LabelStyle {
+    /// The fixed label width.
     #[serde(default)]
     pub width: usize,
+    /// The margin around the label.
     #[serde(default)]
     pub margin: usize,
+    /// Label alignment.
     #[serde(default)]
     pub align: Align,
 }
@@ -35,16 +40,22 @@ pub struct LabelStyle {
 /// The console exporter config (mirrors `ConsoleExporter.Config`).
 #[derive(Clone, Debug, Deserialize)]
 pub struct ConsoleConfig {
+    /// Color mode: `0` = disabled, `1` = 16 colors, `2+` = 256.
     #[serde(default)]
     pub colors: u8,
+    /// Maximum line length before truncation.
     #[serde(default = "default_max_length")]
     pub max_length: usize,
+    /// Per-name level overrides plus `default`.
     #[serde(default)]
     pub levels: Option<HashMap<String, LoggerLevel>>,
+    /// Whether to show the diff for object arguments.
     #[serde(default)]
     pub show_diff: bool,
+    /// The timestamp format string.
     #[serde(default = "default_show_time")]
     pub show_time: String,
+    /// Optional label styling.
     #[serde(default)]
     pub label: Option<LabelStyle>,
 }
@@ -72,7 +83,9 @@ impl Default for ConsoleConfig {
 
 /// A console exporter that renders messages and writes them to a sink.
 pub struct ConsoleExporter {
+    /// The exporter configuration.
     pub config: ConsoleConfig,
+    /// Custom formatters (`%x`).
     pub formatters: RefCell<HashMap<char, LogFormatter>>,
     timestamp: std::cell::Cell<u64>,
     writer: Rc<dyn Fn(&str)>,

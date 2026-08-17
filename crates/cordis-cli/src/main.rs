@@ -1,3 +1,6 @@
+//! cordis-cli entry point: parses command-line arguments and starts the
+//! runtime.
+
 fn main() -> anyhow::Result<()> {
     let mut config = None;
     let mut plugins_dir = None;

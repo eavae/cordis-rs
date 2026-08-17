@@ -23,17 +23,28 @@ type Meta = unsafe extern "C" fn() -> *const std::ffi::c_char;
 #[derive(Debug)]
 pub enum LoadError {
     /// The library could not be opened.
-    Open { path: PathBuf, error: String },
+    Open {
+        /// The path that could not be opened.
+        path: PathBuf,
+        /// The underlying loader error.
+        error: String,
+    },
     /// A required symbol is missing.
     MissingSymbol {
+        /// The plugin path.
         path: PathBuf,
+        /// The missing symbol name.
         symbol: &'static str,
+        /// The underlying loader error.
         error: String,
     },
     /// The plugin exports an unsupported ABI version.
     VersionMismatch {
+        /// The plugin path.
         path: PathBuf,
+        /// The ABI version exported by the plugin.
         found: u32,
+        /// The ABI version required by the host.
         expected: u32,
     },
 }

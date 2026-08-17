@@ -19,9 +19,13 @@ use crate::service::{Config, Effect, Service, sync_disposer};
 #[serde(from = "u8", into = "u8")]
 #[repr(u8)]
 pub enum LoggerLevel {
+    /// Error level.
     Error = 0,
+    /// Warning level.
     Warn = 1,
+    /// Info level.
     Info = 2,
+    /// Debug level.
     Debug = 3,
 }
 
@@ -45,9 +49,13 @@ impl From<LoggerLevel> for u8 {
 /// Log type (mirrors `LoggerType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoggerType {
+    /// An error message.
     Error,
+    /// A warning message.
     Warn,
+    /// An info message.
     Info,
+    /// A debug message.
     Debug,
 }
 
@@ -167,10 +175,15 @@ pub trait LoggerExporter {
 
 /// A closure-based exporter for tests and simple use.
 pub struct SimpleExporter {
+    /// Color mode: `None`/`0` = disabled, `1` = 16 colors, `2+` = 256.
     pub colors: u8,
+    /// Maximum line length.
     pub max_length: usize,
+    /// Per-name level overrides plus `default`.
     pub levels: Option<Rc<HashMap<String, LoggerLevel>>>,
+    /// Custom formatters (`%x`).
     pub formatters: Option<FormatterTable>,
+    /// The sink that receives every exported message.
     pub handler: Rc<dyn Fn(&Message)>,
 }
 
@@ -212,7 +225,9 @@ impl LoggerExporter for SimpleExporter {
 /// The `logger` intercept config (mirrors `LoggerService.Intercept`).
 #[derive(Clone, Debug, Default)]
 pub struct LoggerIntercept {
+    /// The resolved logger name.
     pub name: Option<String>,
+    /// The minimum level forwarded to exporters.
     pub level: Option<LoggerLevel>,
 }
 
@@ -430,6 +445,7 @@ pub struct Logger {
     /// The fiber used for the fallback name (the service's own shadow; JS
     /// `symbols.caller`).
     fiber_ctx: Context,
+    /// The resolved logger name (see [`Logger::resolved_name`]).
     pub name: String,
     explicit: Option<String>,
 }

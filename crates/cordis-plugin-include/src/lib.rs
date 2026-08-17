@@ -37,9 +37,12 @@ pub struct IncludeConfig {
 /// `Absent` leaves the field untouched.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Override<T> {
+    /// The patch does not touch this field.
     #[default]
     Absent,
+    /// Overrides the field with `v`.
     Set(T),
+    /// Clears the field (sets it to null/absent).
     Clear,
 }
 
@@ -91,9 +94,13 @@ impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Override<T> {
 /// A single patch (mirrors `PatchOptions`).
 #[derive(Clone, Debug, Deserialize, serde::Serialize, Default)]
 pub struct PatchOptions {
+    /// The target entry id; `''` is treated as absent.
     pub id: Option<String>,
+    /// Entries inserted into the target group entry (or appended at the root
+    /// when no `id` is given).
     #[serde(default)]
     pub insert: Option<Vec<EntryOptions>>,
+    /// The expected name of the target entry; a mismatch warns and skips.
     pub name: Option<String>,
     /// `config` override; `null` clears the field.
     #[serde(default, skip_serializing_if = "Override::is_absent")]

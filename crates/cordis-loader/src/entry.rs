@@ -49,22 +49,33 @@ pub struct EntryOptions {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IsolateValue {
+    /// `true` creates a local realm (label derived from the entry id);
+    /// `false` disables isolation.
     Flag(bool),
+    /// A shared label.
     Label(String),
 }
 
 /// A group of entries (mirrors `EntryGroup` in group.ts).
 pub struct EntryGroup {
+    /// The owning tree.
     pub tree: Rc<EntryTree>,
+    /// The group's context; entries inherit its isolate and intercept
+    /// layers.
     pub ctx: Context,
+    /// The parent group, if any (`None` for the root group).
     pub parent: Option<Rc<EntryGroup>>,
+    /// Direct child entries of this group.
     pub entries: RefCell<Vec<Rc<Entry>>>,
+    /// The group plugin's fiber, once initialized.
     pub fiber: RefCell<Option<Rc<Fiber>>>,
     /// The entry that owns this group (when the group belongs to an entry).
     pub entry: RefCell<Option<Rc<Entry>>>,
 }
 
 impl EntryGroup {
+    /// Creates an empty group under `parent` (or the root group when
+    /// `parent` is `None`).
     pub fn new(tree: Rc<EntryTree>, ctx: Context, parent: Option<Rc<EntryGroup>>) -> Rc<Self> {
         Rc::new(EntryGroup {
             tree,
@@ -87,7 +98,9 @@ impl std::fmt::Debug for EntryGroup {
 
 /// The entry tree container (mirrors `EntryTree` in tree.ts).
 pub struct EntryTree {
+    /// The tree's context (the loader's own context).
     pub ctx: Context,
+    /// Whether apply/reload logs are emitted.
     pub enable_logs: bool,
     /// Name → plugin table (builtins/mocks; `.so` loading is handled by the
     /// loader).
@@ -96,7 +109,9 @@ pub struct EntryTree {
     pub builtins: Rc<RefCell<HashMap<String, Plugin>>>,
     /// Called after every structural change (config write-back).
     pub write_callback: Rc<RefCell<Option<WriteCallback>>>,
+    /// The root group of the tree.
     pub root: Rc<RefCell<Option<Rc<EntryGroup>>>>,
+    /// Number of pending entry tasks (used by the `await` intercept).
     pub tasks: Rc<Cell<usize>>,
 }
 
@@ -496,13 +511,17 @@ fn collect_entries(group: &Rc<EntryGroup>, result: &mut Vec<Rc<Entry>>) {
 
 /// A single config entry (mirrors `Entry` in entry.ts).
 pub struct Entry {
+    /// The owning tree.
     pub tree: Rc<EntryTree>,
     /// The entry's context; rebuilt when the entry moves between groups.
     pub ctx: RefCell<Context>,
     /// The owning group; updated when the entry moves between groups.
     pub parent: RefCell<Rc<EntryGroup>>,
+    /// The entry's resolved options.
     pub options: RefCell<EntryOptions>,
+    /// The entry's root fiber, once applied.
     pub fiber: RefCell<Option<Rc<Fiber>>>,
+    /// The subgroup created when this entry is a group.
     pub subgroup: RefCell<Option<Rc<EntryGroup>>>,
     init_task: Cell<bool>,
 }
@@ -852,14 +871,23 @@ impl std::fmt::Debug for Entry {
 /// Partial entry options for `update` (mirrors `Partial<EntryOptions>`).
 #[derive(Clone, Debug, Default)]
 pub struct PartialEntryOptions {
+    /// Stable entry id.
     pub id: Option<String>,
+    /// Plugin name (or `cordis:` builtin).
     pub name: Option<String>,
+    /// Plugin config.
     pub config: Option<serde_yaml_ng::Value>,
+    /// Whether this entry is a group.
     pub group: Option<bool>,
+    /// Whether this entry is disabled.
     pub disabled: Option<bool>,
+    /// Declared inject dependencies.
     pub inject: Option<Vec<String>>,
+    /// Per-service isolate scopes.
     pub isolate: Option<std::collections::HashMap<String, IsolateValue>>,
+    /// Per-service intercept overrides.
     pub intercept: Option<serde_yaml_ng::Value>,
+    /// Extra keys preserved from the config file.
     pub extra: Option<std::collections::HashMap<String, serde_yaml_ng::Value>>,
 }
 

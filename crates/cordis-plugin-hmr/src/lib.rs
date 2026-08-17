@@ -63,6 +63,7 @@ impl Default for HmrConfig {
 
 /// The HMR service (mirrors the `Hmr` plugin in the TS reference).
 pub struct HmrService {
+    /// The HMR configuration.
     pub config: HmrConfig,
 }
 

@@ -12,7 +12,9 @@ use crate::so::SoPlugin;
 
 /// The plugin loader service (mirrors `Loader` in loader/index.ts).
 pub struct Loader {
+    /// The context the loader was created on (its own scope).
     pub ctx: Context,
+    /// The underlying entry tree.
     pub tree: Rc<EntryTree>,
     /// `CORDIS_SHARED` env data (mirrors `loader.envData`).
     pub env_data: serde_json::Value,
@@ -304,6 +306,9 @@ impl Loader {
         self.read_group(&root, configs).await;
     }
 
+    /// Reconciles `configs` against the entries of `group`, creating,
+    /// updating and disposing entries as needed (mirrors `tree.read` applied
+    /// to a subgroup).
     pub async fn read_group(&self, group: &Rc<EntryGroup>, configs: Vec<EntryOptions>) {
         let mut next_entries: Vec<Rc<Entry>> = Vec::new();
         for options in configs {
