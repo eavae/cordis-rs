@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use cordis_core::{Context, Effect, MixinAccessor, Plugin, Service};
+use cordis_core::{Context, Effect, MixinAccessor, Plugin, Service, ShadowContext, service};
 
 #[derive(Debug)]
 struct Foo {
@@ -203,6 +203,46 @@ async fn association_get_set_requires_accessor() {
                 error.contains("cannot set property \"foo.missing\" without provide"),
                 "{error}"
             );
+        })
+        .await;
+}
+
+/// Mirrors the TS associate.spec.ts "inspect" regression (cordis issue #14):
+/// a value passed through the service call chain keeps its type identity,
+/// inspectable via `Debug` — the Rust counterpart of `arg.toString()` in JS.
+#[derive(Debug)]
+struct Widget;
+
+#[service]
+struct Inspector;
+
+#[service]
+impl Inspector {
+    pub fn bar(&self, ctx: &ShadowContext, arg: &dyn std::fmt::Debug) -> String {
+        let debug = format!("{arg:?}");
+        assert!(debug.contains("Widget"), "{debug}");
+        // Forward through another traced service hop; the value is opaque
+        // (a trait object) yet its type name still shows through.
+        ctx.inspector().expect("inspector").baz(arg)
+    }
+
+    pub fn baz(&self, _ctx: &ShadowContext, arg: &dyn std::fmt::Debug) -> String {
+        format!("{arg:?}")
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn inspect_preserves_type_identity() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            use crate::behavior::associate::InspectorServiceExt;
+
+            let root = Context::new();
+            drop(root.provide::<Inspector>(Rc::new(Inspector)).unwrap());
+
+            let debug = root.inspector().expect("inspector").bar(&Widget);
+            assert_eq!(debug, "Widget");
         })
         .await;
 }
