@@ -1,5 +1,5 @@
-//! TS spec 逐条对应补全：loader/group/isolate 中未 1:1 覆盖的行为用例
-//! （对应 `packages/loader/tests/{group,index,isolate}.spec.ts`）。
+//! TS spec parity fill-ins: behavioral cases in loader/group/isolate not yet
+//! covered 1:1 (corresponding to `packages/loader/tests/{group,index,isolate}.spec.ts`).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

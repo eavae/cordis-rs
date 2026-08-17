@@ -1,4 +1,4 @@
-//! Minijinja 配置表达式。
+//! Minijinja config expressions.
 
 use std::collections::HashMap;
 

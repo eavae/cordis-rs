@@ -1,4 +1,4 @@
-//! Utils List 工具。
+//! Utils List utility.
 
 use std::rc::Rc;
 

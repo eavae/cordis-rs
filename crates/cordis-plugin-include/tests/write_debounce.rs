@@ -1,4 +1,4 @@
-//! Include 写盘去抖与 `loader/config-update` 事件。
+//! Include write debounce and the `loader/config-update` event.
 
 use std::fs;
 use std::rc::Rc;

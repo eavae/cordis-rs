@@ -1,4 +1,4 @@
-//! Context 骨架：双轨 Service 访问与链式隔离。
+//! Context skeleton: dual-track Service access and chained isolation.
 
 use std::rc::Rc;
 

@@ -1,4 +1,4 @@
-//! Include patch 缺口回归（8 条）。
+//! Include patch gap regressions (8 cases).
 
 use std::cell::RefCell;
 use std::collections::HashMap;

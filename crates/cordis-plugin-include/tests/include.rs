@@ -1,4 +1,4 @@
-//! Include 插件。
+//! The include plugin.
 
 use std::fs;
 use std::rc::Rc;

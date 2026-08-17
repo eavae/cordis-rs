@@ -1,4 +1,4 @@
-//! Timer 插件。
+//! Timer plugin.
 
 use std::cell::Cell;
 use std::rc::Rc;

@@ -1,4 +1,4 @@
-//! Logger-console 插件。
+//! Logger-console plugin.
 
 use std::cell::RefCell;
 use std::rc::Rc;

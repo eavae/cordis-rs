@@ -1,4 +1,4 @@
-//! 配置文件解析与原子写回。
+//! Config file parsing and atomic write-back.
 
 use std::fs;
 use std::path::PathBuf;

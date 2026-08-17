@@ -1,4 +1,4 @@
-//! Loader 服务本体。
+//! The Loader service itself.
 
 use std::rc::Rc;
 

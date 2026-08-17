@@ -1,4 +1,4 @@
-//! EntryGroup 与 Group 插件。
+//! EntryGroup and the Group plugin.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
