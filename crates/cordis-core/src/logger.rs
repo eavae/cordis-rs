@@ -294,15 +294,26 @@ impl LoggerService {
 
     /// Resolves the effective name: intercept config → explicit name →
     /// fiber name (hyphenated).
-    pub(crate) fn resolve_name(&self, ctx: &Context, explicit: Option<&str>) -> String {
-        let intercept = self.intercept_config(ctx);
+    ///
+    /// The intercept chain comes from `intercept` (the caller's context)
+    /// while the fallback fiber name comes from `fiber` (the service's own
+    /// shadow) — mirroring the TS logger, where `this.ctx` reads the
+    /// caller's intercept chain and `symbols.caller` picks the logging
+    /// service's fiber.
+    pub(crate) fn resolve_name(
+        &self,
+        intercept: &Context,
+        fiber: &Context,
+        explicit: Option<&str>,
+    ) -> String {
+        let intercept = self.intercept_config(intercept);
         if let Some(name) = intercept.name {
             return name;
         }
         if let Some(name) = explicit {
             return name.to_string();
         }
-        hyphenate(&ctx.fiber().name())
+        hyphenate(&fiber.fiber().name())
     }
 
     /// Resolves the effective level from the intercept config.
@@ -414,21 +425,35 @@ impl LoggerExporter for BufferExporter {
 #[derive(Clone)]
 pub struct Logger {
     service: Rc<LoggerService>,
+    /// The intercept chain (the caller's context; JS `this.ctx`).
     ctx: Context,
+    /// The fiber used for the fallback name (the service's own shadow; JS
+    /// `symbols.caller`).
+    fiber_ctx: Context,
     pub name: String,
     explicit: Option<String>,
 }
 
 impl Logger {
-    /// Creates a logger for `ctx` with an explicit name.
+    /// Creates a logger for `ctx` with an explicit name. Both the intercept
+    /// chain and the fallback fiber name come from `ctx`.
     pub fn new(ctx: &Context, explicit: Option<&str>) -> Logger {
-        let service = ctx
+        Logger::traced(ctx, ctx, explicit)
+    }
+
+    /// Creates a traced logger for a service method: the intercept chain
+    /// comes from the caller's context while the fallback name comes from
+    /// the service's own shadow fiber (mirrors the TS logger's traceable
+    /// naming).
+    pub fn traced(caller: &Context, own: &Context, explicit: Option<&str>) -> Logger {
+        let service = caller
             .get::<LoggerService>()
             .expect("logger service must be present");
-        let name = service.resolve_name(ctx, explicit);
+        let name = service.resolve_name(caller, own, explicit);
         Logger {
             service,
-            ctx: ctx.clone(),
+            ctx: caller.clone(),
+            fiber_ctx: own.clone(),
             name,
             explicit: explicit.map(|name| name.to_string()),
         }
@@ -439,7 +464,9 @@ impl Logger {
     pub fn named(&self, name: &str) -> Logger {
         let mut logger = self.clone();
         logger.explicit = Some(name.to_string());
-        logger.name = self.service.resolve_name(&self.ctx, Some(name));
+        logger.name = self
+            .service
+            .resolve_name(&self.ctx, &self.fiber_ctx, Some(name));
         logger
     }
 
@@ -464,7 +491,7 @@ impl Logger {
     /// Re-resolves the name from intercepts (used after ctx changes).
     pub fn resolved_name(&self) -> String {
         self.service
-            .resolve_name(&self.ctx, self.explicit.as_deref())
+            .resolve_name(&self.ctx, &self.fiber_ctx, self.explicit.as_deref())
     }
 
     /// Logs an error.

@@ -328,6 +328,16 @@ impl ShadowContext {
     pub fn invoke<S: Service>(&self, init: Option<Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
         self.invoke_str(S::NAME, init)
     }
+
+    /// Returns a logger bound to this service-method context.
+    ///
+    /// The name is resolved like the TS traceable logger: the caller's
+    /// intercept chain wins, and the fallback name comes from the service's
+    /// own shadow fiber (mirrors `symbols.caller` in the TS reference), so a
+    /// service method logs under its own fiber name automatically.
+    pub fn logger(&self) -> Logger {
+        Logger::traced(self.caller(), self.own(), None)
+    }
 }
 
 impl Deref for ShadowContext {
