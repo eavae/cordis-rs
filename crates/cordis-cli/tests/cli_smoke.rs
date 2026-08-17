@@ -21,6 +21,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 /// A minimal project (one `.so` fixture) starts and exits cleanly.
+#[cfg(unix)]
 #[test]
 fn cli_starts_and_exits_on_signal() {
     let dir = temp_dir("smoke");
@@ -79,6 +80,7 @@ fn cli_starts_and_exits_on_signal() {
 }
 
 /// `CORDIS_SHARED` JSON is accepted by the launcher (no crash).
+#[cfg(unix)]
 #[test]
 fn cli_accepts_cordis_shared_env() {
     let dir = temp_dir("shared");
@@ -127,6 +129,7 @@ fn cli_accepts_cordis_shared_env() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[cfg(unix)]
 fn wait_until_ready(child: &mut std::process::Child, ready_file: &std::path::Path) {
     for _ in 0..200 {
         if let Ok(Some(status)) = child.try_wait() {
@@ -196,9 +199,4 @@ unsafe extern "C" {
 fn libc_kill(pid: i32, sig: i32) {
     // SAFETY: declared extern with the libc signature.
     unsafe { kill(pid, sig) };
-}
-
-#[cfg(not(unix))]
-fn libc_kill(_pid: i32, _sig: i32) {
-    unimplemented!("signal test is unix-only")
 }

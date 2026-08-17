@@ -1,4 +1,7 @@
 //! `cordis create` scaffolds a project that builds and runs.
+//!
+//! Unix-only: the generated app is driven to a clean exit with SIGINT.
+#![cfg(unix)]
 
 use std::fs;
 use std::path::PathBuf;
@@ -101,7 +104,6 @@ fn generated_project_builds_and_runs() {
         "generated project did not become ready"
     );
 
-    #[cfg(unix)]
     libc_kill(child.id() as i32, 2);
     let output = child.wait_with_output().expect("wait");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -120,13 +122,7 @@ unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
 
-#[cfg(unix)]
 fn libc_kill(pid: i32, sig: i32) {
     // SAFETY: declared extern with the libc signature.
     unsafe { kill(pid, sig) };
-}
-
-#[cfg(not(unix))]
-fn libc_kill(_pid: i32, _sig: i32) {
-    unimplemented!("signal test is unix-only")
 }
