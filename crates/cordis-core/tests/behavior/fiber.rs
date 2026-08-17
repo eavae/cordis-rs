@@ -367,6 +367,40 @@ async fn fiber_restart_wrapped_fiber() {
         .await;
 }
 
+/// A panicking background task must not hang `wait_task`: the completion
+/// flag has to be set on the error path too.
+#[tokio::test(flavor = "current_thread")]
+async fn wait_task_survives_panicking_background_task() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let handle = root
+                .fiber()
+                .effect(
+                    || {
+                        Effect::Async(Box::pin(async {
+                            panic!("boom");
+                        }))
+                    },
+                    "panicking effect",
+                )
+                .expect("effect");
+            let result =
+                tokio::time::timeout(std::time::Duration::from_millis(500), handle.wait_task())
+                    .await;
+            assert!(
+                result.is_ok(),
+                "wait_task must resolve when the background task panics"
+            );
+            assert!(
+                result.unwrap().is_err(),
+                "a panicked task must surface as an error"
+            );
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn fiber_update_config_while_injected_service_reloads() {
     let local = tokio::task::LocalSet::new();

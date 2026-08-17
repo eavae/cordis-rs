@@ -399,12 +399,20 @@ impl Fiber {
         };
         if let Some(task) = task {
             // Async effects run in the background (requires a LocalSet) and
-            // signal completion through `task_done`.
+            // signal completion through `task_done`. The task runs under a
+            // `JoinHandle` so a panic surfaces as an error instead of
+            // silently aborting the completion handshake (which would hang
+            // every waiter on `task_done`).
             let done = handle.task_done.clone();
             let task_result = handle.task_result.clone();
             let wrapped = Box::pin(async move {
-                let result = task.await;
-                *task_result.borrow_mut() = Some(result.map_err(|error| error.to_string()));
+                let task = tokio::task::spawn_local(task);
+                let result = match task.await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(error) => Err(format!("async effect task failed: {error}")),
+                };
+                *task_result.borrow_mut() = Some(result);
                 done.set(true);
                 Ok::<(), Box<dyn Error>>(())
             });
