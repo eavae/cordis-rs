@@ -14,6 +14,7 @@ use crate::error::ConfigValidator;
 use crate::events::{EventCallback, WaterfallNext, run_waterfall_step};
 use crate::registry::Runtime;
 use crate::service::{ApplyFn, BoxFuture, Disposer, Effect, EffectItem, sync_disposer};
+use tokio::sync::Notify;
 
 /// Lifecycle state of a [`Fiber`] (mirrors `FiberState` in the TS reference).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +132,7 @@ pub struct EffectHandle {
     disposables: RefCell<Vec<Disposable>>,
     has_task: Cell<bool>,
     task_done: Rc<Cell<bool>>,
+    task_notify: Rc<Notify>,
     task_result: Rc<RefCell<Option<Result<(), String>>>>,
     meta: RefCell<EffectMeta>,
 }
@@ -143,6 +145,7 @@ impl EffectHandle {
             disposables: RefCell::new(Vec::new()),
             has_task: Cell::new(false),
             task_done: Rc::new(Cell::new(true)),
+            task_notify: Rc::new(Notify::new()),
             task_result: Rc::new(RefCell::new(None)),
             meta: RefCell::new(EffectMeta {
                 label: label.to_string(),
@@ -187,10 +190,15 @@ impl EffectHandle {
             return Box::pin(async { Ok(()) });
         }
         let done = self.task_done.clone();
+        let task_notify = self.task_notify.clone();
         let this = self.clone();
         Box::pin(async move {
             while !done.get() {
-                tokio::task::yield_now().await;
+                let notified = task_notify.notified();
+                if done.get() {
+                    break;
+                }
+                notified.await;
             }
             let mut result = match &*this.task_result.borrow() {
                 Some(Err(message)) => {
@@ -218,20 +226,32 @@ impl EffectHandle {
     /// background; the returned future resolves when cleanup completes.
     fn spawn_dispose_with_task(self: Rc<Self>) -> BoxFuture<'static, Result<(), Box<dyn Error>>> {
         let done = self.task_done.clone();
+        let task_notify = self.task_notify.clone();
         let this = self.clone();
         let cleanup_done = Rc::new(Cell::new(false));
         let cleanup_done_waiter = cleanup_done.clone();
+        let cleanup_notify = Rc::new(Notify::new());
+        let cleanup_notify_waiter = cleanup_notify.clone();
         let join = tokio::task::spawn_local(async move {
             while !done.get() {
-                tokio::task::yield_now().await;
+                let notified = task_notify.notified();
+                if done.get() {
+                    break;
+                }
+                notified.await;
             }
             let result = this.run_dispose_chain().await;
             cleanup_done_waiter.set(true);
+            cleanup_notify_waiter.notify_waiters();
             result
         });
         Box::pin(async move {
             while !cleanup_done.get() {
-                tokio::task::yield_now().await;
+                let notified = cleanup_notify.notified();
+                if cleanup_done.get() {
+                    break;
+                }
+                notified.await;
             }
             join.await
                 .unwrap_or_else(|error| Err(Box::new(error) as Box<dyn Error>))
@@ -304,6 +324,8 @@ pub struct Fiber {
     pub(crate) disposables: RefCell<Vec<Disposable>>,
     /// Inertia lock state.
     pub(crate) inertia: RefCell<Inertia>,
+    /// Notifies waiters when the inertia lock is released.
+    pub(crate) inertia_notify: Rc<Notify>,
     /// The dispose handle registered on the parent fiber.
     pub(crate) dispose: RefCell<Option<Rc<EffectHandle>>>,
     /// Fiber-level internal hooks.
@@ -328,6 +350,7 @@ impl Fiber {
             resolved: RefCell::new(HashMap::new()),
             disposables: RefCell::new(Vec::new()),
             inertia: RefCell::new(Inertia::default()),
+            inertia_notify: Rc::new(Notify::new()),
             dispose: RefCell::new(None),
             _hooks: RefCell::new(HashMap::new()),
             validator: RefCell::new(None),
@@ -404,6 +427,7 @@ impl Fiber {
             // silently aborting the completion handshake (which would hang
             // every waiter on `task_done`).
             let done = handle.task_done.clone();
+            let task_notify = handle.task_notify.clone();
             let task_result = handle.task_result.clone();
             let wrapped = Box::pin(async move {
                 let task = tokio::task::spawn_local(task);
@@ -414,6 +438,7 @@ impl Fiber {
                 };
                 *task_result.borrow_mut() = Some(result);
                 done.set(true);
+                task_notify.notify_waiters();
                 Ok::<(), Box<dyn Error>>(())
             });
             handle.has_task.set(true);
@@ -447,7 +472,11 @@ impl Fiber {
     /// Awaits inertia completion and propagates apply errors.
     pub async fn wait(self: &Rc<Self>) -> Result<(), FiberError> {
         while self.inertia.borrow().active {
-            tokio::task::yield_now().await;
+            let notified = self.inertia_notify.notified();
+            if !self.inertia.borrow().active {
+                break;
+            }
+            notified.await;
         }
         if let Some(error) = &*self.error.borrow() {
             return Err(FiberError::new(error.to_string()));
@@ -722,6 +751,7 @@ impl Fiber {
         }
         if *self.epoch.borrow() == target {
             self.inertia.borrow_mut().active = false;
+            self.inertia_notify.notify_waiters();
             self.update_state(None);
         } else {
             self.update_state(Some(FiberState::Unloading));
@@ -749,6 +779,7 @@ impl Fiber {
         }
         if *self.epoch.borrow() == Epoch::Inactive {
             self.inertia.borrow_mut().active = false;
+            self.inertia_notify.notify_waiters();
             self.update_state(None);
         } else {
             self.update_state(Some(FiberState::Loading));

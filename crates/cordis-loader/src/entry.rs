@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use cordis_core::{Context, Fiber, Plugin};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
 use crate::evaluator::{MinijinjaEvaluator, evaluate_config};
 
@@ -114,6 +115,8 @@ pub struct EntryTree {
     pub root: Rc<RefCell<Option<Rc<EntryGroup>>>>,
     /// Number of pending entry tasks (used by the `await` intercept).
     pub tasks: Rc<Cell<usize>>,
+    /// Notifies waiters when a pending entry task settles.
+    pub tasks_notify: Rc<Notify>,
 }
 
 impl EntryTree {
@@ -130,6 +133,7 @@ impl EntryTree {
             write_callback: Rc::new(RefCell::new(None)),
             root: Rc::new(RefCell::new(None)),
             tasks: Rc::new(Cell::new(0)),
+            tasks_notify: Rc::new(Notify::new()),
         });
         let root = EntryGroup::new(tree.clone(), ctx.clone(), None);
         *tree.root.borrow_mut() = Some(root);
@@ -302,7 +306,7 @@ impl EntryTree {
     }
 
     /// Removes an entry (mirrors `tree.remove`).
-    pub fn remove(&self, id: &str) {
+    pub fn remove(self: &Rc<Self>, id: &str) {
         let entry = self
             .resolve_path(id)
             .unwrap_or_else(|error| panic!("{error}"));
@@ -313,9 +317,21 @@ impl EntryTree {
             .borrow_mut()
             .retain(|item| !Rc::ptr_eq(item, &entry));
         if let Some(fiber) = entry.fiber.borrow().clone() {
-            tokio::task::spawn_local(fiber.dispose());
+            self.spawn_dispose(fiber);
         }
         self.write();
+    }
+
+    /// Disposes a fiber as a counted tree task, so [`EntryTree::await_tree`]
+    /// waits for it (mirrors `tree.await` observing `fiber.inertia`).
+    pub(crate) fn spawn_dispose(self: &Rc<Self>, fiber: Rc<Fiber>) {
+        self.tasks.set(self.tasks.get() + 1);
+        let tree = self.clone();
+        tokio::task::spawn_local(async move {
+            let _ = fiber.dispose().await;
+            tree.tasks.set(tree.tasks.get().saturating_sub(1));
+            tree.tasks_notify.notify_waiters();
+        });
     }
 
     /// Moves an entry to another group (mirrors `tree.update(id, {}, parent)`).
@@ -324,7 +340,7 @@ impl EntryTree {
     /// and intercept realms follow the move. The fiber is only restarted when
     /// a realm label actually changes; plain moves keep the fiber running
     /// (mirrors the TS patch-context flow).
-    pub fn move_entry(&self, id: &str, parent: Option<&str>) {
+    pub fn move_entry(self: &Rc<Self>, id: &str, parent: Option<&str>) {
         let entry = self
             .resolve_path(id)
             .unwrap_or_else(|error| panic!("{error}"));
@@ -389,9 +405,7 @@ impl EntryTree {
             let fiber = entry.fiber.borrow().clone();
             *entry.fiber.borrow_mut() = None;
             if let Some(fiber) = fiber {
-                tokio::task::spawn_local(async move {
-                    let _ = fiber.dispose().await;
-                });
+                self.spawn_dispose(fiber);
             }
             if !entry.disabled() && entry.options.borrow().group != Some(true) {
                 entry.init_task.set(true);
@@ -421,9 +435,7 @@ impl EntryTree {
             let fiber = entry.fiber.borrow().clone();
             *entry.fiber.borrow_mut() = None;
             if let Some(fiber) = fiber {
-                tokio::task::spawn_local(async move {
-                    let _ = fiber.dispose().await;
-                });
+                self.spawn_dispose(fiber);
             }
         } else if entry.fiber.borrow().is_none() && entry.options.borrow().group != Some(true) {
             entry.init_task.set(true);
@@ -455,12 +467,39 @@ impl EntryTree {
     }
 
     /// Awaits all pending entry tasks (mirrors `tree.await`).
+    ///
+    /// In-flight fiber cycles are awaited directly (event-driven, like the
+    /// TS `entry.fiber.inertia` promise); init tasks settle through
+    /// `init_inner`, which notifies `tasks_notify`.
     pub async fn await_tree(&self) {
         loop {
-            tokio::task::yield_now().await;
-            let tasks = self.get_tasks();
-            if tasks == 0 {
+            let pending_fibers: Vec<Rc<Fiber>> = self
+                .entries()
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .fiber
+                        .borrow()
+                        .as_ref()
+                        .filter(|fiber| fiber.inertia_active())
+                        .cloned()
+                })
+                .collect();
+            if pending_fibers.is_empty() && self.get_tasks() == 0 {
                 return;
+            }
+            for fiber in pending_fibers {
+                let _ = fiber.wait().await;
+            }
+            // Remaining pending entries are init tasks; wait for the next
+            // completion notification, re-checking the condition so a
+            // notification that fired before subscribing is not missed.
+            while self.get_tasks() != 0 {
+                let notified = self.tasks_notify.notified();
+                if self.get_tasks() == 0 {
+                    break;
+                }
+                notified.await;
             }
         }
     }
@@ -645,7 +684,7 @@ impl Entry {
         if group_disabled || self.disabled() {
             let fiber = self.fiber.borrow().clone();
             if let Some(fiber) = fiber {
-                tokio::task::spawn_local(fiber.dispose());
+                self.tree.spawn_dispose(fiber);
             }
             *self.fiber.borrow_mut() = None;
             return;
@@ -811,6 +850,7 @@ impl Entry {
         // check below sees a quiet tree (mirrors the TS `entry.init`, which
         // notifies `loader` once all tasks settle).
         self.init_task.set(false);
+        self.tree.tasks_notify.notify_waiters();
         if self.tree.get_tasks() == 0 {
             let _ = self.ctx.borrow().notify("loader");
         }
@@ -833,6 +873,7 @@ impl Entry {
         }
         let result = fiber.wait().await.map_err(|error| error.to_string());
         self.tree.tasks.set(self.tree.tasks.get().saturating_sub(1));
+        self.tree.tasks_notify.notify_waiters();
         result
     }
 

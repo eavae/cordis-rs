@@ -165,6 +165,7 @@ impl RegistryService {
             resolved: RefCell::new(HashMap::new()),
             disposables: RefCell::new(Vec::new()),
             inertia: RefCell::new(Default::default()),
+            inertia_notify: Rc::new(tokio::sync::Notify::new()),
             dispose: RefCell::new(None),
             _hooks: RefCell::new(HashMap::new()),
             validator: RefCell::new(validator),
