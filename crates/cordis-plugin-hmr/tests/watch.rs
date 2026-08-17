@@ -15,6 +15,19 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// Waits up to 10s for `check`; the OS file watcher and the debounce timer
+/// run on wall-clock time, so the budget must tolerate slow machines.
+async fn wait_for(mut check: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if check() {
+            return;
+        }
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("condition not met within 10s");
+}
+
 /// Config defaults match the TS `Hmr.Config`.
 #[test]
 fn config_defaults_and_validation() {
@@ -80,13 +93,7 @@ async fn change_event_and_ignored() {
             fs::write(dir.join("node_modules/pkg.js"), "x").unwrap();
             fs::write(dir.join("src.js"), "hello").unwrap();
 
-            for _ in 0..100 {
-                tokio::task::yield_now().await;
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                if !changes.borrow().is_empty() {
-                    break;
-                }
-            }
+            wait_for(|| !changes.borrow().is_empty()).await;
             watcher.stop();
             assert!(
                 changes.borrow().iter().any(|p| p.ends_with("src.js")),
@@ -201,19 +208,14 @@ async fn include_config_refresh() {
                 "- id: '1'\n  name: greeter\n  config:\n    value: two\n",
             )
             .unwrap();
-            for _ in 0..100 {
-                tokio::task::yield_now().await;
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                if root
-                    .get_str("greeting")
+            wait_for(|| {
+                root.get_str("greeting")
                     .and_then(|v| v.downcast::<String>().ok())
                     .map(|s| s.to_string())
                     .as_deref()
                     == Some("two")
-                {
-                    break;
-                }
-            }
+            })
+            .await;
             watcher.stop();
             assert_eq!(
                 root.get_str("greeting")
