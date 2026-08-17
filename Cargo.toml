@@ -54,4 +54,12 @@ unsafe_code = "forbid"
 missing_docs = "warn"
 
 [workspace.lints.clippy]
+# Curated pedantic/nursery lints that are mechanical and uncontroversial.
+# `scripts/quality.sh` promotes them to errors via `-D warnings`.
 all = "warn"
+cloned_instead_of_copied = "warn"
+default_trait_access = "warn"
+map_unwrap_or = "warn"
+or_fun_call = "warn"
+redundant_clone = "warn"
+use_self = "warn"
