@@ -238,6 +238,3 @@ pub fn validate_message(locale: &str, field: &str) -> String {
         (_, _) => format!("hmr.config.{field}: invalid value"),
     }
 }
-
-#[allow(dead_code)]
-fn _assert_service(_: Option<HmrService>) {}

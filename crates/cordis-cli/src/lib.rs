@@ -1,7 +1,6 @@
 //! cordis-cli startup path.
 
 use std::path::Path;
-use std::rc::Rc;
 
 use cordis_core::Context;
 use cordis_loader::{Loader, SoPlugin, parse_config};
@@ -334,6 +333,3 @@ async fn wait_for_exit(_root: &Context) {
         let _ = tokio::signal::ctrl_c().await;
     }
 }
-
-#[allow(dead_code)]
-fn _keep_rc(_: Rc<()>) {}

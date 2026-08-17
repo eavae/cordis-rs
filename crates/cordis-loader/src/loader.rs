@@ -14,7 +14,6 @@ use crate::so::SoPlugin;
 pub struct Loader {
     pub ctx: Context,
     pub tree: Rc<EntryTree>,
-    pub name: &'static str,
     /// `CORDIS_SHARED` env data (mirrors `loader.envData`).
     pub env_data: serde_json::Value,
     /// The base url exposed to `!expr` as `base_url()` (defaults to the
@@ -51,7 +50,6 @@ impl Loader {
         let loader = Rc::new(Loader {
             ctx: ctx.clone(),
             tree,
-            name: "loader",
             env_data,
             base_url: RefCell::new(
                 std::env::current_dir()

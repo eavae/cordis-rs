@@ -53,12 +53,6 @@ pub enum IsolateValue {
     Label(String),
 }
 
-impl EntryOptions {
-    /// Sorts keys the same way as `sortKeys` in entry.ts: `id`/`name` first,
-    /// `config` last, the rest alphabetically (YAML writer concern).
-    pub(crate) fn sort_keys(&mut self) {}
-}
-
 /// A group of entries (mirrors `EntryGroup` in group.ts).
 pub struct EntryGroup {
     pub tree: Rc<EntryTree>,
@@ -622,7 +616,6 @@ impl Entry {
             } else {
                 options.apply_to(&mut current);
             }
-            current.sort_keys();
         }
 
         // Groups are always "enabled" per `disabled()`, but explicitly

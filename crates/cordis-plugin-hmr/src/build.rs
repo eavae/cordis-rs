@@ -171,8 +171,3 @@ fn sha256(input: &[u8]) -> String {
 
 /// Result type alias for the build module.
 pub type BuildResult<T> = Result<T, String>;
-
-#[allow(dead_code)]
-fn _path_check(path: &Path) -> bool {
-    path.is_absolute()
-}
