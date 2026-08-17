@@ -6,31 +6,94 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+use std::future::Future;
 use std::rc::{Rc, Weak};
+use std::task::{Context as TaskContext, Poll, Waker};
 
 use crate::context::{Context, ContextInner};
 use crate::fiber::{CordisError, EffectHandle, Fiber};
-use crate::service::{Effect, Service, sync_disposer};
+use crate::service::{BoxFuture, Effect, Service, sync_disposer};
 
 /// A single event listener.
 ///
-/// Returns `Ok(Some(value))` for a truthy result (used by `serial`/`bail`/
-/// `waterfall`) or `Err` to propagate an error (used by all modes).
-pub type EventCallback = Rc<dyn Fn(&[Rc<dyn Any>]) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>>>;
+/// Produces a boxed future that resolves to `Ok(Some(value))` for a truthy
+/// result (used by `serial`/`bail`/`waterfall`) or `Err` to propagate an
+/// error (used by all modes). As in Cordis, listeners may be synchronous or
+/// asynchronous; the dispatch mode decides whether the future is awaited.
+pub type EventCallback = Rc<
+    dyn Fn(&[Rc<dyn Any>]) -> BoxFuture<'static, Result<Option<Rc<dyn Any>>, Box<dyn Error>>>
+        + 'static,
+>;
 
 /// Adapts a plain listener closure into an [`EventCallback`].
+///
+/// The listener is synchronous: it runs to completion the first time the
+/// returned future is polled.
 pub fn event_listener<F>(f: F) -> EventCallback
 where
     F: Fn(&[Rc<dyn Any>]) + 'static,
 {
-    Rc::new(move |args| {
-        f(args);
-        Ok(None)
+    let f = Rc::new(f);
+    Rc::new(move |args: &[Rc<dyn Any>]| {
+        let args = args.to_vec();
+        let f = f.clone();
+        Box::pin(async move {
+            f(&args);
+            Ok(None)
+        })
+    })
+}
+
+/// Adapts a synchronous listener returning a `Result` into an
+/// [`EventCallback`].
+///
+/// Equivalent to the previous synchronous `EventCallback` signature: the
+/// listener runs to completion on the first poll, so `emit` and `bail` can
+/// consume its result without awaiting.
+pub fn event_callback<F>(f: F) -> EventCallback
+where
+    F: Fn(&[Rc<dyn Any>]) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> + 'static,
+{
+    let f = Rc::new(f);
+    Rc::new(move |args: &[Rc<dyn Any>]| {
+        let args = args.to_vec();
+        let f = f.clone();
+        Box::pin(async move { f(&args) })
+    })
+}
+
+/// Adapts an asynchronous listener into an [`EventCallback`].
+///
+/// The future is created when the callback is invoked and first polled by
+/// the dispatch mode (e.g. `join_all` in `parallel`, sequential awaits in
+/// `serial`).
+pub fn event_listener_async<F, Fut>(f: F) -> EventCallback
+where
+    F: Fn(Vec<Rc<dyn Any>>) -> Fut + 'static,
+    Fut: Future<Output = Result<Option<Rc<dyn Any>>, Box<dyn Error>>> + 'static,
+{
+    let f = Rc::new(f);
+    Rc::new(move |args: &[Rc<dyn Any>]| {
+        let f = f.clone();
+        Box::pin(f(args.to_vec()))
     })
 }
 
 /// The `next` function handed to waterfall listeners.
 pub type WaterfallNext = Rc<dyn Fn() -> Option<Rc<dyn Any>>>;
+
+/// The result type of a listener invocation.
+type ListenerResult = Result<Option<Rc<dyn Any>>, Box<dyn Error>>;
+
+/// Polls a listener future once with a no-op waker.
+///
+/// Synchronous listeners always resolve on the first poll; an asynchronous
+/// listener reports `Pending` here and must be awaited by the dispatch mode.
+fn poll_once(future: &mut BoxFuture<'static, ListenerResult>) -> Poll<ListenerResult> {
+    let waker = Waker::noop();
+    let mut cx = TaskContext::from_waker(waker);
+    future.as_mut().poll(&mut cx)
+}
 
 /// Boxes a [`WaterfallNext`] so it can travel inside `Rc<dyn Any>` args.
 #[derive(Clone)]
@@ -223,14 +286,12 @@ impl EventsService {
         let called = Rc::new(Cell::new(false));
         let wrapper: EventCallback = {
             let called = called.clone();
-            Rc::new(
-                move |args: &[Rc<dyn Any>]| -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> {
-                    if called.replace(true) {
-                        return Ok(None);
-                    }
-                    callback(args)
-                },
-            )
+            Rc::new(move |args: &[Rc<dyn Any>]| {
+                if called.replace(true) {
+                    return Box::pin(async { Ok(None) });
+                }
+                callback(args)
+            })
         };
         self.on(ctx, &event, wrapper, options)
     }
@@ -241,32 +302,42 @@ impl EventsService {
     }
 
     /// Emits with a filter (`thisArg` in the TS reference).
+    ///
+    /// Synchronous listeners run immediately and the first error panics
+    /// (mirrors the JS `emit`). An asynchronous listener is started and its
+    /// continuation runs in the background, like the ignored promise of a JS
+    /// async listener; this requires a current-thread runtime or `LocalSet`
+    /// (the runtime model Cordis assumes), and its completion is logged.
     pub fn emit_with(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
         this_arg: Option<&dyn EventFilter>,
     ) {
-        let callbacks = self.resolve("emit", event, args, this_arg);
-        for callback in callbacks {
-            callback(args).expect("emit listener failed");
-        }
+        let callbacks = self.resolve("emit", event, args, this_arg, ctx);
+        self.emit_callbacks(ctx, callbacks, args);
     }
 
-    /// Runs listeners concurrently, aggregating errors (mirrors
-    /// `Promise.allSettled` + `AggregateError`).
+    /// Runs all listeners and awaits them together, aggregating errors
+    /// (mirrors `Promise.allSettled` + `AggregateError`).
+    ///
+    /// As in Cordis, every listener is started before any completion is
+    /// awaited, so asynchronous listeners overlap at their `await` points.
     pub async fn parallel(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Result<(), ParallelError> {
-        let callbacks = self.resolve("emit", event, args, this_arg);
+        let callbacks = self.resolve("emit", event, args, this_arg, ctx);
+        let results =
+            futures_util::future::join_all(callbacks.into_iter().map(|callback| callback(args)))
+                .await;
         let mut errors = Vec::new();
-        for callback in callbacks {
-            if let Err(error) = callback(args) {
+        for result in results {
+            if let Err(error) = result {
                 errors.push(error);
             }
         }
@@ -281,14 +352,14 @@ impl EventsService {
     /// result; errors propagate.
     pub async fn serial(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> {
-        let callbacks = self.resolve("serial", event, args, this_arg);
+        let callbacks = self.resolve("serial", event, args, this_arg, ctx);
         for callback in callbacks {
-            if let Some(result) = callback(args)? {
+            if let Some(result) = callback(args).await? {
                 return Ok(Some(result));
             }
         }
@@ -299,15 +370,23 @@ impl EventsService {
     /// result; errors propagate.
     pub fn bail(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> {
-        let callbacks = self.resolve("bail", event, args, this_arg);
+        let callbacks = self.resolve("bail", event, args, this_arg, ctx);
         for callback in callbacks {
-            if let Some(result) = callback(args)? {
-                return Ok(Some(result));
+            let mut future = callback(args);
+            match poll_once(&mut future) {
+                Poll::Ready(result) => {
+                    if let Some(result) = result? {
+                        return Ok(Some(result));
+                    }
+                }
+                Poll::Pending => {
+                    return Err("bail does not support asynchronous listeners (use serial)".into());
+                }
             }
         }
         Ok(None)
@@ -317,13 +396,13 @@ impl EventsService {
     /// plus a `next` function, and the last call falls back to `tail`.
     pub fn waterfall(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
         tail: WaterfallNext,
     ) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> {
         let mut callbacks = self
-            .resolve("waterfall", event, args, None)
+            .resolve("waterfall", event, args, None, ctx)
             .into_iter()
             .collect::<Vec<_>>();
         let first = if callbacks.is_empty() {
@@ -344,9 +423,34 @@ impl EventsService {
                 let mut next_args = args.clone();
                 let next_any: Rc<dyn Any> = Rc::new(AnyNext(inner));
                 next_args.push(next_any);
-                callback(&next_args)
+                let mut future = callback(&next_args);
+                match poll_once(&mut future) {
+                    Poll::Ready(result) => result,
+                    Poll::Pending => {
+                        Err("waterfall does not support asynchronous listeners yet".into())
+                    }
+                }
             }
             None => Ok(tail()),
+        }
+    }
+
+    /// Dispatches to listeners with `emit` semantics.
+    fn emit_callbacks(&self, ctx: &Context, callbacks: Vec<EventCallback>, args: &[Rc<dyn Any>]) {
+        for callback in callbacks {
+            let mut future = callback(args);
+            match poll_once(&mut future) {
+                Poll::Ready(Ok(_)) => {}
+                Poll::Ready(Err(error)) => panic!("emit listener failed: {error}"),
+                Poll::Pending => {
+                    let logger = ctx.logger();
+                    tokio::task::spawn_local(async move {
+                        if let Err(error) = future.await {
+                            logger.error(format!("emit listener failed asynchronously: {error}"));
+                        }
+                    });
+                }
+            }
         }
     }
 
@@ -356,6 +460,7 @@ impl EventsService {
         event: &str,
         args: &[Rc<dyn Any>],
         this_arg: Option<&dyn EventFilter>,
+        ctx: &Context,
     ) -> Vec<EventCallback> {
         // `internal/dispatch` extension point: before a non-internal event
         // is dispatched, notify dispatch hooks with the mode, event name and
@@ -372,10 +477,8 @@ impl EventsService {
                 Rc::new(event.to_string()),
                 Rc::new(args.to_vec()),
             ];
-            let callbacks = self.resolve("emit", "internal/dispatch", &dispatch_args, None);
-            for callback in callbacks {
-                callback(&dispatch_args).expect("internal/dispatch listener failed");
-            }
+            let callbacks = self.resolve("emit", "internal/dispatch", &dispatch_args, None, ctx);
+            self.emit_callbacks(ctx, callbacks, &dispatch_args);
         }
         let listeners = self.hooks.borrow().get(event).cloned().unwrap_or_default();
         listeners
@@ -424,7 +527,11 @@ pub(crate) fn run_waterfall_step(
         let mut next_args = args.clone();
         let next_any: Rc<dyn Any> = Rc::new(AnyNext(inner));
         next_args.push(next_any);
-        callback(&next_args)
+        let mut future = callback(&next_args);
+        match poll_once(&mut future) {
+            Poll::Ready(result) => result,
+            Poll::Pending => Err("waterfall does not support asynchronous listeners yet".into()),
+        }
     } else {
         Ok(tail())
     }

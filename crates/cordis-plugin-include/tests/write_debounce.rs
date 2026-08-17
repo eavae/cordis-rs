@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::fs;
 use std::rc::Rc;
 
-use cordis_core::{Context, Effect, EventOptions};
+use cordis_core::{Context, Effect, EventOptions, event_callback};
 use cordis_loader::{EntryOptions, Loader};
 use cordis_plugin_include::{IncludeConfig, include_plugin};
 
@@ -77,7 +77,7 @@ async fn same_turn_writes_coalesce_but_events_fire() {
             drop(
                 root.on(
                     "loader/config-update",
-                    Rc::new({
+                    event_callback({
                         let updates = updates.clone();
                         move |_args| {
                             updates.set(updates.get() + 1);

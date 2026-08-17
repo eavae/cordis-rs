@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 cordis-macros = { path = "../cordis-macros" }
+futures-util.workspace = true
 serde.workspace = true
 tokio.workspace = true
 

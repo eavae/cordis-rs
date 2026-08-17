@@ -20,7 +20,7 @@ pub use cordis_macros::{inject, service};
 pub use error::{ConfigValidator, ValidationError, ValidationIssue};
 pub use events::{
     AnyNext, EventCallback, EventFilter, EventOptions, EventsService, ListenerFilter,
-    ParallelError, WaterfallNext, event_listener,
+    ParallelError, WaterfallNext, event_callback, event_listener, event_listener_async,
 };
 pub use fiber::{CordisError, EffectHandle, EffectMeta, Fiber, FiberError, FiberState, disposer};
 pub use logger::{

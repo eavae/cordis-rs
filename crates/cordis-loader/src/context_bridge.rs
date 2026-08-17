@@ -257,21 +257,27 @@ pub unsafe extern "C" fn host_on(
     let handle_for_callback = handle;
     let ctx_for_callback = ctx.clone();
     let callback: EventCallback = Rc::new(move |args: &[Rc<dyn Any>]| {
-        if !is_handle_live(handle_for_callback) {
-            ctx_for_callback.logger().error(format!(
-                "skipping event callback for disposed plugin {:#x}",
-                handle_for_callback as usize
-            ));
-            return Ok(None);
-        }
-        let args_json = args_to_json(args);
-        let args = CString::new(args_json).unwrap_or_else(|_| CString::new("[]").unwrap());
-        with_session(handle_for_callback, &ctx_for_callback, || {
-            // SAFETY: the plugin promised the callback is valid for its
-            // lifetime and the handle is live (checked above).
-            unsafe { callback(handle_for_callback, args.as_ptr()) };
-        });
-        Ok(None)
+        let handle = handle_for_callback;
+        let ctx = ctx_for_callback.clone();
+        let plugin_callback = callback;
+        let args = args.to_vec();
+        Box::pin(async move {
+            if !is_handle_live(handle) {
+                ctx.logger().error(format!(
+                    "skipping event callback for disposed plugin {:#x}",
+                    handle as usize
+                ));
+                return Ok(None);
+            }
+            let args_json = args_to_json(&args);
+            let args = CString::new(args_json).unwrap_or_else(|_| CString::new("[]").unwrap());
+            with_session(handle, &ctx, || {
+                // SAFETY: the plugin promised the callback is valid for its
+                // lifetime and the handle is live (checked above).
+                unsafe { plugin_callback(handle, args.as_ptr()) };
+            });
+            Ok(None)
+        })
     });
     match ctx.on(event, callback, EventOptions::default()) {
         Ok(listener) => Rc::as_ptr(&listener).cast_mut().cast::<std::ffi::c_void>(),

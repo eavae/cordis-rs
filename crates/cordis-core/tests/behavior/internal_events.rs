@@ -9,11 +9,13 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use cordis_core::{AnyNext, Context, Effect, EventCallback, EventOptions, FiberState, Plugin};
+use cordis_core::{
+    AnyNext, Context, Effect, EventCallback, EventOptions, FiberState, Plugin, event_callback,
+};
 
 /// Records `(mode, name, arg_count)` for `internal/dispatch` payloads.
 fn dispatch_recorder(records: Rc<RefCell<Vec<(String, String, usize)>>>) -> EventCallback {
-    Rc::new(move |args: &[Rc<dyn Any>]| {
+    event_callback(move |args: &[Rc<dyn Any>]| {
         let mode = args[0].downcast_ref::<String>().unwrap().clone();
         let name = args[1].downcast_ref::<String>().unwrap().clone();
         let payload = args[2].downcast_ref::<Vec<Rc<dyn Any>>>().unwrap();
@@ -60,7 +62,7 @@ fn internal_get_hook_overrides_dynamic_access() {
     let root = Context::new();
     assert!(root.get_str("loader").is_none(), "no loader without a hook");
 
-    let get_hook: EventCallback = Rc::new(|args: &[Rc<dyn Any>]| {
+    let get_hook: EventCallback = event_callback(|args: &[Rc<dyn Any>]| {
         let name = args[1].downcast_ref::<String>().unwrap();
         let next = &args[3].downcast_ref::<AnyNext>().unwrap().0;
         match name.as_str() {
@@ -108,7 +110,7 @@ fn internal_set_hook_intercepts_write() {
 
     let intercept = Rc::new(Cell::new(false));
     let hook_intercept = intercept.clone();
-    let set_hook: EventCallback = Rc::new(move |args: &[Rc<dyn Any>]| {
+    let set_hook: EventCallback = event_callback(move |args: &[Rc<dyn Any>]| {
         let name = args[1].downcast_ref::<String>().unwrap();
         let next = &args[4].downcast_ref::<AnyNext>().unwrap().0;
         match name.as_str() {
@@ -206,7 +208,7 @@ async fn internal_service_broadcasts_to_same_realm() {
 }
 
 fn service_recorder(records: Rc<RefCell<Vec<String>>>) -> EventCallback {
-    Rc::new(move |args: &[Rc<dyn Any>]| {
+    event_callback(move |args: &[Rc<dyn Any>]| {
         let name = args[0].downcast_ref::<String>().unwrap();
         if name == "foo"
             && let Some(value) = args[1].downcast_ref::<String>()
@@ -227,7 +229,7 @@ async fn internal_status_broadcasts_transitions() {
             let root = Context::new();
             let records = Rc::new(RefCell::new(Vec::new()));
             let records_for_hook = records.clone();
-            let status_hook: EventCallback = Rc::new(move |args: &[Rc<dyn Any>]| {
+            let status_hook: EventCallback = event_callback(move |args: &[Rc<dyn Any>]| {
                 // `Rc<dyn Any>` erases the inner type, so the fiber arrives
                 // as `&Fiber` (mirrors the loader's internal/plugin hooks).
                 let fiber = args[0].downcast_ref::<cordis_core::Fiber>().unwrap();

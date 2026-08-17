@@ -2,11 +2,12 @@
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
+use std::error::Error;
 use std::rc::Rc;
 
 use cordis_core::{
     AnyNext, Context, Effect, EventCallback, EventFilter, EventOptions, ListenerFilter, Plugin,
-    event_listener,
+    event_callback, event_listener, event_listener_async,
 };
 
 #[derive(Clone)]
@@ -113,13 +114,13 @@ async fn events_ctx_parallel() {
     // aggregated (mirrors `AggregateError`).
     root.on(
         "event",
-        Rc::new(|_| Err(Box::new(std::io::Error::other("async")))),
+        event_callback(|_| Err(Box::new(std::io::Error::other("async")))),
         EventOptions::default(),
     )
     .unwrap();
     root.on(
         "event",
-        Rc::new(|_| Err(Box::new(std::io::Error::other("test")))),
+        event_callback(|_| Err(Box::new(std::io::Error::other("test")))),
         EventOptions::default(),
     )
     .unwrap();
@@ -158,7 +159,7 @@ async fn events_ctx_emit() {
 
     root.on(
         "event",
-        Rc::new(|_| Err(Box::new(std::io::Error::other("test")))),
+        event_callback(|_| Err(Box::new(std::io::Error::other("test")))),
         EventOptions::default(),
     )
     .unwrap();
@@ -199,7 +200,7 @@ async fn events_ctx_serial() {
 
     root.on(
         "event",
-        Rc::new(|_| Err(Box::new(std::io::Error::other("message")))),
+        event_callback(|_| Err(Box::new(std::io::Error::other("message")))),
         EventOptions::default(),
     )
     .unwrap();
@@ -232,15 +233,277 @@ async fn events_ctx_bail() {
 
     root.on(
         "event",
-        Rc::new(|_| Err(Box::new(std::io::Error::other("message")))),
+        event_callback(|_| Err(Box::new(std::io::Error::other("message")))),
         EventOptions::default(),
     )
     .unwrap();
     assert!(root.bail("event", &[], None).is_err());
 }
 
+#[tokio::test]
+async fn events_ctx_parallel_async_fan_out() {
+    let root = Context::new();
+    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    for index in 1..=2 {
+        let log = log.clone();
+        root.on(
+            "async-event",
+            event_listener_async(move |_args| {
+                let log = log.clone();
+                async move {
+                    log.borrow_mut().push(format!("start-{index}"));
+                    tokio::task::yield_now().await;
+                    log.borrow_mut().push(format!("end-{index}"));
+                    Ok(None)
+                }
+            }),
+            EventOptions::default(),
+        )
+        .unwrap();
+    }
+
+    root.parallel("async-event", &[], None).await.unwrap();
+    assert_eq!(
+        log.borrow().as_slice(),
+        &["start-1", "start-2", "end-1", "end-2"],
+        "all listeners must start before any continuation (concurrent fan-out)"
+    );
+}
+
+#[tokio::test]
+async fn events_ctx_parallel_async_aggregates_errors() {
+    let root = Context::new();
+    let settled = Rc::new(Cell::new(false));
+    {
+        let settled = settled.clone();
+        root.on(
+            "async-errors",
+            event_listener_async(move |_args| {
+                let settled = settled.clone();
+                async move {
+                    tokio::task::yield_now().await;
+                    settled.set(true);
+                    Err(Box::<dyn Error>::from(std::io::Error::other("async")))
+                }
+            }),
+            EventOptions::default(),
+        )
+        .unwrap();
+    }
+    root.on(
+        "async-errors",
+        event_listener_async(|_args| async move {
+            tokio::task::yield_now().await;
+            Err(Box::<dyn Error>::from(std::io::Error::other("test")))
+        }),
+        EventOptions::default(),
+    )
+    .unwrap();
+
+    let error = root.parallel("async-errors", &[], None).await.unwrap_err();
+    assert!(
+        settled.get(),
+        "a rejecting listener must not short-circuit the others"
+    );
+    assert_eq!(error.errors.len(), 2);
+    let messages = error
+        .errors
+        .iter()
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(messages.contains(&"async".to_string()));
+    assert!(messages.contains(&"test".to_string()));
+}
+
+#[tokio::test]
+async fn events_ctx_serial_async_short_circuits_in_order() {
+    let root = Context::new();
+    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    {
+        let log = log.clone();
+        root.on(
+            "async-serial",
+            event_listener_async(move |_args| {
+                let log = log.clone();
+                async move {
+                    log.borrow_mut().push("one-start".to_string());
+                    tokio::task::yield_now().await;
+                    log.borrow_mut().push("one-end".to_string());
+                    Ok(None)
+                }
+            }),
+            EventOptions::default(),
+        )
+        .unwrap();
+    }
+    {
+        let log = log.clone();
+        root.on(
+            "async-serial",
+            event_listener_async(move |_args| {
+                let log = log.clone();
+                async move {
+                    log.borrow_mut().push("two-start".to_string());
+                    tokio::task::yield_now().await;
+                    log.borrow_mut().push("two-end".to_string());
+                    let value: Rc<dyn Any> = Rc::new("b".to_string());
+                    Ok(Some(value))
+                }
+            }),
+            EventOptions::default(),
+        )
+        .unwrap();
+    }
+    {
+        let log = log.clone();
+        root.on(
+            "async-serial",
+            event_listener_async(move |_args| {
+                let log = log.clone();
+                async move {
+                    log.borrow_mut().push("three".to_string());
+                    Ok(None)
+                }
+            }),
+            EventOptions::default(),
+        )
+        .unwrap();
+    }
+
+    let result = root.serial("async-serial", &[], None).await.unwrap();
+    assert_eq!(
+        result
+            .as_ref()
+            .and_then(|value| value.downcast_ref::<String>())
+            .map(String::as_str),
+        Some("b")
+    );
+    assert_eq!(
+        log.borrow().as_slice(),
+        &["one-start", "one-end", "two-start", "two-end"],
+        "listeners are awaited in order and short-circuit on the first truthy result"
+    );
+}
+
+#[tokio::test]
+async fn events_ctx_emit_async_continues_in_background() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let done = Rc::new(Cell::new(false));
+            {
+                let done = done.clone();
+                root.on(
+                    "async-emit",
+                    event_listener_async(move |_args| {
+                        let done = done.clone();
+                        async move {
+                            tokio::task::yield_now().await;
+                            done.set(true);
+                            Ok(None)
+                        }
+                    }),
+                    EventOptions::default(),
+                )
+                .unwrap();
+            }
+
+            root.emit("async-emit", &[]);
+            assert!(
+                !done.get(),
+                "emit must return before async listeners finish"
+            );
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+                if done.get() {
+                    break;
+                }
+            }
+            assert!(
+                done.get(),
+                "the background continuation must run to completion"
+            );
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn events_ctx_emit_async_error_is_not_propagated() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            root.on(
+                "async-emit-error",
+                event_listener_async(|_args| async move {
+                    tokio::task::yield_now().await;
+                    Err(Box::<dyn Error>::from(std::io::Error::other(
+                        "late failure",
+                    )))
+                }),
+                EventOptions::default(),
+            )
+            .unwrap();
+
+            root.emit("async-emit-error", &[]);
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn events_ctx_bail_rejects_async_listeners() {
+    let root = Context::new();
+    root.on(
+        "async-bail",
+        event_listener_async(|_args| async move {
+            tokio::task::yield_now().await;
+            Ok(None)
+        }),
+        EventOptions::default(),
+    )
+    .unwrap();
+
+    let error = root.bail("async-bail", &[], None).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not support asynchronous listeners"),
+        "bail is the synchronous short-circuit mode; async listeners must use serial"
+    );
+}
+
+#[tokio::test]
+async fn events_ctx_once_async() {
+    let root = Context::new();
+    let count = Rc::new(Cell::new(0u32));
+    {
+        let count = count.clone();
+        root.once(
+            "async-once",
+            event_listener_async(move |_args| {
+                let count = count.clone();
+                async move {
+                    count.set(count.get() + 1);
+                    tokio::task::yield_now().await;
+                    Ok(None)
+                }
+            }),
+            EventOptions::default(),
+        )
+        .unwrap();
+    }
+
+    root.parallel("async-once", &[], None).await.unwrap();
+    root.parallel("async-once", &[], None).await.unwrap();
+    assert_eq!(count.get(), 1);
+}
+
 fn waterfall_step() -> EventCallback {
-    Rc::new(|args| {
+    event_callback(|args| {
         let value = args[0].downcast_ref::<i64>().expect("value");
         let next = &args[1].downcast_ref::<AnyNext>().expect("next").0;
         let binding = next().expect("next result");
@@ -250,7 +513,7 @@ fn waterfall_step() -> EventCallback {
 }
 
 fn waterfall_stop() -> EventCallback {
-    Rc::new(|args| {
+    event_callback(|args| {
         let value = args[0].downcast_ref::<i64>().expect("value");
         Ok(Some(Rc::new(*value)))
     })
@@ -323,7 +586,7 @@ async fn internal_update_hook() {
                 .context()
                 .on(
                     "internal/update",
-                    Rc::new(move |args| {
+                    event_callback(move |args| {
                         let config = args[0].downcast_ref::<Config>().expect("config").value;
                         hook_seen.borrow_mut().push(("hook", config));
                         let next = &args[3].downcast_ref::<AnyNext>().expect("next").0;

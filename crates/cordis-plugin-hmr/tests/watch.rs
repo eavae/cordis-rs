@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use cordis_core::{Context, Effect, EventOptions};
+use cordis_core::{Context, Effect, EventOptions, event_callback};
 use cordis_loader::{EntryOptions, Loader};
 use cordis_plugin_hmr::{FileWatcher, HmrConfig, validate_config};
 use cordis_plugin_include::{IncludeConfig, include_plugin};
@@ -66,7 +66,7 @@ async fn change_event_and_ignored() {
             drop(
                 root.on(
                     "hmr/change",
-                    Rc::new({
+                    event_callback({
                         let changes = changes.clone();
                         move |args| {
                             if let Some(path) = args[0].downcast_ref::<String>() {
@@ -149,7 +149,7 @@ async fn include_config_refresh() {
             drop(
                 root.on(
                     "hmr/change",
-                    Rc::new({
+                    event_callback({
                         let changes = changes.clone();
                         move |_args| {
                             *changes.borrow_mut() += 1;

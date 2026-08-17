@@ -5,7 +5,9 @@ use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
 
-use cordis_core::{AnyNext, ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service};
+use cordis_core::{
+    AnyNext, ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service, event_callback,
+};
 
 use crate::entry::{Entry, EntryGroup, EntryOptions, EntryTree, PartialEntryOptions};
 use crate::evaluator::EvalEnv;
@@ -111,7 +113,7 @@ impl Loader {
             self.ctx
                 .on(
                     "internal/update",
-                    Rc::new(move |args| {
+                    event_callback(move |args| {
                         let no_save = args[1].downcast_ref::<bool>().copied().unwrap_or(false);
                         let fiber = args[2].clone().downcast::<Fiber>().ok();
                         let next = &args[3].downcast_ref::<AnyNext>().expect("next").0;
@@ -143,7 +145,7 @@ impl Loader {
             self.ctx
                 .on(
                     "internal/update",
-                    Rc::new(move |args| {
+                    event_callback(move |args| {
                         let no_save = args[1].downcast_ref::<bool>().copied().unwrap_or(false);
                         let fiber = args[2].clone().downcast::<Fiber>().ok();
                         let next = &args[3].downcast_ref::<AnyNext>().expect("next").0;
@@ -171,7 +173,7 @@ impl Loader {
             self.ctx
                 .on(
                     "internal/plugin",
-                    Rc::new(move |args| {
+                    event_callback(move |args| {
                         let fiber = args[0].clone().downcast::<Fiber>().ok();
                         let Some(fiber) = fiber else {
                             return Ok(None);
