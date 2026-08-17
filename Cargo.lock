@@ -48,6 +48,7 @@ version = "0.1.0"
 dependencies = [
  "cordis-macros",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

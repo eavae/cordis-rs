@@ -8,15 +8,15 @@ use std::error::Error;
 use std::fmt;
 use std::rc::Rc;
 
+use serde::{Deserialize, Deserializer};
+
 use crate::context::Context;
 use crate::fiber::EffectHandle;
 use crate::service::{Config, Effect, Service, sync_disposer};
 
 /// Log level (mirrors `LoggerLevel` in logger.ts).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
-#[serde(from = "u8", into = "u8")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(into = "u8")]
 #[repr(u8)]
 pub enum LoggerLevel {
     /// Error level.
@@ -29,13 +29,31 @@ pub enum LoggerLevel {
     Debug = 3,
 }
 
-impl From<u8> for LoggerLevel {
-    fn from(value: u8) -> Self {
+/// Error returned when a numeric log level does not match any [`LoggerLevel`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownLoggerLevel {
+    /// The offending numeric value.
+    pub value: u8,
+}
+
+impl fmt::Display for UnknownLoggerLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown logger level: {}", self.value)
+    }
+}
+
+impl Error for UnknownLoggerLevel {}
+
+impl TryFrom<u8> for LoggerLevel {
+    type Error = UnknownLoggerLevel;
+
+    fn try_from(value: u8) -> Result<Self, UnknownLoggerLevel> {
         match value {
-            0 => LoggerLevel::Error,
-            1 => LoggerLevel::Warn,
-            2 => LoggerLevel::Info,
-            _ => LoggerLevel::Debug,
+            0 => Ok(LoggerLevel::Error),
+            1 => Ok(LoggerLevel::Warn),
+            2 => Ok(LoggerLevel::Info),
+            3 => Ok(LoggerLevel::Debug),
+            other => Err(UnknownLoggerLevel { value: other }),
         }
     }
 }
@@ -43,6 +61,16 @@ impl From<u8> for LoggerLevel {
 impl From<LoggerLevel> for u8 {
     fn from(level: LoggerLevel) -> Self {
         level as u8
+    }
+}
+
+impl<'de> Deserialize<'de> for LoggerLevel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = u8::deserialize(deserializer)?;
+        LoggerLevel::try_from(value).map_err(serde::de::Error::custom)
     }
 }
 

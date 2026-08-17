@@ -18,4 +18,5 @@ tokio.workspace = true
 [dev-dependencies]
 # `test-util` enables tokio's fake clock (time::pause / time::advance),
 # which backs the `with_timers` behavior-test helper.
+serde_json.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

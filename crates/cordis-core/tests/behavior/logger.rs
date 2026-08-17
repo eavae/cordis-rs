@@ -7,7 +7,8 @@ use std::rc::Rc;
 
 use cordis_core::{
     COLOR_16, COLOR_256, Context, Effect, LogValue, LoggerIntercept, LoggerLevel, LoggerService,
-    LoggerType, Message, Plugin, Service, ShadowContext, SimpleExporter, format_message, service,
+    LoggerType, Message, Plugin, Service, ShadowContext, SimpleExporter, UnknownLoggerLevel,
+    format_message, service,
 };
 
 fn setup() -> (Context, Rc<RefCell<Vec<Message>>>) {
@@ -433,4 +434,26 @@ async fn hyphenate_names() {
     assert_eq!(cordis_core::hyphenate("root"), "root");
     assert_eq!(cordis_core::hyphenate("FooBar"), "foo-bar");
     assert_eq!(cordis_core::hyphenate("foo:driver"), "foo:driver");
+}
+
+#[test]
+fn logger_level_from_u8() {
+    assert_eq!(LoggerLevel::try_from(0), Ok(LoggerLevel::Error));
+    assert_eq!(LoggerLevel::try_from(3), Ok(LoggerLevel::Debug));
+    assert_eq!(
+        LoggerLevel::try_from(4),
+        Err(UnknownLoggerLevel { value: 4 })
+    );
+    assert_eq!(u8::from(LoggerLevel::Warn), 1);
+}
+
+#[test]
+fn logger_level_serde_round_trip() {
+    assert_eq!(serde_json::to_string(&LoggerLevel::Info).unwrap(), "2");
+    assert_eq!(
+        serde_json::from_str::<LoggerLevel>("2").unwrap(),
+        LoggerLevel::Info
+    );
+    let err = serde_json::from_str::<LoggerLevel>("9").unwrap_err();
+    assert!(err.to_string().contains("unknown logger level: 9"));
 }
