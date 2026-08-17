@@ -699,12 +699,21 @@ impl Fiber {
                 None => None,
             }
         };
-        if let Some(task) = task
-            && let Err(reason) = task.await
-        {
-            self.log_error(&format!("{reason} at <{}>", self.name()));
-            *self.error.borrow_mut() = Some(Box::new(FiberError::new(reason.to_string())));
-            *self.epoch.borrow_mut() = Epoch::Inactive;
+        if let Some(task) = task {
+            // Run the apply task under a `JoinHandle` so a panic surfaces as
+            // an error instead of unwinding `reload` and leaving the inertia
+            // lock held forever (which would hang every `Fiber::wait`).
+            let result = tokio::task::spawn_local(task).await;
+            let reason = match result {
+                Ok(Ok(())) => None,
+                Ok(Err(reason)) => Some(reason.to_string()),
+                Err(error) => Some(format!("plugin apply panicked: {error}")),
+            };
+            if let Some(reason) = reason {
+                self.log_error(&format!("{reason} at <{}>", self.name()));
+                *self.error.borrow_mut() = Some(Box::new(FiberError::new(reason)));
+                *self.epoch.borrow_mut() = Epoch::Inactive;
+            }
         }
         if *self.epoch.borrow() == target {
             self.inertia.borrow_mut().active = false;
@@ -719,11 +728,18 @@ impl Fiber {
         let disposables = self.disposables.take();
         for item in disposables.into_iter().rev() {
             let outcome = match item {
-                Disposable::Direct(disposer) => disposer().await,
-                Disposable::Effect(handle) => handle.dispose().await,
+                // Run each disposer under a `JoinHandle` so a panicking
+                // disposer cannot unwind `unload` and leave the inertia lock
+                // held forever.
+                Disposable::Direct(disposer) => tokio::task::spawn_local(disposer()).await,
+                Disposable::Effect(handle) => tokio::task::spawn_local(handle.dispose()).await,
             };
-            if let Err(reason) = outcome {
-                self.log_error(&reason);
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(reason)) => self.log_error(&reason),
+                Err(error) => {
+                    self.log_error(&format!("disposer panicked: {error}"));
+                }
             }
         }
         if *self.epoch.borrow() == Epoch::Inactive {
@@ -927,7 +943,10 @@ impl Fiber {
         let collect = |this: &Rc<Self>, item: Disposable| {
             this.disposables.borrow_mut().push(item);
         };
-        match callback(ctx, config) {
+        let effect =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(ctx, config)))
+                .map_err(Self::apply_panic_error)?;
+        match effect {
             Effect::None => Ok(None),
             Effect::Disposer(disposer) => {
                 collect(self, Disposable::Direct(disposer));
@@ -1002,6 +1021,17 @@ impl Fiber {
             }
             Effect::Error(reason) => Err(reason),
         }
+    }
+
+    /// Converts a panicked apply callback into an error (mirrors the TS
+    /// try/catch around the plugin entry).
+    fn apply_panic_error(payload: Box<dyn Any + Send>) -> Box<dyn Error> {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|message| message.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "plugin apply panicked".to_string());
+        Box::new(FiberError::new(message))
     }
 }
 

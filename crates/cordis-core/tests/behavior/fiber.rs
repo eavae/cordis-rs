@@ -401,6 +401,71 @@ async fn wait_task_survives_panicking_background_task() {
         .await;
 }
 
+/// A panicking apply callback must not hang `Fiber::wait`: the inertia lock
+/// has to be released on the error path too.
+#[tokio::test(flavor = "current_thread")]
+async fn wait_survives_panicking_apply_callback() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let fiber = root.plugin(
+                &Plugin {
+                    is_group: false,
+                    name: None,
+                    inject: Vec::new(),
+                    apply: Rc::new(|_ctx: &Context, _config| panic!("boom")),
+                },
+                None,
+            );
+            let result =
+                tokio::time::timeout(std::time::Duration::from_millis(500), fiber.wait()).await;
+            assert!(
+                result.is_ok(),
+                "wait must resolve when the apply callback panics"
+            );
+            assert!(
+                result.unwrap().is_err(),
+                "a panicked apply must surface as an error"
+            );
+        })
+        .await;
+}
+
+/// A panicking async apply effect must not hang `Fiber::wait` either.
+#[tokio::test(flavor = "current_thread")]
+async fn wait_survives_panicking_async_apply() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let fiber = root.plugin(
+                &Plugin {
+                    is_group: false,
+                    name: None,
+                    inject: Vec::new(),
+                    apply: Rc::new(|_ctx: &Context, _config| {
+                        Effect::Async(Box::pin(async {
+                            panic!("boom");
+                        }))
+                    }),
+                },
+                None,
+            );
+            let result =
+                tokio::time::timeout(std::time::Duration::from_millis(500), fiber.wait()).await;
+            assert!(
+                result.is_ok(),
+                "wait must resolve when the async apply panics"
+            );
+            assert!(
+                result.unwrap().is_err(),
+                "a panicked async apply must surface as an error"
+            );
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn fiber_update_config_while_injected_service_reloads() {
     let local = tokio::task::LocalSet::new();
