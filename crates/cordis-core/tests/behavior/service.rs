@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::task::{Poll, Waker};
 
 use cordis_core::{
-    Context, Effect, EventOptions, FiberState, Plugin, Service, event_listener, service,
-    sync_disposer,
+    Context, Effect, EventOptions, FiberState, Plugin, Service, ShadowContext, event_listener,
+    service, sync_disposer,
 };
 
 /// A manually completed future used to block a service `init`.
@@ -303,6 +303,41 @@ async fn service_macro_accessor() {
             let typed = root.get::<Database>().expect("database");
             assert_eq!(accessor.url, "cordis://local");
             assert!(Rc::ptr_eq(&accessor, &typed));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn service_macro_accessor_uses_shadow() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            use crate::behavior::service::DatabaseServiceExt;
+
+            let root = Context::new();
+            // The database lives only in the own realm.
+            let ctx_own = root.isolate("database", Rc::from("own"));
+            drop(
+                ctx_own
+                    .provide::<Database>(Rc::new(Database {
+                        url: "cordis://own".to_string(),
+                    }))
+                    .unwrap(),
+            );
+            // The caller realm cannot see it.
+            let ctx_caller = root.isolate("database", Rc::from("caller"));
+            assert!(ctx_caller.database().is_none());
+
+            // The macro accessor on a ShadowContext resolves through the
+            // service's own scope (JS: `this.ctx['database']`), not the
+            // caller's.
+            let shadow = ctx_own.shadow_of("database").expect("shadow");
+            let service_ctx = ShadowContext::new(shadow.ctx.clone(), ctx_caller.clone());
+            let accessor = service_ctx.database().expect("database via own scope");
+            assert_eq!(accessor.url, "cordis://own");
+            // The caller chain still resolves nothing: the accessor did not
+            // fall back to the caller's view.
+            assert!(service_ctx.caller().database().is_none());
         })
         .await;
 }
