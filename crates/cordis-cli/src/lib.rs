@@ -183,6 +183,12 @@ fn crate_path(crate_name: &str) -> String {
 
 /// Runs the cordis startup path: root → loader → plugins → wait for signal.
 pub async fn run(options: &CliOptions) -> anyhow::Result<()> {
+    // Install the exit handlers before any startup work: drivers that wait
+    // for the ready marker may signal immediately after it appears, so the
+    // handlers must already be registered by then (signals that arrive
+    // earlier are queued by tokio and resolved below).
+    let exit = ExitSignals::register();
+
     let config_path = options
         .config
         .clone()
@@ -260,13 +266,12 @@ pub async fn run(options: &CliOptions) -> anyhow::Result<()> {
         .logger()
         .info(format!("cordis started (config {config_path})"));
 
-    // Signal handlers are installed inside `wait_for_exit`; announce that the
-    // process is ready so drivers (tests/scripts) can signal it safely.
+    // Announce readiness only after the exit handlers are installed.
     eprintln!("cordis ready");
     if let Ok(marker) = std::env::var("CORDIS_READY_FILE") {
         let _ = std::fs::write(&marker, "ready");
     }
-    wait_for_exit(&root).await;
+    exit.wait().await;
     loader.ctx.logger().info("cordis exiting");
     Ok(())
 }
@@ -316,20 +321,48 @@ fn load_so_plugins(loader: &Loader, dir: &Path) -> anyhow::Result<Vec<SoPlugin>>
     Ok(libraries)
 }
 
-async fn wait_for_exit(_root: &Context) {
+/// The registered exit signals (SIGINT/SIGTERM on unix, ctrl-c elsewhere).
+struct ExitSignals {
     #[cfg(unix)]
-    {
-        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-            .expect("sigint handler");
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("sigterm handler");
-        tokio::select! {
-            _ = sigint.recv() => {}
-            _ = sigterm.recv() => {}
+    sigint: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    sigterm: tokio::signal::unix::Signal,
+}
+
+impl ExitSignals {
+    /// Registers the exit signals with the OS.
+    fn register() -> Self {
+        #[cfg(unix)]
+        {
+            ExitSignals {
+                sigint: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("sigint handler"),
+                sigterm: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("sigterm handler"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            ExitSignals
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
+
+    /// Resolves when an exit signal arrives.
+    async fn wait(self) {
+        #[cfg(unix)]
+        {
+            let Self {
+                mut sigint,
+                mut sigterm,
+            } = self;
+            tokio::select! {
+                _ = sigint.recv() => {}
+                _ = sigterm.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }
