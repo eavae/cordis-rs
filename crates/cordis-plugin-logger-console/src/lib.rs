@@ -1,7 +1,7 @@
 //! Cordis logger-console plugin (Rust port).
 //!
 //! Port of `@cordisjs/plugin-logger-console`: renders log messages in the
-//! console format (story card D3).
+//! console format.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

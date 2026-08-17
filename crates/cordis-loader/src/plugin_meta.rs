@@ -1,5 +1,5 @@
-//! Plugin metadata (story card E6): the JSON payload returned by a `.so`
-//! plugin's `plugin_meta` export.
+//! Plugin metadata: the JSON payload returned by a `.so` plugin's
+//! `plugin_meta` export.
 
 use serde::Deserialize;
 
@@ -11,14 +11,14 @@ pub struct PluginMeta {
     /// Plugin version.
     #[serde(default)]
     pub version: Option<String>,
-    /// Declared inject dependencies (story card E5).
+    /// Declared inject dependencies.
     #[serde(default)]
     pub inject: Vec<String>,
     /// Declared provided services.
     #[serde(default)]
     pub provide: Vec<String>,
-    /// Declared dependencies (story card F2): host crates/services this
-    /// plugin links against.
+    /// Declared dependencies: host crates/services this plugin links
+    /// against.
     #[serde(default)]
     pub deps: Vec<String>,
 }

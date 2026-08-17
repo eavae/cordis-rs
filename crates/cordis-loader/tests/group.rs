@@ -1,4 +1,4 @@
-//! Story card C3: EntryGroup 与 Group 插件.
+//! EntryGroup 与 Group 插件。
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

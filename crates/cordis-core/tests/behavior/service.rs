@@ -1,5 +1,5 @@
 //! Ported cases from `packages/core/tests/service.spec.ts` and
-//! `decorator.spec.ts` (story card B6).
+//! `decorator.spec.ts`.
 
 use std::cell::{Cell, RefCell};
 use std::future::Future;

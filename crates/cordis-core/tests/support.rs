@@ -1,4 +1,4 @@
-//! Integration tests for the behavior-test support helpers (story card A2).
+//! Integration tests for the behavior-test support helpers.
 
 mod behavior;
 

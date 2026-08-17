@@ -1,4 +1,4 @@
-//! Ported cases from `packages/core/tests/isolate.spec.ts` (story card B8).
+//! Ported cases from `packages/core/tests/isolate.spec.ts`.
 
 use std::any::Any;
 use std::cell::Cell;

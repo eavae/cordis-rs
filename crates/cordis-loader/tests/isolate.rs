@@ -1,4 +1,4 @@
-//! Story card C4: loader-level isolate realms.
+//! Loader-level isolate realms。
 
 use std::cell::Cell;
 use std::collections::HashMap;

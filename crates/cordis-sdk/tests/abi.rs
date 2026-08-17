@@ -1,4 +1,4 @@
-//! Story card E2: ABI smoke tests (host loads fixture `.so` files).
+//! ABI smoke tests (host loads fixture `.so` files).
 
 use std::ffi::c_char;
 use std::path::PathBuf;

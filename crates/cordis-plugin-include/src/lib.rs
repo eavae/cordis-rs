@@ -1,7 +1,7 @@
 //! Cordis include plugin (Rust port).
 //!
 //! Port of `@cordisjs/plugin-include`: reads yaml/json config files into an
-//! entry tree and applies patches (story card D1).
+//! entry tree and applies patches.
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -199,8 +199,8 @@ async fn mount_include(
     );
     loader.read_group(subgroup, patched).await;
 
-    // Story card D5: tree writes are debounced to a single atomic file write
-    // per event-loop turn, and `loader/config-update` fires on every write.
+    // Tree writes are debounced to a single atomic file write per
+    // event-loop turn, and `loader/config-update` fires on every write.
     let state = Rc::new(IncludeWriteState {
         filename,
         readonly: Cell::new(false),
@@ -229,8 +229,8 @@ async fn mount_include(
     }));
 }
 
-/// Refreshes the include entry whose config file is `filename` (F1: config
-/// file changes trigger a reload of the include tree instead of an HMR).
+/// Refreshes the include entry whose config file is `filename` (config file
+/// changes trigger a reload of the include tree instead of an HMR).
 pub async fn refresh_include_file(loader: &Loader, filename: &Path) -> bool {
     let canonical = match fs::canonicalize(filename) {
         Ok(path) => path,

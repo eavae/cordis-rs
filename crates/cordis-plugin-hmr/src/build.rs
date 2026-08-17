@@ -1,9 +1,9 @@
-//! Story card F4: artifact hash naming and the build manifest.
+//! Artifact hash naming and the build manifest.
 //!
 //! The full `cordis build`/`cordis dev` CLI lands in the H-series; this
 //! module provides the cache-busting core: content-hash artifact names
 //! (`name@hash.so`) and a manifest mapping artifacts to their declared
-//! dependencies (consumed by the F2 dependency graph).
+//! dependencies (consumed by the dependency graph).
 
 use std::collections::BTreeMap;
 use std::path::Path;

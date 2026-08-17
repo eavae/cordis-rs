@@ -1,7 +1,7 @@
-//! Reflect service: the full dynamic access surface (story card B15).
+//! Reflect service: the full dynamic access surface.
 //!
-//! Story cards B8/B9/B10 built the property table, accessors and mixins on
-//! top of this service; B15 completes `get`/`set`/`has`/`accessor`.
+//! The property table, accessors and mixins build on top of this service,
+//! which completes `get`/`set`/`has`/`accessor`.
 
 use std::any::Any;
 use std::rc::Rc;

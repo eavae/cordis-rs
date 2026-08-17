@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# SPEC-MAP 覆盖率报告（story card A2）。
+# SPEC-MAP 覆盖率报告。
 #
 # 扫描 crates/*/tests/behavior/SPEC-MAP.md，统计已移植/未移植的行为用例数。
-# 仅用于查询，不做硬性门槛（A2 验收标准 T2）。
+# 仅用于查询，不做硬性门槛。
 #
 # 用法: scripts/spec-coverage.sh
 set -euo pipefail

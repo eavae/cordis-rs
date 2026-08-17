@@ -1,4 +1,4 @@
-//! The Loader service (story cards C1/C6).
+//! The Loader service.
 
 use std::cell::RefCell;
 use std::ops::Deref;
@@ -176,8 +176,8 @@ impl Loader {
                             return Ok(None);
                         };
                         // Merging entry-level inject happens on fiber
-                        // creation (story card C8); the entry is reachable
-                        // from the root fiber's parent context.
+                        // creation; the entry is reachable from the root
+                        // fiber's parent context.
                         if fiber.uid.get().is_some()
                             && let Some(entry) = loader.find_entry_for_parent(&fiber)
                         {
@@ -402,9 +402,9 @@ impl Loader {
         name.to_string()
     }
 
-    /// Registers a loaded `.so` plugin into the tree under its metadata name
-    /// (story cards E5/E6). The plugin's config validator and apply entry are
-    /// bridged into the core [`Plugin`].
+    /// Registers a loaded `.so` plugin into the tree under its metadata
+    /// name. The plugin's config validator and apply entry are bridged into
+    /// the core [`Plugin`].
     pub fn register_so_plugin(&self, plugin: &SoPlugin) -> Result<String, String> {
         let metadata = plugin
             .metadata()
@@ -437,7 +437,7 @@ impl Loader {
                 // SAFETY: the handle came from plugin_create and stays valid
                 // while the owning SoPlugin is alive (held by the tree).
                 // The session binds the handle to this fiber's context for
-                // the duration of the call (story card E9).
+                // the duration of the call.
                 crate::context_bridge::with_session(handle, ctx, || {
                     // SAFETY: handle and vtable are valid (live check above).
                     unsafe { apply_entry(handle, json.as_ptr()) };

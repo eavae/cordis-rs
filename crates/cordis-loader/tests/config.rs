@@ -1,4 +1,4 @@
-//! Story card C7: 配置文件解析与原子写回.
+//! 配置文件解析与原子写回。
 
 use std::fs;
 use std::path::PathBuf;

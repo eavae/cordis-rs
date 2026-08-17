@@ -70,8 +70,6 @@ impl fmt::Display for CordisError {
 impl Error for CordisError {}
 
 /// Error propagated by [`Fiber::wait`] when the plugin entry failed.
-///
-/// Story card B12 replaces this with the full error-chain model.
 #[derive(Debug, Clone)]
 pub struct FiberError {
     message: String,
@@ -310,7 +308,7 @@ pub struct Fiber {
     pub(crate) dispose: RefCell<Option<Rc<EffectHandle>>>,
     /// Fiber-level internal hooks.
     pub(crate) _hooks: RefCell<HashMap<String, Vec<InternalHook>>>,
-    /// Config validator applied on updates (story card B12).
+    /// Config validator applied on updates.
     pub(crate) validator: RefCell<Option<ConfigValidator>>,
 }
 
@@ -466,7 +464,7 @@ impl Fiber {
         })
     }
 
-    /// Updates the plugin config and restarts (schema validation in B6/B12).
+    /// Updates the plugin config and restarts.
     pub fn update(
         self: &Rc<Self>,
         config: Option<Rc<dyn Any>>,
@@ -756,9 +754,9 @@ impl Fiber {
         if old == new {
             return;
         }
-        // `internal/status`: broadcast fiber state transitions (story card
-        // B14), mirroring fiber.ts `_updateState`. The payload carries the
-        // fiber and the previous state.
+        // `internal/status`: broadcast fiber state transitions, mirroring
+        // fiber.ts `_updateState`. The payload carries the fiber and the
+        // previous state.
         if let Some(events) = self
             .ctx
             .get_service_non_strict::<crate::EventsService>("events")
@@ -771,8 +769,7 @@ impl Fiber {
             let old_any: Rc<dyn Any> = Rc::new(old);
             events.emit(&ctx, "internal/status", &[fiber_any, old_any]);
         }
-        // Notify consumers when crossing the ACTIVE boundary (B8 refines the
-        // reflect-store notify semantics).
+        // Notify consumers when crossing the ACTIVE boundary.
         let toggled_active = (old == FiberState::Active) != (new == FiberState::Active);
         if toggled_active {
             self.notify_provided();

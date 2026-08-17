@@ -1,4 +1,4 @@
-//! A minimal example plugin (story card E1).
+//! A minimal example plugin.
 
 use std::rc::Rc;
 

@@ -1,4 +1,4 @@
-//! Story card D2: timer 插件.
+//! Timer 插件。
 
 use std::cell::Cell;
 use std::rc::Rc;

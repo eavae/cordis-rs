@@ -1,4 +1,4 @@
-//! Host-side runtime for `.so` plugin async tasks (story card E4).
+//! Host-side runtime for `.so` plugin async tasks.
 //!
 //! The host owns a per-instance task list. Plugins hand boxed futures to
 //! [`host_spawn`] through the vtable; each boxed future is driven on the
@@ -104,9 +104,10 @@ impl Drop for HostTask {
     }
 }
 
-/// The host-side wake callback: re-schedules the task (no-op for E4; the
-/// plugin futures in scope are driven by the await polling loop, and real
-/// wakeups are handled by the runtime waker stored on the task).
+/// The host-side wake callback: re-schedules the task (no-op under the
+/// cooperative model; the plugin futures in scope are driven by the await
+/// polling loop, and real wakeups are handled by the runtime waker stored
+/// on the task).
 unsafe extern "C" fn wake_task(_data: *mut c_void) {}
 
 // SAFETY: the runtime and tasks are confined to the host thread.

@@ -1,5 +1,5 @@
 [package]
-name = "cordis-fixture-e9"
+name = "cordis-fixture-context"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"

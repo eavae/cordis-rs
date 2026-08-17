@@ -1,4 +1,4 @@
-//! Story card E4 fixture: exercises the host async bridge through the ABI.
+//! Fixture exercising the host async bridge through the ABI.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 

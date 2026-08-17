@@ -1,4 +1,4 @@
-//! Story card E3: host-side dynamic loader (`SoPlugin`).
+//! Host-side dynamic loader (`SoPlugin`).
 //!
 //! Fixtures are workspace cdylib members, so `cargo test --workspace`
 //! builds `libcordis_fixture_*.dylib` / `libcordis_fixture_*.so` into
@@ -42,8 +42,8 @@ extern "C" fn log_message(message: *const std::ffi::c_char) {
     LOGGED.lock().unwrap().push(text);
 }
 
-/// E3.1: loading succeeds, `create` returns a callable handle and the
-/// lifecycle hooks fire through the host vtable.
+/// Loading succeeds, `create` returns a callable handle and the lifecycle
+/// hooks fire through the host vtable.
 #[test]
 fn load_create_and_drop_disposes() {
     let _guard = lock_fixture();
@@ -80,7 +80,7 @@ fn dispose_count(path: &std::path::Path) -> u32 {
     unsafe { count() }
 }
 
-/// E3.2: loading the same file twice yields independent handles.
+/// Loading the same file twice yields independent handles.
 #[test]
 fn repeated_loads_are_independent() {
     let _guard = lock_fixture();
@@ -99,7 +99,7 @@ fn repeated_loads_are_independent() {
     assert_eq!(dispose_count(&path), before + 2);
 }
 
-/// E3.3: a non-existent file produces an `Open` error carrying the path.
+/// A non-existent file produces an `Open` error carrying the path.
 #[test]
 fn missing_file_error_includes_path() {
     let _guard = lock_fixture();
@@ -114,7 +114,7 @@ fn missing_file_error_includes_path() {
     assert!(text.contains(&missing.display().to_string()), "{text}");
 }
 
-/// E3.3: an unsupported ABI version is rejected with a dedicated error.
+/// An unsupported ABI version is rejected with a dedicated error.
 #[test]
 fn version_mismatch_is_rejected() {
     let _guard = lock_fixture();
@@ -139,7 +139,7 @@ fn version_mismatch_is_rejected() {
     );
 }
 
-/// E3.3: a loadable library that is not a Cordis plugin is rejected with a
+/// A loadable library that is not a Cordis plugin is rejected with a
 /// `MissingSymbol` error naming the missing symbol — the Rust counterpart of
 /// the JS "invalid plugin" shape check at the dynamic boundary.
 #[test]
@@ -163,7 +163,7 @@ fn missing_symbol_is_rejected() {
     assert!(text.contains("cordis_fixture_not_a_plugin"), "{text}");
 }
 
-/// E3.5: name classification routes `cordis:` builtins vs native paths.
+/// Name classification routes `cordis:` builtins vs native paths.
 #[test]
 fn plugin_name_classification() {
     assert!(!is_plugin_path("cordis:logger"));

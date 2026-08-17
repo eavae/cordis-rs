@@ -1,4 +1,4 @@
-//! Story card D1: include 插件.
+//! Include 插件。
 
 use std::fs;
 use std::rc::Rc;

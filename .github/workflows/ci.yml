@@ -43,6 +43,6 @@ jobs:
       - name: Doc
         run: cargo doc --workspace --no-deps
 
-      # E3 之后启用：构建 fixture 插件并跑 .so 加载用例（Linux/macOS 双平台）。
+      # 启用后：构建 fixture 插件并跑 .so 加载用例（Linux/macOS 双平台）。
       # - name: Plugin fixtures (.so)
       #   run: cargo test --workspace --features fixture-plugins

@@ -1,4 +1,4 @@
-//! A minimal `.so` fixture plugin for the E2 ABI smoke test.
+//! A minimal `.so` fixture plugin for the ABI smoke test.
 
 use cordis_sdk::{HostVtable, PLUGIN_API_VERSION, PluginHandle};
 use std::sync::atomic::{AtomicU32, Ordering};

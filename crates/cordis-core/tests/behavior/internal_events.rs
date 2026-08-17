@@ -1,4 +1,4 @@
-//! Story cards B14/B16: the `internal/*` event matrix.
+//! The `internal/*` event matrix.
 //!
 //! Covers `internal/dispatch`, `internal/get`, `internal/set`,
 //! `internal/service` and `internal/status`, mirroring the TS reference
@@ -22,8 +22,8 @@ fn dispatch_recorder(records: Rc<RefCell<Vec<(String, String, usize)>>>) -> Even
     })
 }
 
-/// B14/B16: `internal/dispatch` fires before non-internal events only, with
-/// the dispatch mode and payload args.
+/// `internal/dispatch` fires before non-internal events only, with the
+/// dispatch mode and payload args.
 #[test]
 fn internal_dispatch_hook_fires_for_external_events_only() {
     let root = Context::new();
@@ -52,9 +52,9 @@ fn internal_dispatch_hook_fires_for_external_events_only() {
     );
 }
 
-/// B14: `internal/get` is a waterfall over dynamic access — a hook can
-/// override the value (MockLoader-style, e.g. allowing the root context to
-/// read `loader`) or fall through to the strict store lookup via `next()`.
+/// `internal/get` is a waterfall over dynamic access — a hook can override
+/// the value (MockLoader-style, e.g. allowing the root context to read
+/// `loader`) or fall through to the strict store lookup via `next()`.
 #[test]
 fn internal_get_hook_overrides_dynamic_access() {
     let root = Context::new();
@@ -98,9 +98,9 @@ fn internal_get_hook_overrides_dynamic_access() {
     );
 }
 
-/// B14: `internal/set` is a waterfall over dynamic writes — a hook can
-/// accept the write without touching the store, reject it, or fall through
-/// to the strict store update via `next()`.
+/// `internal/set` is a waterfall over dynamic writes — a hook can accept
+/// the write without touching the store, reject it, or fall through to the
+/// strict store update via `next()`.
 #[test]
 fn internal_set_hook_intercepts_write() {
     let root = Context::new();
@@ -147,7 +147,7 @@ fn internal_set_hook_intercepts_write() {
     );
 }
 
-/// B14: `internal/service` is a filter-directed broadcast on provide — only
+/// `internal/service` is a filter-directed broadcast on provide — only
 /// listeners whose isolate label for the name matches the provider's realm
 /// receive it (mirrors the "isolated event" semantics).
 #[tokio::test(flavor = "current_thread")]
@@ -217,8 +217,8 @@ fn service_recorder(records: Rc<RefCell<Vec<String>>>) -> EventCallback {
     })
 }
 
-/// B14: `internal/status` broadcasts every fiber state transition with the
-/// fiber and its previous state (mirrors fiber.ts `_updateState`).
+/// `internal/status` broadcasts every fiber state transition with the fiber
+/// and its previous state (mirrors fiber.ts `_updateState`).
 #[tokio::test(flavor = "current_thread")]
 async fn internal_status_broadcasts_transitions() {
     let local = tokio::task::LocalSet::new();

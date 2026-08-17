@@ -1,4 +1,4 @@
-//! Story card D4: utils List 工具.
+//! Utils List 工具。
 
 use std::rc::Rc;
 

@@ -1,4 +1,4 @@
-//! Config expression evaluation via minijinja (story card C5).
+//! Config expression evaluation via minijinja.
 
 use std::collections::HashMap;
 use std::fmt;

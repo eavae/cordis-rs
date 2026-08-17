@@ -1,5 +1,5 @@
-//! Ported cases from `packages/core/tests/logger.spec.ts` (story card B7)
-//! plus the formatting/color behaviors of `logger.ts`.
+//! Ported cases from `packages/core/tests/logger.spec.ts` plus the
+//! formatting/color behaviors of `logger.ts`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;

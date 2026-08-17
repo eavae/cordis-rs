@@ -1,4 +1,4 @@
-//! Behavior-test support utilities (story card A2).
+//! Behavior-test support utilities.
 //!
 //! Mirrors the helpers in `packages/core/tests/utils.ts` of the TypeScript
 //! reference implementation. The fake clock is implemented manually (waker

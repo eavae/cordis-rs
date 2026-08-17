@@ -1,5 +1,5 @@
 //! Logger service: levels, formatting, colors, exporters and explicit
-//! naming (story card B7).
+//! naming.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -459,8 +459,7 @@ impl Logger {
         }
     }
 
-    /// Returns a logger with an explicit name (story card B7's explicit
-    /// naming API).
+    /// Returns a logger with an explicit name.
     pub fn named(&self, name: &str) -> Logger {
         let mut logger = self.clone();
         logger.explicit = Some(name.to_string());
@@ -718,10 +717,10 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// Records an error for B2-style error sinks (kept for compatibility).
+/// Records an error into the buffer sink (kept for compatibility).
 impl LoggerService {
     /// Records an error directly into the buffer (kept for the fiber error
-    /// sink; B7 exporters supersede it for user-facing logs).
+    /// sink; exporters supersede it for user-facing logs).
     pub fn error(&self, message: impl fmt::Display) {
         let sn = {
             let next = self.sn_message.get() + 1;
@@ -738,7 +737,7 @@ impl LoggerService {
         });
     }
 
-    /// Number of recorded errors (B2 stub behavior; exporters supersede it).
+    /// Number of recorded errors (kept for compatibility).
     pub fn error_count(&self) -> usize {
         self.buffer
             .borrow()

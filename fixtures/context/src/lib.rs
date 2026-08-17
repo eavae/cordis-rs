@@ -1,4 +1,4 @@
-//! Story card E9 fixture: the Context bridge across FFI.
+//! Fixture plugin: the Context bridge across FFI.
 //!
 //! Exercises every vtable entry the host exposes for services, events and
 //! fiber-bound disposers: `provide`/`get`, `on`/`emit` and
@@ -25,7 +25,7 @@ struct PluginInstance {
 }
 
 const META: &CStr =
-    c"{\"name\":\"cordis-e9-context\",\"version\":\"1.0.0\",\"inject\":[\"logger\"],\"provide\":[\"greeting\"]}";
+    c"{\"name\":\"cordis-context\",\"version\":\"1.0.0\",\"inject\":[\"logger\"],\"provide\":[\"greeting\"]}";
 
 /// The plugin's config: a greeting string stored as a service.
 #[derive(Deserialize)]
@@ -77,13 +77,13 @@ unsafe fn instance(handle: *mut PluginHandle) -> &'static PluginInstance {
     unsafe { &*(handle as *mut PluginInstance) }
 }
 
-/// E6: the metadata payload (JSON, NUL-terminated, static).
+/// The metadata payload (JSON, NUL-terminated, static).
 #[unsafe(no_mangle)]
 pub extern "C" fn plugin_meta() -> *const c_char {
     META.as_ptr()
 }
 
-/// E5: accepts any object config.
+/// Accepts any object config.
 ///
 /// # Safety
 ///
@@ -93,7 +93,7 @@ pub unsafe extern "C" fn plugin_validate_config(_config: *const c_char) -> i32 {
     0
 }
 
-/// E9: applies through the Context bridge — provides a greeting service,
+/// Applies through the Context bridge — provides a greeting service,
 /// round-trips it through `get`, registers a `demo/event` listener and two
 /// fiber-bound disposers.
 ///
@@ -118,12 +118,15 @@ pub unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, config: *const 
     let greeting = config.greeting;
     let payload = serde_json::to_string(&greeting).unwrap_or_else(|_| "\"hello\"".to_string());
     match bridge.provide("greeting", &payload) {
-        Ok(()) => log(vtable, format!("e9 provided greeting: {greeting}")),
-        Err(error) => log(vtable, format!("e9 provide failed: {error}")),
+        Ok(()) => log(vtable, format!("context provided greeting: {greeting}")),
+        Err(error) => log(vtable, format!("context provide failed: {error}")),
     }
     match bridge.on("demo/event", on_demo_event) {
-        Ok(_) => log(vtable, "e9 listener registered: demo/event".to_string()),
-        Err(error) => log(vtable, format!("e9 listener failed: {error}")),
+        Ok(_) => log(
+            vtable,
+            "context listener registered: demo/event".to_string(),
+        ),
+        Err(error) => log(vtable, format!("context listener failed: {error}")),
     }
     bridge.effect_disposer(disposer_first);
     bridge.effect_disposer(disposer_second);
@@ -181,13 +184,13 @@ unsafe extern "C" fn on_demo_event(handle: *mut PluginHandle, args: *const c_cha
     let vtable = unsafe { &*instance.vtable };
     // SAFETY: the host passes a NUL-terminated string.
     let text = unsafe { CStr::from_ptr(args) }.to_string_lossy();
-    log(vtable, format!("e9 event fired: {text}"));
+    log(vtable, format!("context event fired: {text}"));
     // SAFETY: the vtable is the one the host provided for this handle and
     // the callback runs inside a host session.
     let bridge = unsafe { ContextBridge::new(vtable, handle) };
     match bridge.get("greeting") {
-        Some(value) => log(vtable, format!("e9 get greeting: {value}")),
-        None => log(vtable, "e9 get greeting: <missing>".to_string()),
+        Some(value) => log(vtable, format!("context get greeting: {value}")),
+        None => log(vtable, "context get greeting: <missing>".to_string()),
     }
 }
 
@@ -203,7 +206,7 @@ unsafe extern "C" fn disposer_first(handle: *mut PluginHandle) {
     let instance = unsafe { instance(handle) };
     // SAFETY: the host vtable outlives the plugin instance.
     let vtable = unsafe { &*instance.vtable };
-    log(vtable, format!("e9 disposer first (order {order})"));
+    log(vtable, format!("context disposer first (order {order})"));
 }
 
 /// The second-registered disposer: records its run order.
@@ -218,5 +221,5 @@ unsafe extern "C" fn disposer_second(handle: *mut PluginHandle) {
     let instance = unsafe { instance(handle) };
     // SAFETY: the host vtable outlives the plugin instance.
     let vtable = unsafe { &*instance.vtable };
-    log(vtable, format!("e9 disposer second (order {order})"));
+    log(vtable, format!("context disposer second (order {order})"));
 }

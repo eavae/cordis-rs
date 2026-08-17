@@ -1,4 +1,4 @@
-//! Config file parsing and atomic write-back (story card C7).
+//! Config file parsing and atomic write-back.
 
 use std::fs;
 use std::io::Write;

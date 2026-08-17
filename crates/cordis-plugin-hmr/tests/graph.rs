@@ -1,4 +1,4 @@
-//! Story card F2: dependency graph classification (accepted/declined).
+//! Dependency graph classification (accepted/declined).
 
 use std::collections::HashSet;
 
@@ -8,8 +8,8 @@ fn set(items: &[&str]) -> HashSet<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
 
-/// F2.1: a shared dependency makes all dependent plugins accepted; the
-/// dependency itself and unrelated artifacts behave per the TS rules.
+/// A shared dependency makes all dependent plugins accepted; the dependency
+/// itself and unrelated artifacts behave per the TS rules.
 #[test]
 fn shared_dependency_classification() {
     let mut graph = DependencyGraph::default();
@@ -45,8 +45,8 @@ fn shared_dependency_classification() {
     assert_eq!(result.accepted, set(&["unrelated"]));
 }
 
-/// F2.2: a declined dependency cascades: dependents of a declined artifact
-/// are declined, not accepted.
+/// A declined dependency cascades: dependents of a declined artifact are
+/// declined, not accepted.
 #[test]
 fn declined_dependency_cascades() {
     let mut graph = DependencyGraph::default();
@@ -72,8 +72,8 @@ fn declined_dependency_cascades() {
     assert!(result.accepted.is_empty());
 }
 
-/// F2.2: a dependency accepted through one branch keeps its dependent
-/// accepted even when another branch is unresolved.
+/// A dependency accepted through one branch keeps its dependent accepted
+/// even when another branch is unresolved.
 #[test]
 fn accepted_branch_wins() {
     let mut graph = DependencyGraph::default();

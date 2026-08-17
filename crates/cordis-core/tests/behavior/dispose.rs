@@ -1,4 +1,4 @@
-//! Ported cases from `packages/core/tests/dispose.spec.ts` (story card B3).
+//! Ported cases from `packages/core/tests/dispose.spec.ts`.
 
 use std::cell::RefCell;
 use std::future::Future;

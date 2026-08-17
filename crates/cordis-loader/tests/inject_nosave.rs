@@ -1,5 +1,4 @@
-//! Story card C8: entry-level `inject` merging and `noSave` write-back
-//! skipping.
+//! Entry-level `inject` merging and `noSave` write-back skipping.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -44,7 +43,7 @@ async fn wait_until(mut check: impl FnMut() -> bool) {
     panic!("condition not met within 200 yields");
 }
 
-/// C8.1: entry-level `inject` merges with the plugin fiber: the entry stays
+/// Entry-level `inject` merges with the plugin fiber: the entry stays
 /// PENDING while the dependency is missing and activates once it arrives.
 #[tokio::test(flavor = "current_thread")]
 async fn entry_inject_keeps_fiber_pending_until_provider() {
@@ -103,8 +102,8 @@ async fn entry_inject_keeps_fiber_pending_until_provider() {
         .await;
 }
 
-/// C8.2: `fiber.update_with(config, true)` skips the write-back hooks and
-/// does not touch `entry.options.config`.
+/// `fiber.update_with(config, true)` skips the write-back hooks and does not
+/// touch `entry.options.config`.
 #[tokio::test(flavor = "current_thread")]
 async fn no_save_skips_write_back() {
     let local = tokio::task::LocalSet::new();
@@ -135,8 +134,8 @@ async fn no_save_skips_write_back() {
         .await;
 }
 
-/// C8.3: a child fiber under the same entry does not write back to the
-/// entry's config (mirrors `this.parent.fiber?.entry === this.entry`).
+/// A child fiber under the same entry does not write back to the entry's
+/// config (mirrors `this.parent.fiber?.entry === this.entry`).
 #[tokio::test(flavor = "current_thread")]
 async fn child_fiber_does_not_write_back() {
     let local = tokio::task::LocalSet::new();
@@ -182,8 +181,8 @@ async fn child_fiber_does_not_write_back() {
         .await;
 }
 
-/// C8.4: the normal (`noSave = false`) root update path still writes back
-/// through the tree.
+/// The normal (`noSave = false`) root update path still writes back through
+/// the tree.
 #[tokio::test(flavor = "current_thread")]
 async fn normal_update_still_writes_back() {
     let local = tokio::task::LocalSet::new();

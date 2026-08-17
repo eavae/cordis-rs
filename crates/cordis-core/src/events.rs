@@ -357,10 +357,10 @@ impl EventsService {
         args: &[Rc<dyn Any>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Vec<EventCallback> {
-        // `internal/dispatch` extension point (story cards B5/B14): before a
-        // non-internal event is dispatched, notify dispatch hooks with the
-        // mode, event name and payload args. Internal events are excluded to
-        // avoid recursion, mirroring the TS `_resolve` guard.
+        // `internal/dispatch` extension point: before a non-internal event
+        // is dispatched, notify dispatch hooks with the mode, event name and
+        // payload args. Internal events are excluded to avoid recursion,
+        // mirroring the TS `_resolve` guard.
         let has_dispatch_hooks = self
             .hooks
             .borrow()

@@ -1,4 +1,4 @@
-//! Host-side Context bridge for `.so` plugins (story card E9).
+//! Host-side Context bridge for `.so` plugins.
 //!
 //! The plugin's apply / event callbacks / disposers run on the host thread
 //! inside a *session*: a per-handle association with the fiber's
@@ -8,8 +8,8 @@
 //!
 //! Values cross the boundary as JSON strings. The host copies payloads
 //! during the call; the plugin copies the `get` result before its next host
-//! call. No allocation crosses the ABI (E2 discipline), and all calls must
-//! happen on the host thread (E4 discipline).
+//! call. No allocation crosses the ABI, and all calls must happen on the
+//! host thread.
 
 use std::any::Any;
 use std::cell::RefCell;

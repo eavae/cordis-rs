@@ -1,6 +1,5 @@
-//! Ported behaviors from `fiber.ts` (story card B12): ValidationError
-//! formatting, config validation on registration/update, and entry location
-//! in apply errors.
+//! Ported behaviors from `fiber.ts`: ValidationError formatting, config
+//! validation on registration/update, and entry location in apply errors.
 
 use std::cell::Cell;
 use std::rc::Rc;

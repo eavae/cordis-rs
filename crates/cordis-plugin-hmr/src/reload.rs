@@ -1,4 +1,4 @@
-//! Story card F3: reload execution with rollback.
+//! Reload execution with rollback.
 //!
 //! Unlike the TS "clear module caches" model, the Rust port swaps plugin
 //! handles atomically: the new artifact is registered first and each affected

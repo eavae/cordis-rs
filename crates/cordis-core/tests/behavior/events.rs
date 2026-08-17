@@ -1,4 +1,4 @@
-//! Ported cases from `packages/core/tests/events.spec.ts` (story card B5).
+//! Ported cases from `packages/core/tests/events.spec.ts`.
 
 use std::any::Any;
 use std::cell::Cell;

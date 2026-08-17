@@ -1,4 +1,4 @@
-//! B13 · Core integration regression: fiber × events × registry × logger
+//! Core integration regression: fiber × events × registry × logger
 //! interacting in one scenario.
 
 use std::cell::{Cell, RefCell};

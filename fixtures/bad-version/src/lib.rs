@@ -1,4 +1,4 @@
-//! A fixture exporting an unsupported ABI version (E2 version-mismatch test).
+//! A fixture exporting an unsupported ABI version (version-mismatch test).
 
 use cordis_sdk::{HostVtable, PLUGIN_API_VERSION, PluginHandle};
 

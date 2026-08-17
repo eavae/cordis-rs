@@ -1,4 +1,4 @@
-//! Story card E4: cross-FFI async bridge (host drives plugin futures).
+//! Cross-FFI async bridge (host drives plugin futures).
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -49,8 +49,8 @@ async fn wait_logged(needle: &str) {
     );
 }
 
-/// E4.1: a plugin spawns a future through the host vtable; the host drives it
-/// to completion and the result is observable (logged via the vtable).
+/// A plugin spawns a future through the host vtable; the host drives it to
+/// completion and the result is observable (logged via the vtable).
 #[tokio::test(flavor = "current_thread")]
 async fn host_drives_spawned_future_to_completion() {
     let local = tokio::task::LocalSet::new();
@@ -77,8 +77,8 @@ async fn host_drives_spawned_future_to_completion() {
         .await;
 }
 
-/// E4.2: disposing the plugin handle cancels pending futures (their boxed
-/// futures are dropped through the plugin's drop function).
+/// Disposing the plugin handle cancels pending futures (their boxed futures
+/// are dropped through the plugin's drop function).
 #[tokio::test(flavor = "current_thread")]
 async fn dispose_cancels_pending_spawns() {
     let local = tokio::task::LocalSet::new();
@@ -116,7 +116,7 @@ async fn dispose_cancels_pending_spawns() {
         .await;
 }
 
-/// E4.3: 10k spawns complete without abnormal growth (smoke).
+/// 10k spawns complete without abnormal growth (smoke).
 #[tokio::test(flavor = "current_thread")]
 async fn ten_thousand_spawns_smoke() {
     let local = tokio::task::LocalSet::new();

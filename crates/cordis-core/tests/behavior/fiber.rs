@@ -1,4 +1,4 @@
-//! Ported cases from `packages/core/tests/fiber.spec.ts` (story card B2).
+//! Ported cases from `packages/core/tests/fiber.spec.ts`.
 //!
 //! The TS runtime drives pending promises automatically; the Rust runtime
 //! schedules fiber state-machine tasks on a `LocalSet` (`spawn_local`), so

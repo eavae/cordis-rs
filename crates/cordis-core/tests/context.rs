@@ -1,4 +1,4 @@
-//! B1 · Context 骨架：双轨 Service 访问与链式隔离。
+//! Context 骨架：双轨 Service 访问与链式隔离。
 
 use std::rc::Rc;
 

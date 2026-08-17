@@ -1,4 +1,4 @@
-//! Story card F3: reload execution (entry re-apply) and rollback.
+//! Reload execution (entry re-apply) and rollback.
 
 use std::rc::Rc;
 
@@ -31,7 +31,7 @@ fn plugin(applied: Rc<std::cell::Cell<u32>>) -> Plugin {
     }
 }
 
-/// F3.1: replacing the plugin under an entry's name and calling `reload()`
+/// Replacing the plugin under an entry's name and calling `reload()`
 /// re-applies the entry (fiber bound to the new apply, config preserved).
 #[tokio::test(flavor = "current_thread")]
 async fn entry_reload_reapplies_with_new_plugin() {
@@ -69,7 +69,7 @@ async fn entry_reload_reapplies_with_new_plugin() {
         .await;
 }
 
-/// F3.2: a failing reload rolls back to the previous plugin.
+/// A failing reload rolls back to the previous plugin.
 #[tokio::test(flavor = "current_thread")]
 async fn reload_rolls_back_on_failure() {
     let local = tokio::task::LocalSet::new();

@@ -1,4 +1,4 @@
-//! Host-side dynamic loader for `.so` plugins (story card E3).
+//! Host-side dynamic loader for `.so` plugins.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -65,15 +65,15 @@ impl std::error::Error for LoadError {}
 
 /// A loaded plugin library.
 ///
-/// Dropping the handle calls `plugin_dispose` (mirrors the E2 protocol).
+/// Dropping the handle calls `plugin_dispose`.
 pub struct SoPlugin {
     path: PathBuf,
     version: u32,
     // Heap-pinned so the symbol references below stay valid after the struct
     // moves; the library is unloaded when the box is dropped.
     _library: Box<Library>,
-    /// Per-instance host runtime: owns every task the plugin spawned
-    /// (story card E4); disposed together with the plugin handle.
+    /// Per-instance host runtime: owns every task the plugin spawned;
+    /// disposed together with the plugin handle.
     runtime: Rc<HostRuntime>,
     /// The vtable handed to the plugin; kept alive for the plugin's lifetime
     /// (the plugin stores a raw pointer to it).
@@ -145,8 +145,8 @@ impl SoPlugin {
                     })?,
             )
         };
-        // E5/E6: metadata, config validation and apply are optional symbols
-        // (older plugins may only export the E2/E3 protocol).
+        // Metadata, config validation and apply are optional symbols (older
+        // plugins may only export the base entry protocol).
         let meta = unsafe { library.get(b"plugin_meta") }
             .ok()
             .map(|symbol: Symbol<Meta>| {
@@ -200,7 +200,7 @@ impl SoPlugin {
         &self.path
     }
 
-    /// The plugin metadata (E6), when the plugin exports `plugin_meta`.
+    /// The plugin metadata, when the plugin exports `plugin_meta`.
     pub fn metadata(&self) -> Option<Result<PluginMeta, String>> {
         self.meta.as_ref().map(|meta| {
             // SAFETY: the symbol is valid for the library lifetime.
@@ -216,12 +216,12 @@ impl SoPlugin {
         })
     }
 
-    /// The config validator (E5), when exported by the plugin.
+    /// The config validator, when exported by the plugin.
     pub fn validator(&self) -> Option<ValidateConfig> {
         self.validate.as_ref().map(|symbol| **symbol)
     }
 
-    /// The apply entry (E5), when exported by the plugin.
+    /// The apply entry, when exported by the plugin.
     pub fn apply_fn(&self) -> Option<ApplyConfig> {
         self.apply.as_ref().map(|symbol| **symbol)
     }
@@ -257,7 +257,7 @@ impl SoPlugin {
     }
 }
 
-/// Builds a host vtable wired to `runtime` (story card E4).
+/// Builds a host vtable wired to `runtime`.
 ///
 /// The returned vtable's `data` points to the runtime; the caller must keep
 /// `runtime` alive for as long as the vtable (and any plugin created with it)

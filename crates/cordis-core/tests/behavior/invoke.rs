@@ -1,4 +1,4 @@
-//! Ported cases from `packages/core/tests/invoke.spec.ts` (story card B11).
+//! Ported cases from `packages/core/tests/invoke.spec.ts`.
 
 use std::rc::Rc;
 

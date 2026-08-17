@@ -1,4 +1,4 @@
-//! Story card H1: end-to-end CLI smoke test.
+//! End-to-end CLI smoke test.
 
 use std::fs;
 use std::path::PathBuf;
@@ -15,31 +15,31 @@ fn target_dir() -> PathBuf {
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("cordis-h1-{tag}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cordis-cli-smoke-{tag}-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-/// H1.5: a minimal project (one `.so` fixture) starts and exits cleanly.
+/// A minimal project (one `.so` fixture) starts and exits cleanly.
 #[test]
 fn cli_starts_and_exits_on_signal() {
     let dir = temp_dir("smoke");
     let plugins = dir.join("plugins");
     fs::create_dir_all(&plugins).unwrap();
     let fixture = target_dir().join(if cfg!(target_os = "macos") {
-        "libcordis_fixture_e5.dylib"
+        "libcordis_fixture_meta.dylib"
     } else {
-        "libcordis_fixture_e5.so"
+        "libcordis_fixture_meta.so"
     });
     let plugin_path = plugins.join(if cfg!(target_os = "macos") {
-        "e5.dylib"
+        "meta.dylib"
     } else {
-        "e5.so"
+        "meta.so"
     });
     fs::copy(&fixture, &plugin_path).unwrap();
     fs::write(
         dir.join("cordis.yml"),
-        "- id: '1'\n  name: cordis-e5-meta\n  config:\n    value: 1\n",
+        "- id: '1'\n  name: cordis-meta\n  config:\n    value: 1\n",
     )
     .unwrap();
 
@@ -78,29 +78,29 @@ fn cli_starts_and_exits_on_signal() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// H1.3: `CORDIS_SHARED` JSON is accepted by the launcher (no crash).
+/// `CORDIS_SHARED` JSON is accepted by the launcher (no crash).
 #[test]
 fn cli_accepts_cordis_shared_env() {
     let dir = temp_dir("shared");
     let plugins = dir.join("plugins");
     fs::create_dir_all(&plugins).unwrap();
     let fixture = target_dir().join(if cfg!(target_os = "macos") {
-        "libcordis_fixture_e5.dylib"
+        "libcordis_fixture_meta.dylib"
     } else {
-        "libcordis_fixture_e5.so"
+        "libcordis_fixture_meta.so"
     });
     fs::copy(
         &fixture,
         plugins.join(if cfg!(target_os = "macos") {
-            "e5.dylib"
+            "meta.dylib"
         } else {
-            "e5.so"
+            "meta.so"
         }),
     )
     .unwrap();
     fs::write(
         dir.join("cordis.yml"),
-        "- id: '1'\n  name: cordis-e5-meta\n  config:\n    value: 1\n",
+        "- id: '1'\n  name: cordis-meta\n  config:\n    value: 1\n",
     )
     .unwrap();
     let ready_file = dir.join("ready.signal");
@@ -140,29 +140,29 @@ fn wait_until_ready(child: &mut std::process::Child, ready_file: &std::path::Pat
     panic!("cordis did not become ready within 4s");
 }
 
-/// H1.4: an invalid plugin config is a startup error with entry location.
+/// An invalid plugin config is a startup error with entry location.
 #[test]
 fn cli_fails_on_invalid_plugin_config() {
     let dir = temp_dir("invalid");
     let plugins = dir.join("plugins");
     fs::create_dir_all(&plugins).unwrap();
     let fixture = target_dir().join(if cfg!(target_os = "macos") {
-        "libcordis_fixture_e5.dylib"
+        "libcordis_fixture_meta.dylib"
     } else {
-        "libcordis_fixture_e5.so"
+        "libcordis_fixture_meta.so"
     });
     fs::copy(
         &fixture,
         plugins.join(if cfg!(target_os = "macos") {
-            "e5.dylib"
+            "meta.dylib"
         } else {
-            "e5.so"
+            "meta.so"
         }),
     )
     .unwrap();
     fs::write(
         dir.join("cordis.yml"),
-        "- id: '1'\n  name: cordis-e5-meta\n  config:\n    value: 0\n",
+        "- id: '1'\n  name: cordis-meta\n  config:\n    value: 0\n",
     )
     .unwrap();
 

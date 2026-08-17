@@ -1,7 +1,6 @@
 //! Cordis utils (Rust port).
 //!
-//! Port of `@cordisjs/utils`: the effect-bound ordered [`List`] collection
-//! (story card D4).
+//! Port of `@cordisjs/utils`: the effect-bound ordered [`List`] collection.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;

@@ -1,8 +1,8 @@
-//! Story card E9: the SDK Context surface across FFI.
+//! The SDK Context surface across FFI.
 //!
 //! Covers the five vtable entries (`provide`/`get`/`on`/`emit`/
-//! `effect_disposer`) end to end through the loader, plus C4 isolate
-//! visibility and the host-thread discipline.
+//! `effect_disposer`) end to end through the loader, plus entry-level
+//! isolate visibility and the host-thread discipline.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,9 +24,9 @@ fn fixture_path() -> PathBuf {
     path.push("target");
     path.push("debug");
     #[cfg(target_os = "macos")]
-    let file = "libcordis_fixture_e9.dylib";
+    let file = "libcordis_fixture_context.dylib";
     #[cfg(target_os = "linux")]
-    let file = "libcordis_fixture_e9.so";
+    let file = "libcordis_fixture_context.so";
     path.push(file);
     path
 }
@@ -42,7 +42,7 @@ extern "C" fn log_message(message: *const std::ffi::c_char) {
 fn opts(greeting: &str) -> EntryOptions {
     EntryOptions {
         id: String::new(),
-        name: "cordis-e9-context".to_string(),
+        name: "cordis-context".to_string(),
         config: Some(
             serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&format!("greeting: {greeting}"))
                 .unwrap(),
@@ -93,9 +93,9 @@ fn reset_fixture() {
     unsafe { reset() };
 }
 
-/// E9.1–E9.3: the plugin's apply provides a service the host reads back,
-/// responds to a host-emitted event, and returns disposers that run in
-/// reverse registration order on dispose.
+/// The plugin's apply provides a service the host reads back, responds to a
+/// host-emitted event, and returns disposers that run in reverse
+/// registration order on dispose.
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn provide_get_event_and_disposers() {
@@ -118,7 +118,7 @@ async fn provide_get_event_and_disposers() {
             let fiber = entry.fiber.borrow().clone().expect("fiber created");
             assert_eq!(fiber.state.get(), FiberState::Active);
 
-            // E9.1: host reads the service the plugin provided in apply.
+            // Host reads the service the plugin provided in apply.
             let greeting = entry
                 .ctx
                 .borrow()
@@ -132,13 +132,13 @@ async fn provide_get_event_and_disposers() {
             assert!(
                 logged
                     .iter()
-                    .any(|line| line.contains("e9 provided greeting: hi")),
+                    .any(|line| line.contains("context provided greeting: hi")),
                 "apply must provide through the bridge: {logged:?}"
             );
 
-            // E9.2: host emits an event; the plugin listener responds and
-            // writes back through the vtable logger, including a `get`
-            // round-trip (the fiber is ACTIVE during dispatch).
+            // Host emits an event; the plugin listener responds and writes
+            // back through the vtable logger, including a `get` round-trip
+            // (the fiber is ACTIVE during dispatch).
             let args: Rc<dyn std::any::Any> =
                 Rc::new(serde_yaml_ng::Value::String("world".to_string()));
             entry.ctx.borrow().emit("demo/event", &[args]);
@@ -146,18 +146,18 @@ async fn provide_get_event_and_disposers() {
             assert!(
                 logged
                     .iter()
-                    .any(|line| line.contains("e9 event fired: [\"world\"]")),
+                    .any(|line| line.contains("context event fired: [\"world\"]")),
                 "listener must run with the event args: {logged:?}"
             );
             assert!(
                 logged
                     .iter()
-                    .any(|line| line.contains("e9 get greeting: \"hi\"")),
+                    .any(|line| line.contains("context get greeting: \"hi\"")),
                 "get must round-trip the value during event dispatch: {logged:?}"
             );
             assert_eq!(fixture_helpers().1, 1, "one event callback");
 
-            // E9.3: disposing the fiber runs the disposers in reverse
+            // Disposing the fiber runs the disposers in reverse
             // registration order (the second-registered one runs first).
             let _ = tokio::task::spawn_local(fiber.dispose()).await;
             for _ in 0..100 {
@@ -173,21 +173,21 @@ async fn provide_get_event_and_disposers() {
             assert!(
                 logged
                     .iter()
-                    .any(|line| line.contains("e9 disposer second (order 0)")),
+                    .any(|line| line.contains("context disposer second (order 0)")),
                 "{logged:?}"
             );
             assert!(
                 logged
                     .iter()
-                    .any(|line| line.contains("e9 disposer first (order 1)")),
+                    .any(|line| line.contains("context disposer first (order 1)")),
                 "{logged:?}"
             );
         })
         .await;
 }
 
-/// E9.4: entry-level isolate (C4) scopes the `.so` plugin's provide/get the
-/// same way it scopes core plugins; an intercepted entry still applies.
+/// Entry-level isolate scopes the `.so` plugin's provide/get the same way it
+/// scopes core plugins; an intercepted entry still applies.
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn isolate_scopes_provide_get() {
@@ -211,7 +211,7 @@ async fn isolate_scopes_provide_get() {
 
             // The shared entry also carries an intercept declaration; it must
             // not disturb provide/get (the loader keeps intercept layers
-            // inert until typed configs fill them, C6).
+            // inert until typed configs fill them).
             let mut shared = opts("B");
             shared.id = "shared".to_string();
             shared.intercept = Some(
@@ -269,7 +269,7 @@ async fn isolate_scopes_provide_get() {
         .await;
 }
 
-/// E9.5: the vtable only resolves sessions on the host thread. Calls from a
+/// The vtable only resolves sessions on the host thread. Calls from a
 /// foreign thread fail gracefully (no session), and a disposed plugin's
 /// deferred callbacks are skipped instead of calling into freed code.
 #[test]
@@ -321,8 +321,8 @@ fn host_thread_discipline_and_live_handle_guard() {
     assert!(!context_bridge::is_handle_live(handle));
 }
 
-/// E9.5 (deferred path): an event callback registered by a plugin instance
-/// that is disposed while its fiber is still alive is skipped safely.
+/// Deferred path: an event callback registered by a plugin instance that is
+/// disposed while its fiber is still alive is skipped safely.
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn disposed_plugin_event_callback_is_skipped() {

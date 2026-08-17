@@ -1,5 +1,5 @@
-//! A loadable dynamic library that is not a Cordis plugin (E3
-//! missing-symbol test).
+//! A loadable dynamic library that is not a Cordis plugin (missing-symbol
+//! test).
 //!
 //! The library opens successfully but exports no Cordis ABI symbols, so
 //! `SoPlugin::load` rejects it with `LoadError::MissingSymbol` — the Rust

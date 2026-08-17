@@ -1,9 +1,9 @@
-//! Story card F2: artifact-level dependency graph analysis.
+//! Artifact-level dependency graph analysis.
 //!
 //! The TS implementation walks Node's module graph at source level; the Rust
-//! port uses the declarative `deps` metadata each `.so` plugin exports (E6
-//! extension) and classifies changed artifacts into `accepted` (reload) and
-//! `declined` (skip) with the same fixed-point rules as `analyzeChanges`.
+//! port uses the declarative `deps` metadata each `.so` plugin exports and
+//! classifies changed artifacts into `accepted` (reload) and `declined`
+//! (skip) with the same fixed-point rules as `analyzeChanges`.
 
 use std::collections::{HashMap, HashSet};
 

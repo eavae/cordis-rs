@@ -1,4 +1,4 @@
-//! Story card D5: include 写盘去抖与 `loader/config-update` 事件。
+//! Include 写盘去抖与 `loader/config-update` 事件。
 
 use std::fs;
 use std::rc::Rc;
@@ -61,14 +61,15 @@ async fn wait_until(mut check: impl FnMut() -> bool) {
     panic!("condition not met within 500 yields");
 }
 
-/// D5.1: multiple `write()` calls in the same turn coalesce into one disk
-/// write; `loader/config-update` fires on every call.
+/// Multiple `write()` calls in the same turn coalesce into one disk write;
+/// `loader/config-update` fires on every call.
 #[tokio::test(flavor = "current_thread")]
 async fn same_turn_writes_coalesce_but_events_fire() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-d5a-{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("cordis-include-debounce-a-{}", std::process::id()));
             let path = fixture_yaml(&dir, 1);
             let root = Context::new();
             let updates = Rc::new(std::cell::Cell::new(0u32));
@@ -141,13 +142,14 @@ async fn same_turn_writes_coalesce_but_events_fire() {
         .await;
 }
 
-/// D5.2: writes across turns are not coalesced — each turn flushes.
+/// Writes across turns are not coalesced — each turn flushes.
 #[tokio::test(flavor = "current_thread")]
 async fn cross_turn_writes_flush_separately() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-d5b-{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("cordis-include-debounce-b-{}", std::process::id()));
             let path = fixture_yaml(&dir, 1);
             let root = Context::new();
             let loader = Loader::new(&root);
@@ -193,14 +195,15 @@ async fn cross_turn_writes_flush_separately() {
         .await;
 }
 
-/// D5.3: a readonly config file is not overwritten (the error path mirrors
-/// the TS `cannot overwrite readonly config`).
+/// A readonly config file is not overwritten (the error path mirrors the TS
+/// `cannot overwrite readonly config`).
 #[tokio::test(flavor = "current_thread")]
 async fn readonly_config_is_not_overwritten() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-d5c-{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("cordis-include-debounce-c-{}", std::process::id()));
             let path = fixture_yaml(&dir, 1);
             let mut permissions = fs::metadata(&path).unwrap().permissions();
             permissions.set_readonly(true);

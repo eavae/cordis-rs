@@ -1,4 +1,4 @@
-//! Story cards F4/F5: artifact hash naming, build manifest, i18n messages.
+//! Artifact hash naming, build manifest and i18n messages.
 
 use std::fs;
 
@@ -6,12 +6,13 @@ use cordis_plugin_hmr::build::{BuildTarget, build_manifest, content_hash, planne
 use cordis_plugin_hmr::{HmrConfig, validate_config, validate_message};
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("cordis-f45-{tag}-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("cordis-hmr-manifest-{tag}-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-/// F4.1: content hashing is deterministic and changes with content.
+/// Content hashing is deterministic and changes with content.
 #[test]
 fn content_hash_changes_with_content() {
     let first = content_hash(b"plugin v1");
@@ -21,7 +22,7 @@ fn content_hash_changes_with_content() {
     assert_eq!(first.len(), 12);
 }
 
-/// F4.1: artifact names use the `name@hash.ext` convention.
+/// Artifact names use the `name@hash.ext` convention.
 #[test]
 fn artifact_name_is_content_addressed() {
     let dir = temp_dir("names");
@@ -49,7 +50,7 @@ fn artifact_name_is_content_addressed() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// F4.2: the manifest carries `name@hash.artifact` and declared deps.
+/// The manifest carries `name@hash.artifact` and declared deps.
 #[test]
 fn manifest_lists_artifacts_and_deps() {
     let dir = temp_dir("manifest");
@@ -75,7 +76,7 @@ fn manifest_lists_artifacts_and_deps() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
-/// F5.1: validation messages are provided in en-US and zh-CN.
+/// Validation messages are provided in en-US and zh-CN.
 #[test]
 fn validation_messages_are_localized() {
     assert_eq!(
@@ -92,7 +93,7 @@ fn validation_messages_are_localized() {
     );
 }
 
-/// F5.2: config defaults are stable (regression against the TS defaults).
+/// Config defaults are stable (regression against the TS defaults).
 #[test]
 fn config_defaults_are_stable() {
     let config = HmrConfig::default();

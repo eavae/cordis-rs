@@ -1,4 +1,4 @@
-//! cordis-cli startup path (story card H1).
+//! cordis-cli startup path.
 
 use std::path::Path;
 use std::rc::Rc;
@@ -15,7 +15,7 @@ pub struct CliOptions {
     pub plugins_dir: Option<String>,
 }
 
-/// Scaffolds a new cordis project (story card H2).
+/// Scaffolds a new cordis project.
 pub fn create_project(dir: &Path, force: bool) -> anyhow::Result<()> {
     if dir.exists() {
         if !force {
@@ -199,7 +199,7 @@ pub async fn run(options: &CliOptions) -> anyhow::Result<()> {
     let root = Context::new();
     let shared = std::env::var("CORDIS_SHARED").ok();
     let loader = Loader::with_shared(&root, shared);
-    // Default console output (D3).
+    // Default console output.
     let _console = cordis_plugin_logger_console::install(
         &root,
         cordis_plugin_logger_console::ConsoleConfig {
@@ -223,7 +223,7 @@ pub async fn run(options: &CliOptions) -> anyhow::Result<()> {
         cordis_plugin_hmr::hmr_plugin(),
     );
 
-    // Load `.so` plugins from the plugins directory (E3/E5 path).
+    // Load `.so` plugins from the plugins directory.
     // Keep the loaded libraries alive for the whole run: their plugin
     // instances (handles) are referenced by the registered plugins.
     let _libraries = load_so_plugins(&loader, Path::new(&plugins_dir))?;
@@ -231,7 +231,7 @@ pub async fn run(options: &CliOptions) -> anyhow::Result<()> {
     // Read the config into the tree and wait for everything to apply.
     loader.read(configs).await;
     loader.tree_handle().await_tree().await;
-    // H1.4: a plugin that failed to apply is a startup error.
+    // A plugin that failed to apply is a startup error.
     let failed: Vec<String> = loader
         .tree_handle()
         .entries()

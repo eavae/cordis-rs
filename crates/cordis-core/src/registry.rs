@@ -1,8 +1,8 @@
 //! Plugin registration and runtime management.
 //!
-//! Story card B2 provides the minimal registration machinery needed by the
-//! fiber lifecycle; story card B4 formalizes the full plugin contract
-//! (invalid-plugin errors, inject declaration forms, registry queries).
+//! The minimal registration machinery needed by the fiber lifecycle, plus
+//! the full plugin contract (invalid-plugin errors, inject declaration
+//! forms, registry queries).
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -15,10 +15,10 @@ use crate::events::EventFilter;
 use crate::fiber::{Epoch, Fiber, FiberState};
 use crate::service::{ApplyFn, Effect, Service};
 
-/// The realm filter used by the `internal/service` broadcast (story card
-/// B14): a listener only receives the event when its own isolate label for
-/// the service name matches the provider's (mirrors the temporary context
-/// with a filter in `ReflectService.notify`).
+/// The realm filter used by the `internal/service` broadcast: a listener
+/// only receives the event when its own isolate label for the service name
+/// matches the provider's (mirrors the temporary context with a filter in
+/// `ReflectService.notify`).
 struct ServiceRealmFilter {
     name: String,
     provider_label: Option<crate::Label>,
@@ -34,7 +34,7 @@ impl EventFilter for ServiceRealmFilter {
     }
 }
 
-/// A plugin declaration (minimal form; B4 extends it).
+/// A plugin declaration (minimal form).
 #[derive(Clone)]
 pub struct Plugin {
     /// Optional plugin name used for fiber naming.

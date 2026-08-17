@@ -1,4 +1,4 @@
-//! Story card C6: Loader 服务本体.
+//! Loader 服务本体。
 
 use std::rc::Rc;
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local quality gate (story card A3): fmt, clippy, test, doc.
+# Local quality gate: fmt, clippy, test, doc.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

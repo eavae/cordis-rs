@@ -1,4 +1,4 @@
-//! Story card C5: minijinja 配置表达式.
+//! Minijinja 配置表达式。
 
 use std::collections::HashMap;
 

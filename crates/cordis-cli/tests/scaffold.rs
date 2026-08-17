@@ -1,4 +1,4 @@
-//! Story card H2: `cordis create` scaffolds a project that builds and runs.
+//! `cordis create` scaffolds a project that builds and runs.
 
 use std::fs;
 use std::path::PathBuf;
@@ -14,11 +14,11 @@ fn target_dir() -> PathBuf {
     path
 }
 
-/// H2.1 + H2.2: the generated project builds and its example `.so` plugin
-/// loads (visible through the plugin's apply log).
+/// The generated project builds and its example `.so` plugin loads (visible
+/// through the plugin's apply log).
 #[test]
 fn generated_project_builds_and_runs() {
-    let dir = std::env::temp_dir().join(format!("cordis-h2-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cordis-cli-scaffold-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     let output = Command::new(target_dir().join("cordis-cli"))
         .arg("create")

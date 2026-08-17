@@ -1,7 +1,7 @@
-//! Cordis HMR plugin (story cards F1–F5).
+//! Cordis HMR plugin.
 //!
-//! F1: file watching with debounce and ignored globs; config files owned by
-//! the include plugin are refreshed instead of triggering a reload.
+//! File watching with debounce and ignored globs; config files owned by the
+//! include plugin are refreshed instead of triggering a reload.
 
 pub mod build;
 pub mod graph;
@@ -96,7 +96,7 @@ pub fn hmr_plugin() -> cordis_core::Plugin {
     }
 }
 
-/// The running file watcher (F1).
+/// The running file watcher.
 pub struct FileWatcher {
     handle: Option<tokio::task::JoinHandle<()>>,
     watcher: Rc<RefCell<Option<RecommendedWatcher>>>,
@@ -218,7 +218,7 @@ async fn route_change(ctx: &Context, loader: &Loader, path: &Path) {
     );
 }
 
-/// Validates an HMR config (F5: defaults + field shape).
+/// Validates an HMR config (defaults + field shape).
 pub fn validate_config(config: &HmrConfig) -> Result<(), String> {
     if config.debounce == 0 {
         return Err(validate_message("en-US", "debounce"));
@@ -226,7 +226,7 @@ pub fn validate_config(config: &HmrConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// F5: HMR config validation messages (static string table; en-US/zh-CN).
+/// HMR config validation messages (static string table; en-US/zh-CN).
 pub fn validate_message(locale: &str, field: &str) -> String {
     match (locale, field) {
         ("en-US", "debounce") => "hmr.config.debounce: must be a positive integer".to_string(),

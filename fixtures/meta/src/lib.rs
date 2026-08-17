@@ -1,4 +1,4 @@
-//! Story cards E5/E6 fixture: metadata, config validation and apply bridge.
+//! Fixture plugin: metadata, config validation and apply bridge.
 
 use std::ffi::c_char;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -27,12 +27,12 @@ impl Config {
 /// A plugin instance: keeps the host vtable alive for the handle's lifetime.
 struct PluginInstance {
     vtable: *const HostVtable,
-    /// Per-instance state: does not survive reload (E7).
+    /// Per-instance state: does not survive reload.
     apply_count: AtomicU32,
 }
 
 const META: &std::ffi::CStr =
-    c"{\"name\":\"cordis-e5-meta\",\"version\":\"1.0.0\",\"inject\":[\"logger\"],\"provide\":[\"greeting\"]}";
+    c"{\"name\":\"cordis-meta\",\"version\":\"1.0.0\",\"inject\":[\"logger\"],\"provide\":[\"greeting\"]}";
 
 #[unsafe(no_mangle)]
 pub extern "C" fn plugin_api_version() -> u32 {
@@ -71,13 +71,13 @@ pub unsafe extern "C" fn plugin_dispose(handle: *mut PluginHandle) {
     drop(unsafe { Box::from_raw(handle as *mut PluginInstance) });
 }
 
-/// E6: the metadata payload (JSON, NUL-terminated, static).
+/// The metadata payload (JSON, NUL-terminated, static).
 #[unsafe(no_mangle)]
 pub extern "C" fn plugin_meta() -> *const c_char {
     META.as_ptr()
 }
 
-/// E5: validates a config JSON string; 0 = valid, non-zero = invalid.
+/// Validates a config JSON string; 0 = valid, non-zero = invalid.
 ///
 /// # Safety
 ///
@@ -92,7 +92,7 @@ pub unsafe extern "C" fn plugin_validate_config(config: *const c_char) -> i32 {
     }
 }
 
-/// E5: applies a config JSON string through the host vtable.
+/// Applies a config JSON string through the host vtable.
 ///
 /// # Safety
 ///
@@ -110,15 +110,16 @@ pub unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, config: *const 
         value: serde_json::Value::Number(0.into()),
     });
     let value = config.number();
-    let message = std::ffi::CString::new(format!("e5 applied with value {value}")).expect("no NUL");
+    let message =
+        std::ffi::CString::new(format!("meta applied with value {value}")).expect("no NUL");
     (vtable.log)(message.as_ptr());
-    // E8: spawn an async task from within apply; the host drives it.
+    // Spawn an async task from within apply; the host drives it.
     // SAFETY: the host vtable outlives the plugin instance (host contract).
     let vtable: &'static HostVtable = unsafe { std::mem::transmute(vtable) };
     drop(unsafe {
         spawn(vtable, async move {
             let message =
-                std::ffi::CString::new(format!("e5 spawned task ran (config value {value})"))
+                std::ffi::CString::new(format!("meta spawned task ran (config value {value})"))
                     .expect("no NUL");
             (vtable.log)(message.as_ptr());
         })
@@ -126,7 +127,7 @@ pub unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, config: *const 
     0
 }
 
-/// E7: per-instance apply count (fresh after reload).
+/// Per-instance apply count (fresh after reload).
 ///
 /// # Safety
 ///

@@ -1,4 +1,4 @@
-//! Story card F1: file watching, debounce, ignored globs and include refresh.
+//! File watching, debounce, ignored globs and include refresh.
 
 use std::fs;
 use std::path::PathBuf;
@@ -10,12 +10,12 @@ use cordis_plugin_hmr::{FileWatcher, HmrConfig, validate_config};
 use cordis_plugin_include::{IncludeConfig, include_plugin};
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("cordis-f1-{tag}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cordis-hmr-watch-{tag}-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
 
-/// F1.2: config defaults match the TS `Hmr.Config`.
+/// Config defaults match the TS `Hmr.Config`.
 #[test]
 fn config_defaults_and_validation() {
     let config = HmrConfig::default();
@@ -37,8 +37,8 @@ fn config_defaults_and_validation() {
     assert!(validate_config(&invalid).is_err());
 }
 
-/// F1.1: file changes trigger a debounced `hmr/change` event with the path;
-/// ignored files are filtered out.
+/// File changes trigger a debounced `hmr/change` event with the path; ignored
+/// files are filtered out.
 #[tokio::test(flavor = "current_thread")]
 async fn change_event_and_ignored() {
     let local = tokio::task::LocalSet::new();
@@ -103,7 +103,7 @@ async fn change_event_and_ignored() {
         .await;
 }
 
-/// F1.4: a config file owned by the include plugin is refreshed instead of
+/// A config file owned by the include plugin is refreshed instead of
 /// emitting `hmr/change`.
 #[tokio::test(flavor = "current_thread")]
 async fn include_config_refresh() {

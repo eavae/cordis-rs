@@ -1,6 +1,6 @@
-//! Ported cases from `packages/core/tests/reflect.spec.ts` (story card B10)
-//! plus the B15 dynamic-access completion (`set` ownership, `get` three
-//! states, `has`, `accessor`).
+//! Ported cases from `packages/core/tests/reflect.spec.ts`, plus the
+//! dynamic-access completion (`set` ownership, `get` three states, `has`,
+//! `accessor`).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -110,7 +110,7 @@ async fn service_injection_and_mixin_get() {
         .await;
 }
 
-/// B15.1: `set` enforces ownership — only the providing fiber may update the
+/// `set` enforces ownership — only the providing fiber may update the
 /// value, and injectors are notified after the update.
 #[tokio::test(flavor = "current_thread")]
 async fn reflect_set_ownership_check() {
@@ -171,9 +171,9 @@ async fn reflect_set_ownership_check() {
         .await;
 }
 
-/// B15.2: `get(name, strict)` three states — registered+ACTIVE resolves for
-/// both modes; missing resolves for neither; registered+non-ACTIVE resolves
-/// only in non-strict mode.
+/// `get(name, strict)` three states — registered+ACTIVE resolves for both
+/// modes; missing resolves for neither; registered+non-ACTIVE resolves only
+/// in non-strict mode.
 #[tokio::test(flavor = "current_thread")]
 async fn reflect_get_three_states() {
     let local = tokio::task::LocalSet::new();
@@ -251,8 +251,7 @@ async fn reflect_get_three_states() {
         .await;
 }
 
-/// B15.3: `has` is true for registered services and accessors, false
-/// otherwise.
+/// `has` is true for registered services and accessors, false otherwise.
 #[test]
 fn reflect_has_sources() {
     let root = Context::new();
@@ -269,8 +268,8 @@ fn reflect_has_sources() {
     assert!(!root.has_str("nope"));
 }
 
-/// B15.4: `accessor(name, { get, set })` forwards reads/writes, rejects
-/// conflicts with same-name services, and is removed when its fiber unloads.
+/// `accessor(name, { get, set })` forwards reads/writes, rejects conflicts
+/// with same-name services, and is removed when its fiber unloads.
 #[tokio::test(flavor = "current_thread")]
 async fn reflect_accessor_effect_governance() {
     let local = tokio::task::LocalSet::new();
@@ -333,7 +332,7 @@ async fn reflect_accessor_effect_governance() {
         .await;
 }
 
-/// B15: the `ReflectService` facade exposes the same surface with explicit
+/// The `ReflectService` facade exposes the same surface with explicit
 /// context passing.
 #[test]
 fn reflect_service_facade() {

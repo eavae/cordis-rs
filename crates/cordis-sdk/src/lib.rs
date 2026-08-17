@@ -1,8 +1,7 @@
 //! Cordis plugin SDK.
 //!
 //! The only crate a `.so` plugin needs to depend on. Re-exports the plugin
-//! contract from `cordis-core` and declares the ABI entry points (story card
-//! E1; the protocol is finalized in E2).
+//! contract from `cordis-core` and declares the ABI entry points.
 
 pub use cordis_core::{
     ApplyFn, Context, CordisError, Effect, EffectHandle, Fiber, FiberError, FiberState, Plugin,

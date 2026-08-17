@@ -1,5 +1,4 @@
-//! Contract tests for the traceable/shadow/caller machinery (story cards
-//! B10/B11; gap analysis `docs/test-coverage-audit.md` §3.1–3.3).
+//! Contract tests for the traceable/shadow/caller machinery.
 //!
 //! The TS reference hands service methods a hybrid `this.ctx`: dependency
 //! reads resolve through the service's own shadow, while intercept / fiber /

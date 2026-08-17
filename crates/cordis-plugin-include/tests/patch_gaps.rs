@@ -1,4 +1,4 @@
-//! Story card D1 补全：include patch 缺口回归（8 条）。
+//! Include patch 缺口回归（8 条）。
 
 use std::cell::RefCell;
 use std::collections::HashMap;

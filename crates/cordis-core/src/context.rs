@@ -46,9 +46,9 @@ pub struct MixinAccessor {
     pub set: Option<MixinSet>,
 }
 
-/// The concrete store error reported by the `internal/set` waterfall tail
-/// (story card B15): without it, a rejected write would always surface the
-/// generic "without provide" message instead of the real reason.
+/// The concrete store error reported by the `internal/set` waterfall tail:
+/// without it, a rejected write would always surface the generic "without
+/// provide" message instead of the real reason.
 struct SetError(String);
 
 /// A service label. Labels compare by value: contexts isolated with the same
@@ -193,8 +193,8 @@ impl ContextInner {
 ///
 /// In the TS reference the context a service belongs to is injected
 /// implicitly through a Proxy (`this.ctx[symbols.shadow]`). The Rust port
-/// (story card B10) passes contexts explicitly instead, and records the
-/// shadow here so the information stays queryable without hidden state: the
+/// passes contexts explicitly instead, and records the shadow here so the
+/// information stays queryable without hidden state: the
 /// service's own context is the one it was provided on, and the provider
 /// fiber is the fiber that registered it.
 #[derive(Clone, Debug)]
@@ -426,9 +426,9 @@ impl Context {
     /// Returns `None` when no active provider is visible from this context
     /// (it never panics on a missing entry).
     ///
-    /// Dynamic access runs through the `internal/get` waterfall (story card
-    /// B14): listeners may override the value or call `next()` to fall back
-    /// to the strict store lookup.
+    /// Dynamic access runs through the `internal/get` waterfall: listeners
+    /// may override the value or call `next()` to fall back to the strict
+    /// store lookup.
     pub fn get_str(&self, name: &str) -> Option<Rc<dyn Any>> {
         let error = format!("cannot get property \"{name}\" without inject");
         let args: Vec<Rc<dyn Any>> = vec![
@@ -463,8 +463,8 @@ impl Context {
     /// The shadow is the context the service was provided on: its own
     /// scope, with the provider's isolate and intercept chains. Unlike the
     /// TS proxy, the Rust port never injects this context implicitly —
-    /// service methods receive contexts explicitly (story card B10) — so
-    /// this query exists to keep the information observable and auditable.
+    /// service methods receive contexts explicitly — so this query exists to
+    /// keep the information observable and auditable.
     ///
     /// The lookup is non-strict: the shadow remains available as long as the
     /// entry exists, even while the provider fiber is unloading or failed
@@ -579,12 +579,12 @@ impl Context {
 
     /// Dynamic set (mirrors `ctx[name] = value` in the TS reference).
     ///
-    /// Dynamic writes run through the `internal/set` waterfall (story card
-    /// B14): listeners may accept the write (bail with `true`) or call
-    /// `next()` to fall back to the strict store update.
+    /// Dynamic writes run through the `internal/set` waterfall: listeners
+    /// may accept the write (bail with `true`) or call `next()` to fall back
+    /// to the strict store update.
     ///
-    /// The strict store update enforces ownership (story card B15): only the
-    /// fiber that provided the service may set its value; otherwise the
+    /// The strict store update enforces ownership: only the fiber that
+    /// provided the service may set its value; otherwise the
     /// `"cannot set property \"{name}\" in multiple fibers"` error is
     /// returned.
     pub fn set_str(&self, name: &str, value: Rc<dyn Any>) -> Result<(), String> {
@@ -647,7 +647,7 @@ impl Context {
             None => return Err(format!("cannot set property \"{name}\" without provide")),
         }
         drop(store);
-        // Notify injectors that the service value changed (story card B15).
+        // Notify injectors that the service value changed.
         drop(self.notify(name));
         Ok(())
     }
@@ -744,10 +744,10 @@ impl Context {
                         Box::pin(async move {
                             ctx.inner.store.borrow_mut().by_label.remove(&label);
                             let fibers = ctx.notify(&name);
-                            // TS awaits the affected fibers here; B8 refines the
-                            // notification ordering. For B2 the removal and
-                            // notify are synchronous, which matches the fiber
-                            // spec expectations under fake timers.
+                            // The TS reference awaits the affected fibers
+                            // here; the current implementation keeps the
+                            // removal and notify synchronous, which matches
+                            // the fiber spec expectations under fake timers.
                             let _ = fibers;
                             ctx.fiber.resolved.borrow_mut().remove(&name);
                             Ok(())
@@ -1132,7 +1132,7 @@ impl Context {
         registry.plugin(self, plugin, config)
     }
 
-    /// Registers a plugin with a config validator (story card B12).
+    /// Registers a plugin with a config validator.
     pub fn plugin_with_validator(
         &self,
         plugin: &Plugin,

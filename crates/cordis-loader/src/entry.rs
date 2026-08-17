@@ -1,4 +1,4 @@
-//! Entry, EntryGroup and EntryTree (story cards C1/C2/C3).
+//! Entry, EntryGroup and EntryTree.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -31,10 +31,10 @@ pub struct EntryOptions {
     /// Declared inject dependencies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inject: Option<Vec<String>>,
-    /// Per-service isolate scopes (story card C4).
+    /// Per-service isolate scopes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub isolate: Option<std::collections::HashMap<String, IsolateValue>>,
-    /// Per-service intercept overrides (story card C4).
+    /// Per-service intercept overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intercept: Option<serde_yaml_ng::Value>,
     /// Extra keys preserved from the config file (mirrors the open
@@ -55,7 +55,7 @@ pub enum IsolateValue {
 
 impl EntryOptions {
     /// Sorts keys the same way as `sortKeys` in entry.ts: `id`/`name` first,
-    /// `config` last, the rest alphabetically (YAML writer concern, C7).
+    /// `config` last, the rest alphabetically (YAML writer concern).
     pub(crate) fn sort_keys(&mut self) {}
 }
 
@@ -95,7 +95,8 @@ impl std::fmt::Debug for EntryGroup {
 pub struct EntryTree {
     pub ctx: Context,
     pub enable_logs: bool,
-    /// Name → plugin table (builtins/mocks; `.so` loading arrives in E3).
+    /// Name → plugin table (builtins/mocks; `.so` loading is handled by the
+    /// loader).
     pub plugins: Rc<RefCell<HashMap<String, Plugin>>>,
     /// `cordis:` builtin plugins.
     pub builtins: Rc<RefCell<HashMap<String, Plugin>>>,
@@ -768,8 +769,8 @@ impl Entry {
         self.init_task.set(false);
     }
 
-    /// Reloads the entry with the plugin currently registered under its name
-    /// (story card F3): disposes the old fiber and re-applies.
+    /// Reloads the entry with the plugin currently registered under its
+    /// name: disposes the old fiber and re-applies.
     pub async fn reload(self: &Rc<Self>) -> Result<(), String> {
         // Clear the fiber first so the loader's self-dispose hook does not
         // mistake this intentional reload for a plugin self-dispose.

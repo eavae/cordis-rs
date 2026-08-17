@@ -1,4 +1,4 @@
-//! Error types shared by the core runtime (story card B12).
+//! Error types shared by the core runtime.
 
 use std::error::Error;
 use std::fmt;

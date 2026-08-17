@@ -1,5 +1,5 @@
-//! Story card E7: `.so` reload semantics — dispose the old instance, load a
-//! new one; per-instance state does not survive.
+//! `.so` reload semantics — dispose the old instance, load a new one;
+//! per-instance state does not survive.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -18,9 +18,9 @@ fn fixture_path() -> PathBuf {
     path.push("target");
     path.push("debug");
     #[cfg(target_os = "macos")]
-    let file = "libcordis_fixture_e5.dylib";
+    let file = "libcordis_fixture_meta.dylib";
     #[cfg(target_os = "linux")]
-    let file = "libcordis_fixture_e5.so";
+    let file = "libcordis_fixture_meta.so";
     path.push(file);
     path
 }
@@ -47,8 +47,8 @@ fn opts(name: &str, config: serde_yaml_ng::Value) -> EntryOptions {
     }
 }
 
-/// E7.1: dispose the old instance, then load a fresh one from the same file:
-/// the new instance is clean (state does not survive the reload).
+/// Dispose the old instance, then load a fresh one from the same file: the
+/// new instance is clean (state does not survive the reload).
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn reload_gives_clean_instance() {
@@ -66,7 +66,7 @@ async fn reload_gives_clean_instance() {
             let tree = loader.tree_handle();
             tree.create(
                 opts(
-                    "cordis-e5-meta",
+                    "cordis-meta",
                     serde_yaml_ng::from_str::<serde_yaml_ng::Value>("value: 3").unwrap(),
                 ),
                 None,
@@ -93,7 +93,7 @@ async fn reload_gives_clean_instance() {
             let tree2 = loader2.tree_handle();
             tree2.create(
                 opts(
-                    "cordis-e5-meta",
+                    "cordis-meta",
                     serde_yaml_ng::from_str::<serde_yaml_ng::Value>("value: 5").unwrap(),
                 ),
                 None,
@@ -111,8 +111,8 @@ async fn reload_gives_clean_instance() {
         .await;
 }
 
-/// E7.1: the old instance's disposer ran (plugin_dispose called) and the
-/// new instance applies cleanly through the bridge.
+/// The old instance's disposer ran (`plugin_dispose` called) and the new
+/// instance applies cleanly through the bridge.
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn dispose_then_reapply_works() {
@@ -136,7 +136,7 @@ async fn dispose_then_reapply_works() {
             let tree = loader.tree_handle();
             let entry = tree.create(
                 opts(
-                    "cordis-e5-meta",
+                    "cordis-meta",
                     serde_yaml_ng::from_str::<serde_yaml_ng::Value>("value: 9").unwrap(),
                 ),
                 None,
@@ -150,7 +150,7 @@ async fn dispose_then_reapply_works() {
                     .lock()
                     .unwrap()
                     .iter()
-                    .any(|line| line.contains("e5 applied with value 9")),
+                    .any(|line| line.contains("meta applied with value 9")),
                 "fresh instance must apply: {:?}",
                 LOGGED.lock().unwrap()
             );

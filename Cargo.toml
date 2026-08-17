@@ -17,8 +17,8 @@ members = [
     "fixtures/bad-version",
     "fixtures/not-a-plugin",
     "fixtures/spawn-fixture",
-    "fixtures/e5-meta",
-    "fixtures/e9-context",
+    "fixtures/meta",
+    "fixtures/context",
 ]
 
 [workspace.package]

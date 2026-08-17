@@ -1,4 +1,4 @@
-//! Ported cases from `packages/core/tests/plugin.spec.ts` (story card B4).
+//! Ported cases from `packages/core/tests/plugin.spec.ts`.
 
 use std::cell::Cell;
 use std::rc::Rc;

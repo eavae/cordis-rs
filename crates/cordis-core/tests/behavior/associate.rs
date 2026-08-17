@@ -1,4 +1,4 @@
-//! Ported cases from `packages/core/tests/associate.spec.ts` (story card B9).
+//! Ported cases from `packages/core/tests/associate.spec.ts`.
 
 use std::cell::Cell;
 use std::rc::Rc;

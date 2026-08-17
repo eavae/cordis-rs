@@ -1,4 +1,4 @@
-//! Story card C1: Entry 与 EntryOptions (loader 基础用例).
+//! Entry 与 EntryOptions（loader 基础用例）。
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

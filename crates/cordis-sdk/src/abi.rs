@@ -1,8 +1,8 @@
-//! The `.so` plugin ABI protocol (story card E2).
+//! The `.so` plugin ABI protocol.
 //!
 //! Hand-written `extern "C"` entry points; cross-boundary objects are opaque
 //! handles allocated by the plugin side, and allocation never crosses the
-//! boundary. The async bridge (story card E4) lets plugins hand boxed
+//! boundary. The async bridge lets plugins hand boxed
 //! futures to the host runtime; the host polls and drops them via function
 //! pointers, so no future object or allocator crosses the boundary.
 
@@ -16,7 +16,7 @@ use std::task::{Context as TaskContext, Poll, RawWaker, RawWakerVTable, Waker};
 /// The ABI version implemented by this SDK.
 ///
 /// v3 adds the Context bridge (`provide`/`get`/`on`/`emit`/
-/// `effect_disposer`) to the host vtable (story card E9).
+/// `effect_disposer`) to the host vtable.
 pub const PLUGIN_API_VERSION: u32 = 3;
 
 /// Polls a plugin-owned boxed future.
@@ -34,14 +34,14 @@ pub type ValidateConfig = unsafe extern "C" fn(*const c_char) -> i32;
 /// Applies a config payload (JSON string); 0 = ok, non-zero = failed.
 pub type ApplyConfig = unsafe extern "C" fn(*mut PluginHandle, *const c_char) -> i32;
 
-/// A plugin-side event listener invoked by the host (story card E9).
+/// A plugin-side event listener invoked by the host.
 ///
 /// `handle` identifies the plugin instance; `args` is a NUL-terminated JSON
 /// array of the event arguments, valid only for the duration of the call.
 /// The plugin should copy anything it keeps.
 pub type PluginEventCallback = unsafe extern "C" fn(*mut PluginHandle, *const c_char);
 
-/// A plugin-side disposer invoked when the fiber unloads (story card E9).
+/// A plugin-side disposer invoked when the fiber unloads.
 pub type PluginDisposer = unsafe extern "C" fn(*mut PluginHandle);
 
 /// Provides a service: `name` and `payload` are NUL-terminated strings; the
@@ -92,17 +92,17 @@ pub struct BoxedFuture {
 pub struct HostVtable {
     /// Logs a message through the host logger.
     pub log: extern "C" fn(message: *const c_char),
-    /// Spawns a boxed plugin future on the host runtime (story card E4).
+    /// Spawns a boxed plugin future on the host runtime.
     pub spawn: HostSpawn,
-    /// Provides a service from plugin apply (story card E9).
+    /// Provides a service from plugin apply.
     pub provide: HostProvide,
-    /// Reads a service back into the plugin (story card E9).
+    /// Reads a service back into the plugin.
     pub get: HostGet,
-    /// Registers an event listener (story card E9).
+    /// Registers an event listener.
     pub on: HostOn,
-    /// Emits an event (story card E9).
+    /// Emits an event.
     pub emit: HostEmit,
-    /// Registers a fiber-bound disposer (story card E9).
+    /// Registers a fiber-bound disposer.
     pub effect_disposer: HostEffectDisposer,
     /// Host-side runtime handle passed back into `spawn`.
     pub data: *mut std::ffi::c_void,
@@ -150,7 +150,7 @@ pub unsafe extern "C" fn plugin_create(host: *const HostVtable) -> *mut PluginHa
     std::ptr::NonNull::<PluginHandle>::dangling().as_ptr()
 }
 
-/// Tears down a plugin instance (no-op for the E2 protocol).
+/// Tears down a plugin instance (no-op in the base protocol).
 ///
 /// # Safety
 ///
@@ -217,7 +217,7 @@ impl WakerData {
 pub struct RcWaker(*mut WakerData);
 
 // SAFETY: wakers may be moved between threads by futures that require Send;
-// the refcount is atomic and wake is a no-op for E4's cooperative model.
+// the refcount is atomic and wake is a no-op under the cooperative model.
 unsafe impl Send for RcWaker {}
 unsafe impl Sync for RcWaker {}
 
@@ -374,7 +374,7 @@ impl<T> Future for Spawned<T> {
     }
 }
 
-/// Spawns a future on the host runtime (story card E4).
+/// Spawns a future on the host runtime.
 ///
 /// # Safety
 ///
@@ -402,8 +402,8 @@ where
     }
 }
 
-/// The plugin-side view of the host's [`Context`](crate::Context) surface
-/// (story card E9): services, events and fiber-bound disposers, all bridged
+/// The plugin-side view of the host's [`Context`](crate::Context) surface:
+/// services, events and fiber-bound disposers, all bridged
 /// through the host vtable.
 ///
 /// A bridge is only valid while the host is calling into the plugin (apply,

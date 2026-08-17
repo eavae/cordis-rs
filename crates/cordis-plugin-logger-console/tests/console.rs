@@ -1,4 +1,4 @@
-//! Story card D3: logger-console 插件.
+//! Logger-console 插件。
 
 use std::cell::RefCell;
 use std::rc::Rc;
