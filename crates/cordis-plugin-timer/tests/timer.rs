@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use cordis_core::Context;
+use cordis_core::{Context, Effect, Plugin};
 use cordis_plugin_timer::TimerService;
 
 const TICK: u64 = 40;
@@ -195,6 +195,81 @@ async fn debounce_resets_and_fires_after_quiet() {
             assert_eq!(count.get(), 0, "pending during rapid calls");
             tokio::time::sleep(Duration::from_millis(TICK * 2)).await;
             assert_eq!(count.get(), 1, "one call after the quiet period");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn throttle_disposed_skips_trailing() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let fiber = root.plugin(
+                &Plugin {
+                    is_group: false,
+                    name: None,
+                    inject: Vec::new(),
+                    apply: Rc::new(|_ctx: &Context, _config| Effect::None),
+                },
+                None,
+            );
+            fiber.wait().await.unwrap();
+            let count = Rc::new(Cell::new(0u32));
+            let throttled = TimerService::throttle(
+                &fiber.context(),
+                {
+                    let count = count.clone();
+                    Rc::new(move || count.set(count.get() + 1))
+                },
+                TICK,
+                false,
+            )
+            .unwrap();
+
+            fiber.dispose().await;
+            // Immediate calls still fire after dispose; trailing ones do not.
+            throttled();
+            assert_eq!(count.get(), 1, "immediate call fires after dispose");
+            throttled();
+            tokio::time::sleep(Duration::from_millis(TICK * 2)).await;
+            assert_eq!(count.get(), 1, "no trailing call after dispose");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn debounce_disposed_ignores_calls() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let fiber = root.plugin(
+                &Plugin {
+                    is_group: false,
+                    name: None,
+                    inject: Vec::new(),
+                    apply: Rc::new(|_ctx: &Context, _config| Effect::None),
+                },
+                None,
+            );
+            fiber.wait().await.unwrap();
+            let count = Rc::new(Cell::new(0u32));
+            let debounced = TimerService::debounce(
+                &fiber.context(),
+                {
+                    let count = count.clone();
+                    Rc::new(move || count.set(count.get() + 1))
+                },
+                TICK,
+            )
+            .unwrap();
+
+            debounced();
+            fiber.dispose().await;
+            debounced();
+            tokio::time::sleep(Duration::from_millis(TICK * 2)).await;
+            assert_eq!(count.get(), 0, "no call after dispose");
         })
         .await;
 }

@@ -17,6 +17,7 @@ fn include_opts(config: IncludeConfig) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
+        extra: Default::default(),
     }
 }
 

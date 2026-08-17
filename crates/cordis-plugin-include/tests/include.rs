@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use cordis_core::{Context, Effect};
 use cordis_loader::{EntryOptions, Loader};
-use cordis_plugin_include::{IncludeConfig, PatchOptions, include_plugin};
+use cordis_plugin_include::{IncludeConfig, Override, PatchOptions, include_plugin};
 
 fn write_fixture(dir: &std::path::Path, name: &str, content: &str) -> String {
     fs::create_dir_all(dir).unwrap();
@@ -24,6 +24,7 @@ fn include_opts(config: IncludeConfig) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
+        extra: Default::default(),
     }
 }
 
@@ -107,7 +108,7 @@ async fn patch_disables_entry() {
                     initial: None,
                     patches: Some(vec![PatchOptions {
                         id: Some("1".to_string()),
-                        disabled: Some(true),
+                        disabled: Override::Set(true),
                         ..Default::default()
                     }]),
                     enable_logs: None,

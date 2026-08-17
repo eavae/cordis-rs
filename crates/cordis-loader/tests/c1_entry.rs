@@ -16,6 +16,7 @@ fn opts(id: &str, name: &str, disabled: bool) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
+        extra: Default::default(),
     }
 }
 

@@ -41,24 +41,27 @@ pub fn serialize_config(configs: &[EntryOptions]) -> Result<String, String> {
 
 /// Builds a YAML mapping in the sorted key order.
 pub fn to_sorted_value(options: &EntryOptions) -> Value {
+    // `id`/`name` first, `config` last, everything else (typed fields plus
+    // extra keys) sorted alphabetically — mirrors `sortKeys` in entry.ts.
     let mut mapping = Mapping::new();
     mapping.insert(key("id"), Value::String(options.id.clone()));
     mapping.insert(key("name"), Value::String(options.name.clone()));
+    let mut middle = std::collections::BTreeMap::new();
     if let Some(disabled) = options.disabled {
-        mapping.insert(key("disabled"), Value::Bool(disabled));
+        middle.insert("disabled".to_string(), Value::Bool(disabled));
     }
     if let Some(group) = options.group {
-        mapping.insert(key("group"), Value::Bool(group));
+        middle.insert("group".to_string(), Value::Bool(group));
     }
     if let Some(inject) = &options.inject {
         let list = inject
             .iter()
             .map(|name| Value::String(name.clone()))
             .collect();
-        mapping.insert(key("inject"), Value::Sequence(list));
+        middle.insert("inject".to_string(), Value::Sequence(list));
     }
     if let Some(intercept) = &options.intercept {
-        mapping.insert(key("intercept"), intercept.clone());
+        middle.insert("intercept".to_string(), intercept.clone());
     }
     if let Some(isolate) = &options.isolate {
         let map = isolate
@@ -71,7 +74,13 @@ pub fn to_sorted_value(options: &EntryOptions) -> Value {
                 (key(name), value)
             })
             .collect();
-        mapping.insert(key("isolate"), Value::Mapping(map));
+        middle.insert("isolate".to_string(), Value::Mapping(map));
+    }
+    for (name, value) in &options.extra {
+        middle.insert(name.clone(), value.clone());
+    }
+    for (name, value) in middle {
+        mapping.insert(key(&name), value);
     }
     if let Some(config) = &options.config {
         mapping.insert(key("config"), config.clone());

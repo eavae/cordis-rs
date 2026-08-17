@@ -15,6 +15,7 @@ fn sample_config() -> Vec<EntryOptions> {
         inject: None,
         isolate: None,
         intercept: None,
+        extra: Default::default(),
     }]
 }
 
@@ -51,6 +52,7 @@ fn sorted_yaml_key_order() {
         inject: None,
         isolate: None,
         intercept: None,
+        extra: Default::default(),
     };
     let value = to_sorted_value(&options);
     let mapping = value.as_mapping().unwrap();

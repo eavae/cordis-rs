@@ -52,6 +52,7 @@ fn opts(greeting: &str) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
+        extra: Default::default(),
     }
 }
 
@@ -120,6 +121,7 @@ async fn provide_get_event_and_disposers() {
             // E9.1: host reads the service the plugin provided in apply.
             let greeting = entry
                 .ctx
+                .borrow()
                 .get_str("greeting")
                 .expect("plugin must provide greeting")
                 .downcast_ref::<serde_yaml_ng::Value>()
@@ -139,7 +141,7 @@ async fn provide_get_event_and_disposers() {
             // round-trip (the fiber is ACTIVE during dispatch).
             let args: Rc<dyn std::any::Any> =
                 Rc::new(serde_yaml_ng::Value::String("world".to_string()));
-            entry.ctx.emit("demo/event", &[args]);
+            entry.ctx.borrow().emit("demo/event", &[args]);
             let logged = LOGGED.lock().unwrap().clone();
             assert!(
                 logged
@@ -222,6 +224,7 @@ async fn isolate_scopes_provide_get() {
             // The isolated realm sees only its own greeting.
             let isolated_greeting = isolated_entry
                 .ctx
+                .borrow()
                 .get_str("greeting")
                 .expect("isolated entry must see its own greeting")
                 .downcast_ref::<serde_yaml_ng::Value>()
@@ -232,6 +235,7 @@ async fn isolate_scopes_provide_get() {
             // The shared realm sees the shared greeting, not the isolated one.
             let shared_greeting = shared_entry
                 .ctx
+                .borrow()
                 .get_str("greeting")
                 .expect("shared entry must see the shared greeting")
                 .downcast_ref::<serde_yaml_ng::Value>()
@@ -252,7 +256,7 @@ async fn isolate_scopes_provide_get() {
             // entry context (the .so plugin provided under the isolated
             // label, not the root one).
             let isolated_fiber = isolated_entry.fiber.borrow().clone().unwrap();
-            let isolated_label = isolated_entry.ctx.isolate_label("greeting");
+            let isolated_label = isolated_entry.ctx.borrow().isolate_label("greeting");
             let fiber_label = isolated_fiber.context().isolate_label("greeting");
             assert_eq!(isolated_label, fiber_label);
             assert_ne!(
@@ -342,7 +346,7 @@ async fn disposed_plugin_event_callback_is_skipped() {
             // Drop the plugin instance while the fiber (and its listener)
             // are still alive; the host must skip the deferred callback.
             drop(plugin);
-            entry.ctx.emit("demo/event", &[]);
+            entry.ctx.borrow().emit("demo/event", &[]);
             assert_eq!(fixture_helpers().1, 0, "callback must be skipped");
 
             // Disposing the fiber runs the disposers, which are skipped the

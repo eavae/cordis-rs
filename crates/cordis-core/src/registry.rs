@@ -11,8 +11,28 @@ use std::rc::{Rc, Weak};
 
 use crate::context::{Context, ContextInner, InterceptLayer};
 use crate::error::ConfigValidator;
+use crate::events::EventFilter;
 use crate::fiber::{Epoch, Fiber, FiberState};
 use crate::service::{ApplyFn, Effect, Service};
+
+/// The realm filter used by the `internal/service` broadcast (story card
+/// B14): a listener only receives the event when its own isolate label for
+/// the service name matches the provider's (mirrors the temporary context
+/// with a filter in `ReflectService.notify`).
+struct ServiceRealmFilter {
+    name: String,
+    provider_label: Option<crate::Label>,
+}
+
+impl EventFilter for ServiceRealmFilter {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn filter(&self, hook_ctx: &Context) -> bool {
+        hook_ctx.isolate_label(&self.name) == self.provider_label
+    }
+}
 
 /// A plugin declaration (minimal form; B4 extends it).
 #[derive(Clone)]
@@ -165,7 +185,7 @@ impl RegistryService {
                         *fiber_for_effect.error.borrow_mut() =
                             Some(Box::new(crate::fiber::FiberError::new(error.to_string())));
                         *fiber_for_effect.epoch.borrow_mut() = Epoch::Inactive;
-                        fiber_for_effect.state.set(FiberState::Failed);
+                        fiber_for_effect.update_state(Some(FiberState::Failed));
                         let fiber = fiber_for_effect.clone();
                         return Effect::Disposer(Box::new(move || {
                             let fiber = fiber.clone();
@@ -258,6 +278,29 @@ impl RegistryService {
                 affected.push(fiber.clone());
             }
         }
+        drop(runtimes);
+        // `internal/service`: filter-directed broadcast on provide/remove
+        // (mirrors `ReflectService.notify`). The payload is the current value
+        // (or `()` when the service was just removed).
+        let value: Rc<dyn Any> = provider
+            .inner
+            .store
+            .borrow()
+            .by_label
+            .get(&provider_label.clone().unwrap_or_default())
+            .map(|entry| entry.value.clone())
+            .unwrap_or_else(|| Rc::new(()) as Rc<dyn Any>);
+        if let Some(events) = provider
+            .inner
+            .get_service_non_strict::<crate::EventsService>("events")
+        {
+            let filter = ServiceRealmFilter {
+                name: name.to_string(),
+                provider_label,
+            };
+            let args: Vec<Rc<dyn Any>> = vec![Rc::new(name.to_string()), value];
+            events.emit_with(provider, "internal/service", &args, Some(&filter));
+        }
         affected
     }
 
@@ -311,7 +354,7 @@ fn build_child_inner(
             .collect();
         Rc::new(InterceptLayer {
             entries: RefCell::new(entries),
-            parent: Some(parent.inner.intercept.clone()),
+            parent: RefCell::new(Some(parent.inner.intercept.clone())),
         })
     };
     Rc::new(ContextInner {

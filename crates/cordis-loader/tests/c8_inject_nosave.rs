@@ -17,6 +17,7 @@ fn opts(id: &str, name: &str, inject: Option<Vec<String>>) -> EntryOptions {
         inject,
         isolate: None,
         intercept: None,
+        extra: Default::default(),
     }
 }
 

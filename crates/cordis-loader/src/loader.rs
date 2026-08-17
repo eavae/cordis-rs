@@ -66,7 +66,18 @@ impl Loader {
             .borrow_mut()
             .insert("@cordisjs/plugin-group".to_string(), group_plugin);
 
-        drop(ctx.provide::<Loader>(loader.clone()).unwrap());
+        // The loader service carries its availability check: while tasks are
+        // pending under the `await` intercept, dependent fibers stay pending
+        // (mirrors `ctx.reflect.provide('loader', this, this[Service.check])`).
+        let loader_check = loader.clone();
+        drop(
+            ctx.provide_str_with_check(
+                "loader",
+                loader.clone(),
+                Some(Rc::new(move |_ctx: &Context| loader_check.check())),
+            )
+            .unwrap(),
+        );
         loader.register_internal_hooks();
         loader
     }
@@ -211,7 +222,7 @@ impl Loader {
         self.tree
             .entries()
             .into_iter()
-            .find(|entry| parent.shares_inner(&entry.ctx))
+            .find(|entry| parent.shares_inner(&entry.ctx.borrow()))
     }
 
     /// Whether `fiber` is the root fiber of `entry` (mirrors
@@ -251,8 +262,8 @@ impl Loader {
                         } else {
                             let subgroup = EntryGroup::new(
                                 loader.tree_handle(),
-                                entry.ctx.clone(),
-                                Some(entry.parent.clone()),
+                                entry.ctx.borrow().clone(),
+                                Some(entry.parent.borrow().clone()),
                             );
                             *subgroup.entry.borrow_mut() = Some(entry.clone());
                             *entry.subgroup.borrow_mut() = Some(subgroup.clone());

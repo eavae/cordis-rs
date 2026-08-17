@@ -15,6 +15,7 @@ pub mod dispose;
 pub mod errors;
 pub mod events;
 pub mod fiber;
+pub mod internal_events;
 pub mod invoke;
 pub mod isolate;
 pub mod logger;

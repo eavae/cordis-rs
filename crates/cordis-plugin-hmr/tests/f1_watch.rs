@@ -170,6 +170,7 @@ async fn include_config_refresh() {
                     inject: None,
                     isolate: None,
                     intercept: None,
+                    extra: Default::default(),
                 },
                 None,
                 0,

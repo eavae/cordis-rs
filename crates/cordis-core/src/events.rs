@@ -243,12 +243,12 @@ impl EventsService {
     /// Emits with a filter (`thisArg` in the TS reference).
     pub fn emit_with(
         &self,
-        ctx: &Context,
+        _ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
         this_arg: Option<&dyn EventFilter>,
     ) {
-        let callbacks = self.resolve(ctx, event, this_arg);
+        let callbacks = self.resolve("emit", event, args, this_arg);
         for callback in callbacks {
             callback(args).expect("emit listener failed");
         }
@@ -258,12 +258,12 @@ impl EventsService {
     /// `Promise.allSettled` + `AggregateError`).
     pub async fn parallel(
         &self,
-        ctx: &Context,
+        _ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Result<(), ParallelError> {
-        let callbacks = self.resolve(ctx, event, this_arg);
+        let callbacks = self.resolve("emit", event, args, this_arg);
         let mut errors = Vec::new();
         for callback in callbacks {
             if let Err(error) = callback(args) {
@@ -281,12 +281,12 @@ impl EventsService {
     /// result; errors propagate.
     pub async fn serial(
         &self,
-        ctx: &Context,
+        _ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> {
-        let callbacks = self.resolve(ctx, event, this_arg);
+        let callbacks = self.resolve("serial", event, args, this_arg);
         for callback in callbacks {
             if let Some(result) = callback(args)? {
                 return Ok(Some(result));
@@ -299,12 +299,12 @@ impl EventsService {
     /// result; errors propagate.
     pub fn bail(
         &self,
-        ctx: &Context,
+        _ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> {
-        let callbacks = self.resolve(ctx, event, this_arg);
+        let callbacks = self.resolve("bail", event, args, this_arg);
         for callback in callbacks {
             if let Some(result) = callback(args)? {
                 return Ok(Some(result));
@@ -317,13 +317,13 @@ impl EventsService {
     /// plus a `next` function, and the last call falls back to `tail`.
     pub fn waterfall(
         &self,
-        ctx: &Context,
+        _ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
         tail: WaterfallNext,
     ) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> {
         let mut callbacks = self
-            .resolve(ctx, event, None)
+            .resolve("waterfall", event, args, None)
             .into_iter()
             .collect::<Vec<_>>();
         let first = if callbacks.is_empty() {
@@ -352,10 +352,31 @@ impl EventsService {
 
     fn resolve(
         &self,
-        _ctx: &Context,
+        mode: &'static str,
         event: &str,
+        args: &[Rc<dyn Any>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Vec<EventCallback> {
+        // `internal/dispatch` extension point (story cards B5/B14): before a
+        // non-internal event is dispatched, notify dispatch hooks with the
+        // mode, event name and payload args. Internal events are excluded to
+        // avoid recursion, mirroring the TS `_resolve` guard.
+        let has_dispatch_hooks = self
+            .hooks
+            .borrow()
+            .get("internal/dispatch")
+            .is_some_and(|hooks| !hooks.is_empty());
+        if !event.starts_with("internal/") && has_dispatch_hooks {
+            let dispatch_args: Vec<Rc<dyn Any>> = vec![
+                Rc::new(mode.to_string()),
+                Rc::new(event.to_string()),
+                Rc::new(args.to_vec()),
+            ];
+            let callbacks = self.resolve("emit", "internal/dispatch", &dispatch_args, None);
+            for callback in callbacks {
+                callback(&dispatch_args).expect("internal/dispatch listener failed");
+            }
+        }
         let listeners = self.hooks.borrow().get(event).cloned().unwrap_or_default();
         listeners
             .into_iter()

@@ -4,15 +4,17 @@
 //! entry tree and applies patches (story card D1).
 
 use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use cordis_core::{Context, Effect, Plugin, sync_disposer};
 use cordis_loader::{
-    EntryGroup, EntryOptions, Loader, atomic_write, parse_config, serialize_config,
+    EntryGroup, EntryOptions, IsolateValue, Loader, atomic_write, parse_config, serialize_config,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_yaml_ng::Value;
 
 /// The include plugin config (mirrors `Include.Config`).
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
@@ -30,6 +32,62 @@ pub struct IncludeConfig {
     pub enable_logs: Option<bool>,
 }
 
+/// A patch field value: `Set(v)` overrides the target field, `Clear` sets it
+/// to null/absent (mirrors `target[key] = value` with `value === null`), and
+/// `Absent` leaves the field untouched.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Override<T> {
+    #[default]
+    Absent,
+    Set(T),
+    Clear,
+}
+
+impl<T> Override<T> {
+    /// Whether the patch does not touch this field.
+    pub fn is_absent(&self) -> bool {
+        matches!(self, Override::Absent)
+    }
+
+    /// The resulting `Option`: `Set` keeps the value, everything else clears.
+    pub fn into_option(self) -> Option<T> {
+        match self {
+            Override::Set(value) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for Override<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Override::Absent => serializer.serialize_none(),
+            Override::Set(value) => value.serialize(serializer),
+            Override::Clear => serializer.serialize_none(),
+        }
+    }
+}
+
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for Override<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // `#[serde(default)]` handles a missing key; a present `null` maps to
+        // `Clear`, any other value to `Set`.
+        let value = Option::<serde_yaml_ng::Value>::deserialize(deserializer)?;
+        match value {
+            None => Ok(Override::Clear),
+            Some(value) => serde_yaml_ng::from_value(value)
+                .map(Override::Set)
+                .map_err(serde::de::Error::custom),
+        }
+    }
+}
+
 /// A single patch (mirrors `PatchOptions`).
 #[derive(Clone, Debug, Deserialize, serde::Serialize, Default)]
 pub struct PatchOptions {
@@ -37,10 +95,27 @@ pub struct PatchOptions {
     #[serde(default)]
     pub insert: Option<Vec<EntryOptions>>,
     pub name: Option<String>,
-    #[serde(default)]
-    pub config: Option<serde_yaml_ng::Value>,
-    #[serde(default)]
-    pub disabled: Option<bool>,
+    /// `config` override; `null` clears the field.
+    #[serde(default, skip_serializing_if = "Override::is_absent")]
+    pub config: Override<serde_yaml_ng::Value>,
+    /// `disabled` override; `null` clears the field.
+    #[serde(default, skip_serializing_if = "Override::is_absent")]
+    pub disabled: Override<bool>,
+    /// `group` override; `null` clears the field.
+    #[serde(default, skip_serializing_if = "Override::is_absent")]
+    pub group: Override<bool>,
+    /// `inject` override; `null` clears the field.
+    #[serde(default, skip_serializing_if = "Override::is_absent")]
+    pub inject: Override<Vec<String>>,
+    /// `intercept` override; `null` clears the field.
+    #[serde(default, skip_serializing_if = "Override::is_absent")]
+    pub intercept: Override<serde_yaml_ng::Value>,
+    /// `isolate` override; `null` clears the field.
+    #[serde(default, skip_serializing_if = "Override::is_absent")]
+    pub isolate: Override<HashMap<String, IsolateValue>>,
+    /// Unknown patch keys are written to the target entry verbatim.
+    #[serde(flatten, default)]
+    pub extra: HashMap<String, serde_yaml_ng::Value>,
 }
 
 /// The include plugin: registers a plugin that mounts a file-backed tree.
@@ -75,8 +150,8 @@ pub fn include_plugin() -> Plugin {
                 } else {
                     let subgroup = EntryGroup::new(
                         loader.tree_handle(),
-                        entry.ctx.clone(),
-                        Some(entry.parent.clone()),
+                        entry.ctx.borrow().clone(),
+                        Some(entry.parent.borrow().clone()),
                     );
                     *subgroup.entry.borrow_mut() = Some(entry.clone());
                     *entry.subgroup.borrow_mut() = Some(subgroup.clone());
@@ -110,6 +185,7 @@ async fn mount_include(
             } else {
                 entry
                     .ctx
+                    .borrow()
                     .logger()
                     .error(format!("config file not found: {}", filename.display()));
                 Vec::new()
@@ -119,7 +195,7 @@ async fn mount_include(
     let patched = apply_patches(
         data,
         config.patches.as_deref().unwrap_or_default(),
-        &entry.ctx,
+        &entry.ctx.borrow(),
     );
     loader.read_group(subgroup, patched).await;
 
@@ -182,7 +258,7 @@ pub async fn refresh_include_file(loader: &Loader, filename: &Path) -> bool {
         let patched = apply_patches(
             data,
             config.patches.as_deref().unwrap_or_default(),
-            &entry.ctx,
+            &entry.ctx.borrow(),
         );
         loader.read_group(&subgroup, patched).await;
         return true;
@@ -229,6 +305,92 @@ fn resolve_path(path: &str) -> PathBuf {
     }
 }
 
+/// A path into the entry tree: `path[0]` indexes `data`; deeper indices walk
+/// into the enclosing group's `config` sequence (mirrors the recursive
+/// `buildMap` in entry.ts).
+type EntryPath = Vec<usize>;
+
+/// Indexes every entry (recursively, including nested group children) by id.
+fn index_entries(data: &[EntryOptions]) -> HashMap<String, EntryPath> {
+    fn walk(
+        entries: &[EntryOptions],
+        prefix: &mut EntryPath,
+        map: &mut HashMap<String, EntryPath>,
+    ) {
+        for (index, entry) in entries.iter().enumerate() {
+            if !entry.id.is_empty() {
+                let mut path = prefix.clone();
+                path.push(index);
+                map.insert(entry.id.clone(), path);
+            }
+            if entry.group == Some(true)
+                && let Some(Value::Sequence(children)) = &entry.config
+            {
+                let children: Vec<EntryOptions> =
+                    serde_yaml_ng::from_value(Value::Sequence(children.clone()))
+                        .unwrap_or_default();
+                prefix.push(index);
+                walk(&children, prefix, map);
+                prefix.pop();
+            }
+        }
+    }
+    let mut map = HashMap::new();
+    walk(data, &mut Vec::new(), &mut map);
+    map
+}
+
+/// Applies `f` to the entry at `path`, re-serializing each nested group's
+/// `config` sequence along the way (owned recursion avoids borrow conflicts).
+fn mutate_at_path(
+    mut entries: Vec<EntryOptions>,
+    path: &[usize],
+    f: impl FnOnce(&mut EntryOptions),
+) -> Vec<EntryOptions> {
+    let Some((&head, rest)) = path.split_first() else {
+        return entries;
+    };
+    let Some(entry) = entries.get_mut(head) else {
+        return entries;
+    };
+    if rest.is_empty() {
+        f(entry);
+        return entries;
+    }
+    let children: Vec<EntryOptions> = entry
+        .config
+        .as_ref()
+        .and_then(|value| serde_yaml_ng::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    let updated = mutate_at_path(children, rest, f);
+    entry.config = serde_yaml_ng::to_value(updated).ok();
+    entries
+}
+
+/// Appends `insert` to the group at `path`, returning whether the target was
+/// a group (mirrors `target.config.push(...insert)` with the `[]` fallback).
+fn insert_into_group(
+    entries: Vec<EntryOptions>,
+    path: &[usize],
+    insert: Vec<EntryOptions>,
+) -> (Vec<EntryOptions>, bool) {
+    let mut inserted = false;
+    let entries = mutate_at_path(entries, path, |entry| {
+        if entry.group != Some(true) {
+            return;
+        }
+        let mut children: Vec<EntryOptions> = entry
+            .config
+            .as_ref()
+            .and_then(|value| serde_yaml_ng::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        children.extend(insert);
+        entry.config = serde_yaml_ng::to_value(children).ok();
+        inserted = true;
+    });
+    (entries, inserted)
+}
+
 fn apply_patches(
     mut data: Vec<EntryOptions>,
     patches: &[PatchOptions],
@@ -237,54 +399,35 @@ fn apply_patches(
     if patches.is_empty() {
         return data;
     }
-    // id → (outer index, inner index for group children)
-    let mut entry_map: std::collections::HashMap<String, (usize, Option<usize>)> =
-        std::collections::HashMap::new();
-    for (i, entry) in data.iter().enumerate() {
-        if !entry.id.is_empty() {
-            entry_map.insert(entry.id.clone(), (i, None));
-        }
-        if entry.group == Some(true)
-            && let Some(Value::Sequence(children)) = &entry.config
-        {
-            let children: Vec<EntryOptions> =
-                serde_yaml_ng::from_value(Value::Sequence(children.clone())).unwrap_or_default();
-            for (j, child) in children.iter().enumerate() {
-                if !child.id.is_empty() {
-                    entry_map.insert(child.id.clone(), (i, Some(j)));
-                }
-            }
-        }
-    }
+    // JS builds `entryMap` once before the loop: entries inserted by an
+    // earlier patch are not addressable by later patches. Keep that behavior,
+    // but re-index before each patch so index shifts never invalidate paths.
+    let initial_ids: HashSet<String> = index_entries(&data).into_keys().collect();
 
     for patch in patches {
-        let (id, insert, name, overrides) = (
-            patch.id.clone(),
-            patch.insert.clone(),
-            patch.name.clone(),
-            patch,
-        );
-        if let Some(insert) = insert {
-            if let Some(id) = &id {
-                if let Some(&(target, inner)) = entry_map.get(id) {
-                    if inner.is_none() && data[target].group == Some(true) {
-                        let mut children: Vec<EntryOptions> = data[target]
-                            .config
-                            .as_ref()
-                            .and_then(|value| serde_yaml_ng::from_value(value.clone()).ok())
-                            .unwrap_or_default();
-                        children.extend(insert);
-                        data[target].config = Some(serde_yaml_ng::to_value(children).unwrap());
-                    } else {
-                        ctx.logger()
-                            .warn(format!("patch insert: entry {id} is not a group"));
-                    }
-                } else {
+        // `id: ''` is treated as absent, matching the JS `if (id)` check.
+        let id = patch.id.as_deref().filter(|id| !id.is_empty());
+        let path = match id {
+            Some(id) if initial_ids.contains(id) => index_entries(&data).remove(id),
+            _ => None,
+        };
+
+        if let Some(insert) = &patch.insert {
+            if let Some(id) = id {
+                let Some(path) = path else {
                     ctx.logger()
                         .warn(format!("patch insert: entry {id} not found"));
+                    continue;
+                };
+                let (updated, inserted) = insert_into_group(data, &path, insert.clone());
+                data = updated;
+                if inserted {
+                    continue;
                 }
+                ctx.logger()
+                    .warn(format!("patch insert: entry {id} is not a group"));
             } else {
-                data.extend(insert);
+                data.extend(insert.clone());
             }
             continue;
         }
@@ -294,38 +437,13 @@ fn apply_patches(
                 .warn("patch: id is required for non-insert patches");
             continue;
         };
-        let Some(&(target, inner)) = entry_map.get(&id) else {
+        let Some(path) = path else {
             ctx.logger().warn(format!("patch: entry {id} not found"));
             continue;
         };
-        if let Some(inner) = inner {
-            let mut children: Vec<EntryOptions> = data[target]
-                .config
-                .as_ref()
-                .and_then(|value| serde_yaml_ng::from_value(value.clone()).ok())
-                .unwrap_or_default();
-            let mut child = children.get_mut(inner).cloned();
-            data[target].config = Some(serde_yaml_ng::to_value(children).unwrap());
-            if let Some(child) = &mut child {
-                apply_overrides(child, name.as_deref(), overrides, ctx, &id);
-            }
-            if let Some(child) = child {
-                let mut children: Vec<EntryOptions> = data[target]
-                    .config
-                    .as_ref()
-                    .and_then(|value| serde_yaml_ng::from_value(value.clone()).ok())
-                    .unwrap_or_default();
-                if inner < children.len() {
-                    children[inner] = child;
-                }
-                data[target].config = Some(serde_yaml_ng::to_value(children).unwrap());
-            }
-        } else {
-            let Some(entry) = data.get_mut(target) else {
-                continue;
-            };
-            apply_overrides(entry, name.as_deref(), overrides, ctx, &id);
-        }
+        data = mutate_at_path(data, &path, |entry| {
+            apply_overrides(entry, patch.name.as_deref(), patch, ctx, id);
+        });
     }
     data
 }
@@ -346,12 +464,25 @@ fn apply_overrides(
         ));
         return;
     }
-    if let Some(config) = &overrides.config {
-        entry.config = Some(config.clone());
+    if !overrides.config.is_absent() {
+        entry.config = overrides.config.clone().into_option();
     }
-    if let Some(disabled) = overrides.disabled {
-        entry.disabled = Some(disabled);
+    if !overrides.disabled.is_absent() {
+        entry.disabled = overrides.disabled.clone().into_option();
+    }
+    if !overrides.group.is_absent() {
+        entry.group = overrides.group.clone().into_option();
+    }
+    if !overrides.inject.is_absent() {
+        entry.inject = overrides.inject.clone().into_option();
+    }
+    if !overrides.intercept.is_absent() {
+        entry.intercept = overrides.intercept.clone().into_option();
+    }
+    if !overrides.isolate.is_absent() {
+        entry.isolate = overrides.isolate.clone().into_option();
+    }
+    for (key, value) in &overrides.extra {
+        entry.extra.insert(key.clone(), value.clone());
     }
 }
-
-use serde_yaml_ng::Value;

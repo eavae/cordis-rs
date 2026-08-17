@@ -44,6 +44,7 @@ fn opts(name: &str, config: serde_yaml_ng::Value) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
+        extra: Default::default(),
     }
 }
 

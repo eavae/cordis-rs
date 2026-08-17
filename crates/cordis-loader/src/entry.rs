@@ -13,7 +13,7 @@ use crate::evaluator::{MinijinjaEvaluator, evaluate_config};
 pub type WriteCallback = Rc<dyn Fn()>;
 
 /// A single entry's options (mirrors `EntryOptions` in entry.ts).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EntryOptions {
     /// Stable entry id.
     pub id: String,
@@ -37,6 +37,11 @@ pub struct EntryOptions {
     /// Per-service intercept overrides (story card C4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intercept: Option<serde_yaml_ng::Value>,
+    /// Extra keys preserved from the config file (mirrors the open
+    /// `EntryOptions` object in entry.ts; include patches may write arbitrary
+    /// keys here and they round-trip through write-back).
+    #[serde(flatten, default)]
+    pub extra: std::collections::HashMap<String, serde_yaml_ng::Value>,
 }
 
 /// An isolate declaration: `true` for a local realm, a string for a shared
@@ -292,6 +297,7 @@ impl EntryTree {
             .unwrap_or_else(|error| panic!("{error}"));
         entry
             .parent
+            .borrow()
             .entries
             .borrow_mut()
             .retain(|item| !Rc::ptr_eq(item, &entry));
@@ -299,6 +305,123 @@ impl EntryTree {
             tokio::task::spawn_local(fiber.dispose());
         }
         self.write();
+    }
+
+    /// Moves an entry to another group (mirrors `tree.update(id, {}, parent)`).
+    ///
+    /// The entry's context is re-parented against the new group so isolate
+    /// and intercept realms follow the move. The fiber is only restarted when
+    /// a realm label actually changes; plain moves keep the fiber running
+    /// (mirrors the TS patch-context flow).
+    pub fn move_entry(&self, id: &str, parent: Option<&str>) {
+        let entry = self
+            .resolve_path(id)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let source = entry.parent.borrow().clone();
+        let target = self
+            .resolve_group(parent)
+            .unwrap_or_else(|error| panic!("{error}"));
+        if Rc::ptr_eq(&source, &target) {
+            return;
+        }
+        // Names whose realm might change with the move: the plugin's declared
+        // injects (entry options may leave them to the plugin), plus the
+        // service it provides under its own name.
+        let mut names: Vec<String> = entry.options.borrow().inject.clone().unwrap_or_default();
+        if let Ok(plugin) = self.import(&entry.options.borrow().name) {
+            for (name, _) in &plugin.inject {
+                if !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+        }
+        let own_name = entry.options.borrow().name.clone();
+        if !names.contains(&own_name) {
+            names.push(own_name);
+        }
+        let old_labels: HashMap<String, Option<cordis_core::Label>> = names
+            .iter()
+            .map(|name| (name.clone(), entry.ctx.borrow().isolate_label(name)))
+            .collect();
+
+        source
+            .entries
+            .borrow_mut()
+            .retain(|item| !Rc::ptr_eq(item, &entry));
+        target.entries.borrow_mut().push(entry.clone());
+        *entry.parent.borrow_mut() = target;
+
+        // Re-point the context chain at the new parent and re-apply the
+        // entry's own realm layers.
+        entry.ctx.borrow().reparent(&entry.parent.borrow().ctx);
+        entry.apply_realm_layers();
+        self.write();
+
+        let changed: Vec<(
+            String,
+            Option<cordis_core::Label>,
+            Option<cordis_core::Label>,
+        )> = names
+            .into_iter()
+            .filter_map(|name| {
+                let old = old_labels.get(&name).cloned().flatten();
+                let new = entry.ctx.borrow().isolate_label(&name);
+                (old != new).then_some((name, old, new))
+            })
+            .collect();
+
+        if !changed.is_empty() {
+            // The realm changed: restart the moved entry's fiber (clear it
+            // first so the loader's self-dispose hook stays silent). Once the
+            // entry re-provides under the new realm, wake dependents so their
+            // inject checks re-run (mirrors the TS patch-context order).
+            let fiber = entry.fiber.borrow().clone();
+            *entry.fiber.borrow_mut() = None;
+            if let Some(fiber) = fiber {
+                tokio::task::spawn_local(async move {
+                    let _ = fiber.dispose().await;
+                });
+            }
+            if !entry.disabled() && entry.options.borrow().group != Some(true) {
+                entry.init_task.set(true);
+                let this = entry.clone();
+                let notify: Vec<(String, Vec<cordis_core::Label>)> = changed
+                    .iter()
+                    .map(|(name, old, new)| {
+                        let mut labels = Vec::new();
+                        if let Some(old) = old {
+                            labels.push(old.clone());
+                        }
+                        if let Some(new) = new {
+                            labels.push(new.clone());
+                        }
+                        (name.clone(), labels)
+                    })
+                    .collect();
+                tokio::task::spawn_local(async move {
+                    this.init_inner().await;
+                    this.init_task.set(false);
+                    for (name, labels) in notify {
+                        let _ = this.ctx.borrow().notify_with_labels(&name, &labels);
+                    }
+                });
+            }
+        } else if entry.disabled() {
+            let fiber = entry.fiber.borrow().clone();
+            *entry.fiber.borrow_mut() = None;
+            if let Some(fiber) = fiber {
+                tokio::task::spawn_local(async move {
+                    let _ = fiber.dispose().await;
+                });
+            }
+        } else if entry.fiber.borrow().is_none() && entry.options.borrow().group != Some(true) {
+            entry.init_task.set(true);
+            let this = entry.clone();
+            tokio::task::spawn_local(async move {
+                this.init_inner().await;
+                this.init_task.set(false);
+            });
+        }
     }
 
     /// Updates an entry's options (mirrors `tree.update`).
@@ -379,8 +502,10 @@ fn collect_entries(group: &Rc<EntryGroup>, result: &mut Vec<Rc<Entry>>) {
 /// A single config entry (mirrors `Entry` in entry.ts).
 pub struct Entry {
     pub tree: Rc<EntryTree>,
-    pub ctx: Context,
-    pub parent: Rc<EntryGroup>,
+    /// The entry's context; rebuilt when the entry moves between groups.
+    pub ctx: RefCell<Context>,
+    /// The owning group; updated when the entry moves between groups.
+    pub parent: RefCell<Rc<EntryGroup>>,
     pub options: RefCell<EntryOptions>,
     pub fiber: RefCell<Option<Rc<Fiber>>>,
     pub subgroup: RefCell<Option<Rc<EntryGroup>>>,
@@ -394,8 +519,8 @@ impl Entry {
         let ctx = ctx.with_isolate_layer().with_intercept_layer();
         let entry = Rc::new(Entry {
             tree,
-            ctx,
-            parent,
+            ctx: RefCell::new(ctx),
+            parent: RefCell::new(parent),
             options: RefCell::new(options),
             fiber: RefCell::new(None),
             subgroup: RefCell::new(None),
@@ -420,8 +545,8 @@ impl Entry {
 
     /// Rebuilds the entry's top isolate/intercept layers from its options.
     fn apply_realm_layers(&self) {
-        self.ctx.clear_isolate_layer();
-        self.ctx.clear_intercept_layer();
+        self.ctx.borrow().clear_isolate_layer();
+        self.ctx.borrow().clear_intercept_layer();
         let isolate = self.options.borrow().isolate.clone().unwrap_or_default();
         for (name, value) in isolate {
             let label = match value {
@@ -431,10 +556,19 @@ impl Entry {
                 IsolateValue::Label(label) => Rc::<str>::from(format!("{name}@{label}")),
                 IsolateValue::Flag(false) => continue,
             };
-            self.ctx.set_isolate(&name, label);
+            self.ctx.borrow().set_isolate(&name, label);
         }
-        // Intercept values are interpreted by typed configs (C6); the layer
-        // is created here so later cards can fill it.
+        // The entry's own intercept overrides fill its top intercept layer;
+        // parent layers stay reachable through the context chain (mirrors
+        // the TS `entry.ctx[Context.intercept]` prototype chain).
+        let intercept = self.options.borrow().intercept.clone().unwrap_or_default();
+        if let serde_yaml_ng::Value::Mapping(map) = intercept {
+            for (name, value) in map {
+                if let Some(name) = name.as_str() {
+                    self.ctx.borrow().set_intercept(name, Rc::new(value));
+                }
+            }
+        }
     }
 
     /// The full id, prefixed by ancestor entry ids (mirrors `entry.id`).
@@ -447,7 +581,7 @@ impl Entry {
     }
 
     fn ancestor_entry(&self) -> Option<Rc<Entry>> {
-        self.parent.entry.borrow().clone()
+        self.parent.borrow().entry.borrow().clone()
     }
 
     /// Whether the entry (or an ancestor) is disabled (mirrors `entry.disabled`).
@@ -521,6 +655,7 @@ impl Entry {
                 .map(|name| {
                     let label = self
                         .ctx
+                        .borrow()
                         .isolate_label(name)
                         .unwrap_or_else(|| Rc::from("") as cordis_core::Label);
                     (name.clone(), label)
@@ -536,13 +671,13 @@ impl Entry {
                 let config = self.resolve_applied_config();
                 let fiber = fiber.clone();
                 tokio::task::spawn_local(fiber.update_with(config, true));
-            } else if let Some(fiber) = &fiber {
+            } else if fiber.is_some() {
                 // Migrate services provided by this entry's fiber to the new
-                // labels (mirrors the loader's store migration).
+                // labels (mirrors the loader's store migration; the provider
+                // may be a child entry living under the changed realm).
                 for (name, old_label) in &old_labels {
-                    if let Some(new_label) = self.ctx.isolate_label(name) {
-                        self.ctx
-                            .migrate_label_if(name, old_label, &new_label, fiber);
+                    if let Some(new_label) = self.ctx.borrow().isolate_label(name) {
+                        self.ctx.borrow().migrate_label(name, old_label, &new_label);
                     }
                 }
             }
@@ -552,10 +687,10 @@ impl Entry {
                 if let Some(old) = old_labels.get(name) {
                     labels.push(old.clone());
                 }
-                if let Some(new) = self.ctx.isolate_label(name) {
+                if let Some(new) = self.ctx.borrow().isolate_label(name) {
                     labels.push(new);
                 }
-                let _ = self.ctx.notify_with_labels(name, &labels);
+                let _ = self.ctx.borrow().notify_with_labels(name, &labels);
             }
             return;
         }
@@ -659,10 +794,14 @@ impl Entry {
     pub(crate) async fn init_inner(self: &Rc<Self>) {
         let result = self.import_and_apply().await;
         if let Err(error) = result {
-            self.ctx.logger().error(error);
+            self.ctx.borrow().logger().error(error);
         }
+        // The current init task is finishing; clear its flag so the settle
+        // check below sees a quiet tree (mirrors the TS `entry.init`, which
+        // notifies `loader` once all tasks settle).
+        self.init_task.set(false);
         if self.tree.get_tasks() == 0 {
-            let _ = self.ctx.notify("loader");
+            let _ = self.ctx.borrow().notify("loader");
         }
     }
 
@@ -676,9 +815,9 @@ impl Entry {
         let plugin = self.tree.import(&self.options.borrow().name)?;
         let config = self.resolve_config_value(&plugin)?;
         self.tree.tasks.set(self.tree.tasks.get() + 1);
-        let fiber = self.ctx.registry_plugin(&plugin, config);
+        let fiber = self.ctx.borrow().registry_plugin(&plugin, config);
         *self.fiber.borrow_mut() = Some(fiber.clone());
-        if let Some(loader) = self.ctx.get::<crate::Loader>() {
+        if let Some(loader) = self.ctx.borrow().get::<crate::Loader>() {
             loader.show_log("apply", self);
         }
         let result = fiber.wait().await.map_err(|error| error.to_string());
@@ -727,6 +866,7 @@ pub struct PartialEntryOptions {
     pub inject: Option<Vec<String>>,
     pub isolate: Option<std::collections::HashMap<String, IsolateValue>>,
     pub intercept: Option<serde_yaml_ng::Value>,
+    pub extra: Option<std::collections::HashMap<String, serde_yaml_ng::Value>>,
 }
 
 impl PartialEntryOptions {
@@ -741,6 +881,7 @@ impl PartialEntryOptions {
             inject: self.inject.clone(),
             isolate: self.isolate.clone(),
             intercept: self.intercept.clone(),
+            extra: self.extra.clone().unwrap_or_default(),
         }
     }
 
@@ -769,6 +910,9 @@ impl PartialEntryOptions {
         if let Some(intercept) = &self.intercept {
             current.intercept = Some(intercept.clone());
         }
+        if let Some(extra) = &self.extra {
+            current.extra = extra.clone();
+        }
     }
 
     /// Applies every field; `None` values clear the current value.
@@ -785,6 +929,7 @@ impl PartialEntryOptions {
         current.inject = self.inject.clone();
         current.isolate = self.isolate.clone();
         current.intercept = self.intercept.clone();
+        current.extra = self.extra.clone().unwrap_or_default();
     }
 
     /// Builds a partial update from a full options set (used by `read`).
@@ -798,6 +943,7 @@ impl PartialEntryOptions {
             inject: options.inject.clone(),
             isolate: options.isolate.clone(),
             intercept: options.intercept.clone(),
+            extra: Some(options.extra.clone()),
         }
     }
 }

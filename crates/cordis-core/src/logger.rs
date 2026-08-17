@@ -313,7 +313,7 @@ impl LoggerService {
             if let Some(config) = current.entries.borrow().get("logger") {
                 configs.push(config.clone());
             }
-            layer = current.parent.clone();
+            layer = current.parent.borrow().clone();
         }
         configs.reverse();
         let mut result = LoggerIntercept::default();

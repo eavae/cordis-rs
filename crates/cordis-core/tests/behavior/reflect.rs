@@ -1,8 +1,11 @@
-//! Ported cases from `packages/core/tests/reflect.spec.ts` (story card B10).
+//! Ported cases from `packages/core/tests/reflect.spec.ts` (story card B10)
+//! plus the B15 dynamic-access completion (`set` ownership, `get` three
+//! states, `has`, `accessor`).
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use cordis_core::{Context, Effect, Plugin, Service};
+use cordis_core::{Context, Effect, FiberState, Plugin, ReflectService, Service};
 
 #[derive(Debug)]
 struct Foo;
@@ -105,4 +108,263 @@ async fn service_injection_and_mixin_get() {
             assert!(root.get_str("root").is_none());
         })
         .await;
+}
+
+/// B15.1: `set` enforces ownership — only the providing fiber may update the
+/// value, and injectors are notified after the update.
+#[tokio::test(flavor = "current_thread")]
+async fn reflect_set_ownership_check() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let service_updates = Rc::new(RefCell::new(Vec::<String>::new()));
+            let updates = service_updates.clone();
+            drop(
+                root.on(
+                    "internal/service",
+                    Rc::new(move |args: &[Rc<dyn std::any::Any>]| {
+                        let name = args[0].downcast_ref::<String>().unwrap().clone();
+                        let value = args[1].downcast_ref::<i32>().copied().unwrap_or_default();
+                        updates.borrow_mut().push(format!("{name}={value}"));
+                        Ok(None)
+                    }),
+                    cordis_core::EventOptions::default(),
+                )
+                .unwrap(),
+            );
+            let provider = root.plugin(
+                &Plugin {
+                    is_group: false,
+                    name: None,
+                    inject: Vec::new(),
+                    apply: Rc::new(|ctx: &Context, _config| {
+                        drop(ctx.provide_str("foo", Rc::new(1i32)).unwrap());
+                        Effect::None
+                    }),
+                },
+                None,
+            );
+            provider.wait().await.unwrap();
+
+            // A different fiber (root) cannot set the value.
+            let error = root.set_str("foo", Rc::new(2i32)).unwrap_err();
+            assert_eq!(
+                error, "cannot set property \"foo\" in multiple fibers",
+                "ownership must reject cross-fiber writes"
+            );
+
+            // The owning fiber can update, and the change is broadcast
+            // through `internal/service` (the notify path).
+            provider.context().set_str("foo", Rc::new(2i32)).unwrap();
+            assert_eq!(
+                root.get_str("foo").unwrap().downcast_ref::<i32>().copied(),
+                Some(2),
+                "owning fiber must update the value"
+            );
+            assert!(
+                service_updates.borrow().contains(&"foo=2".to_string()),
+                "set must notify through internal/service: {:?}",
+                service_updates.borrow()
+            );
+        })
+        .await;
+}
+
+/// B15.2: `get(name, strict)` three states — registered+ACTIVE resolves for
+/// both modes; missing resolves for neither; registered+non-ACTIVE resolves
+/// only in non-strict mode.
+#[tokio::test(flavor = "current_thread")]
+async fn reflect_get_three_states() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            drop(root.provide_str("foo", Rc::new(1i32)).unwrap());
+
+            // Registered + ACTIVE.
+            assert_eq!(
+                root.get_str("foo").unwrap().downcast_ref::<i32>().copied(),
+                Some(1)
+            );
+            assert_eq!(
+                root.get_str_non_strict("foo")
+                    .unwrap()
+                    .downcast_ref::<i32>()
+                    .copied(),
+                Some(1)
+            );
+
+            // Missing.
+            assert!(root.get_str("nope").is_none());
+            assert!(root.get_str_non_strict("nope").is_none());
+
+            // A plugin whose disposal spans several polls keeps the root in a
+            // non-ACTIVE state long enough to observe the difference.
+            let plugin = root.plugin(
+                &Plugin {
+                    is_group: false,
+                    name: None,
+                    inject: Vec::new(),
+                    apply: Rc::new(|_ctx: &Context, _config| {
+                        Effect::Disposer(cordis_core::async_disposer(move || async move {
+                            tokio::task::yield_now().await;
+                            Ok::<(), Box<dyn std::error::Error>>(())
+                        }))
+                    }),
+                },
+                None,
+            );
+            plugin.wait().await.unwrap();
+
+            // Registered + non-ACTIVE: the framework services survive a root
+            // restart, so while the root fiber cycles through non-ACTIVE
+            // states strict lookup is unavailable but non-strict still
+            // resolves.
+            let dispose = tokio::task::spawn_local(root.fiber().dispose());
+            let mut saw_inactive = false;
+            for _ in 0..2000 {
+                tokio::task::yield_now().await;
+                let strict = root.get_str("events");
+                let non_strict = root.get_str_non_strict("events");
+                if root.fiber().state.get() != FiberState::Active {
+                    saw_inactive = true;
+                    assert!(
+                        strict.is_none(),
+                        "strict get must be unavailable while the provider is inactive"
+                    );
+                    assert!(
+                        non_strict.is_some(),
+                        "non-strict get must keep resolving during unload"
+                    );
+                }
+                if root.fiber().state.get() == FiberState::Active && strict.is_some() {
+                    break;
+                }
+            }
+            assert!(
+                saw_inactive,
+                "root restart must pass through a non-ACTIVE phase"
+            );
+            let _ = dispose.await;
+        })
+        .await;
+}
+
+/// B15.3: `has` is true for registered services and accessors, false
+/// otherwise.
+#[test]
+fn reflect_has_sources() {
+    let root = Context::new();
+    assert!(!root.has_str("foo"), "no property yet");
+
+    drop(root.provide_str("foo", Rc::new(1i32)).unwrap());
+    assert!(root.has_str("foo"), "registered service counts");
+
+    drop(
+        root.accessor("bar", Rc::new(|_ctx| Some(Rc::new(2i32))), None)
+            .unwrap(),
+    );
+    assert!(root.has_str("bar"), "registered accessor counts");
+    assert!(!root.has_str("nope"));
+}
+
+/// B15.4: `accessor(name, { get, set })` forwards reads/writes, rejects
+/// conflicts with same-name services, and is removed when its fiber unloads.
+#[tokio::test(flavor = "current_thread")]
+async fn reflect_accessor_effect_governance() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let cell = Rc::new(Cell::new(10i32));
+            let get_cell = cell.clone();
+            let set_cell = cell.clone();
+            let fiber = root.plugin(
+                &Plugin {
+                    is_group: false,
+                    name: None,
+                    inject: Vec::new(),
+                    apply: Rc::new(move |ctx: &Context, _config| {
+                        let get_cell = get_cell.clone();
+                        let set_cell = set_cell.clone();
+                        drop(
+                            ctx.accessor(
+                                "secret",
+                                Rc::new(move |_ctx| Some(Rc::new(get_cell.get()))),
+                                Some(Rc::new(move |_ctx, value| {
+                                    set_cell.set(value.downcast_ref::<i32>().copied().unwrap_or(0));
+                                })),
+                            )
+                            .unwrap(),
+                        );
+                        Effect::None
+                    }),
+                },
+                None,
+            );
+            fiber.wait().await.unwrap();
+
+            // Reads and writes are forwarded to the closures.
+            assert_eq!(
+                root.resolve_assoc("x", "secret")
+                    .unwrap()
+                    .downcast_ref::<i32>()
+                    .copied(),
+                Some(10)
+            );
+            root.set_assoc("x", "secret", Rc::new(42i32)).unwrap();
+            assert_eq!(cell.get(), 42);
+
+            // Registering an accessor over a same-name service is rejected.
+            drop(root.provide_str("taken", Rc::new(1i32)).unwrap());
+            let error = root
+                .accessor("taken", Rc::new(|_ctx| None), None)
+                .unwrap_err();
+            assert!(error.contains("already declared"), "{error}");
+
+            // Disposing the fiber removes the accessor.
+            let _ = tokio::task::spawn_local(fiber.dispose()).await;
+            assert!(
+                root.resolve_assoc("x", "secret").is_none(),
+                "accessor must be removed with its fiber"
+            );
+        })
+        .await;
+}
+
+/// B15: the `ReflectService` facade exposes the same surface with explicit
+/// context passing.
+#[test]
+fn reflect_service_facade() {
+    let root = Context::new();
+    let reflect = root.get::<ReflectService>().unwrap();
+
+    drop(root.provide_str("foo", Rc::new(1i32)).unwrap());
+    assert_eq!(
+        reflect
+            .get(&root, "foo", true)
+            .unwrap()
+            .downcast_ref::<i32>()
+            .copied(),
+        Some(1)
+    );
+    assert!(reflect.has(&root, "foo"));
+    reflect.set(&root, "foo", Rc::new(2i32)).unwrap();
+    assert_eq!(
+        reflect
+            .get(&root, "foo", false)
+            .unwrap()
+            .downcast_ref::<i32>()
+            .copied(),
+        Some(2)
+    );
+    assert!(reflect.get(&root, "nope", false).is_none());
+
+    drop(
+        reflect
+            .accessor(&root, "bar", Rc::new(|_ctx| Some(Rc::new(3i32))), None)
+            .unwrap(),
+    );
+    assert!(reflect.has(&root, "bar"));
 }

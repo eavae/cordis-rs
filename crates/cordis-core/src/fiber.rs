@@ -619,7 +619,17 @@ impl Fiber {
         for name in self.inject.borrow().keys() {
             match self.resolved.borrow().get(name) {
                 Some(entry) => match entry.fiber.upgrade().and_then(|fiber| fiber.uid.get()) {
-                    Some(uid) => epoch_str.push_str(&format!(":{uid}")),
+                    Some(uid) => {
+                        // Include the resolved realm in the epoch: a provider
+                        // moving between isolate realms must restart its
+                        // dependents (mirrors the TS "change provider" case).
+                        let label = self
+                            .ctx
+                            .isolate_label(name)
+                            .map(|label| label.to_string())
+                            .unwrap_or_default();
+                        epoch_str.push_str(&format!(":{uid}@{label}"));
+                    }
                     None => {
                         self.set_epoch(Epoch::Inactive);
                         return;
@@ -649,11 +659,9 @@ impl Fiber {
         inertia.active = true;
         drop(inertia);
         if start_reload {
-            self.state.set(FiberState::Loading);
             self.update_state(Some(FiberState::Loading));
             tokio::task::spawn_local(self.clone().reload());
         } else {
-            self.state.set(FiberState::Unloading);
             self.update_state(Some(FiberState::Unloading));
             tokio::task::spawn_local(self.clone().unload());
         }
@@ -696,9 +704,8 @@ impl Fiber {
             self.inertia.borrow_mut().active = false;
             self.update_state(None);
         } else {
-            self.state.set(FiberState::Unloading);
-            self.start_unload();
             self.update_state(Some(FiberState::Unloading));
+            self.start_unload();
         }
     }
 
@@ -717,9 +724,8 @@ impl Fiber {
             self.inertia.borrow_mut().active = false;
             self.update_state(None);
         } else {
-            self.state.set(FiberState::Loading);
-            self.start_reload();
             self.update_state(Some(FiberState::Loading));
+            self.start_reload();
         }
     }
 
@@ -743,12 +749,27 @@ impl Fiber {
         }
     }
 
-    fn update_state(self: &Rc<Self>, explicit: Option<FiberState>) {
+    pub(crate) fn update_state(self: &Rc<Self>, explicit: Option<FiberState>) {
         let old = self.state.get();
         let new = explicit.unwrap_or_else(|| self.get_state());
         self.state.set(new);
         if old == new {
             return;
+        }
+        // `internal/status`: broadcast fiber state transitions (story card
+        // B14), mirroring fiber.ts `_updateState`. The payload carries the
+        // fiber and the previous state.
+        if let Some(events) = self
+            .ctx
+            .get_service_non_strict::<crate::EventsService>("events")
+        {
+            let ctx = Context {
+                inner: self.ctx.clone(),
+                fiber: self.clone(),
+            };
+            let fiber_any: Rc<dyn Any> = self.clone();
+            let old_any: Rc<dyn Any> = Rc::new(old);
+            events.emit(&ctx, "internal/status", &[fiber_any, old_any]);
         }
         // Notify consumers when crossing the ACTIVE boundary (B8 refines the
         // reflect-store notify semantics).

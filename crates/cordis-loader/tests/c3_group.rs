@@ -16,6 +16,7 @@ fn group_opts(id: &str, config: Vec<EntryOptions>) -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
+        extra: Default::default(),
     }
 }
 
@@ -29,6 +30,7 @@ fn foo_opts() -> EntryOptions {
         inject: None,
         isolate: None,
         intercept: None,
+        extra: Default::default(),
     }
 }
 
