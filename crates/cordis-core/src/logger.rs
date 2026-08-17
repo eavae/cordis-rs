@@ -661,10 +661,10 @@ pub fn format_message(
 }
 
 /// The 16-color table (mirrors `c16`).
-pub const C16: [u8; 6] = [6, 2, 3, 4, 5, 1];
+pub const COLOR_16: [u8; 6] = [6, 2, 3, 4, 5, 1];
 
 /// The 256-color table (mirrors `c256`).
-pub const C256: [u8; 75] = [
+pub const COLOR_256: [u8; 75] = [
     20, 21, 26, 27, 32, 33, 38, 39, 40, 41, 42, 43, 44, 45, 56, 57, 62, 63, 68, 69, 74, 75, 76, 77,
     78, 79, 80, 81, 92, 93, 98, 99, 112, 113, 129, 134, 135, 148, 149, 160, 161, 162, 163, 164,
     165, 166, 167, 168, 169, 170, 171, 172, 173, 178, 179, 184, 185, 196, 197, 198, 199, 200, 201,
@@ -683,9 +683,9 @@ impl LoggerService {
         let colors = if level == 0 {
             &[][..]
         } else if level >= 2 {
-            &C256[..]
+            &COLOR_256[..]
         } else {
-            &C16[..]
+            &COLOR_16[..]
         };
         if colors.is_empty() {
             0

@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use cordis_core::{
-    C16, C256, Context, Effect, LogValue, LoggerIntercept, LoggerLevel, LoggerService, LoggerType,
-    Message, Plugin, Service, ShadowContext, SimpleExporter, format_message, service,
+    COLOR_16, COLOR_256, Context, Effect, LogValue, LoggerIntercept, LoggerLevel, LoggerService,
+    LoggerType, Message, Plugin, Service, ShadowContext, SimpleExporter, format_message, service,
 };
 
 fn setup() -> (Context, Rc<RefCell<Vec<Message>>>) {
@@ -382,8 +382,8 @@ async fn formats_non_string_first_argument_as_object() {
 async fn color_code_and_tables() {
     // `Logger.code("root", level)` uses the TS hash and color tables.
     assert_eq!(LoggerService::code("root", 0), 0);
-    assert_eq!(LoggerService::code("root", 2), C256[9]);
-    assert_eq!(LoggerService::code("root", 1), C16[0]);
+    assert_eq!(LoggerService::code("root", 2), COLOR_256[9]);
+    assert_eq!(LoggerService::code("root", 1), COLOR_16[0]);
     assert_eq!(LoggerService::code("root", 2), 41);
 }
 

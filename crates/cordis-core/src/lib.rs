@@ -24,8 +24,8 @@ pub use events::{
 };
 pub use fiber::{CordisError, EffectHandle, EffectMeta, Fiber, FiberError, FiberState, disposer};
 pub use logger::{
-    C16, C256, LogFormatter, LogValue, Logger, LoggerExporter, LoggerIntercept, LoggerLevel,
-    LoggerService, LoggerType, Message, SimpleExporter, format_message, hyphenate,
+    COLOR_16, COLOR_256, LogFormatter, LogValue, Logger, LoggerExporter, LoggerIntercept,
+    LoggerLevel, LoggerService, LoggerType, Message, SimpleExporter, format_message, hyphenate,
 };
 pub use reflect::ReflectService;
 pub use registry::{Plugin, RegistryService};
