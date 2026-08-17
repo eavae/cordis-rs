@@ -1,23 +1,24 @@
-//! Contract tests for the explicit-parameter replacement of the TS
-//! traceable/shadow/caller machinery (story cards B10/B11; gap analysis
-//! `docs/test-coverage-audit.md` §3.1–3.3).
+//! Contract tests for the traceable/shadow/caller machinery (story cards
+//! B10/B11; gap analysis `docs/test-coverage-audit.md` §3.1–3.3).
 //!
-//! The TS reference records `symbols.caller` and `symbols.shadow` through a
-//! Proxy and hands service methods a hybrid `this.ctx`: dependency reads
-//! resolve through the service's own shadow, while intercept / fiber /
-//! plugin / effect reads follow the caller's chain. The Rust port models
-//! the same split with [`ShadowContext`](cordis_core::ShadowContext)
-//! (`own` + `caller`); these tests pin the behavioural contract so the two
-//! stay aligned.
+//! The TS reference hands service methods a hybrid `this.ctx`: dependency
+//! reads resolve through the service's own shadow, while intercept / fiber /
+//! plugin / effect reads follow the caller's chain. The Rust port models the
+//! same split with [`ShadowContext`](cordis_core::ShadowContext), and the
+//! `#[service]` accessor restores the automatic tracing at the access point:
+//! `ctx.foo()` returns a handle whose forwarded methods inject the traced
+//! context. These tests pin the behavioural contract so the two stay
+//! aligned.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
-use cordis_core::{Context, Effect, FiberState, Plugin, Service, ShadowContext};
+use cordis_core::{Context, Effect, FiberState, Plugin, Service, ShadowContext, service};
 
 /// A callable service whose invoke resolves `dep` through the service's own
 /// shadow (mirrors the TS invoke.spec.ts "uses the service shadow for
-/// callable extensions" case).
+/// callable extensions" case). Callables stay manual: the framework builds
+/// the context in [`Context::invoke_str`].
 #[derive(Debug)]
 struct Callable;
 
@@ -35,37 +36,28 @@ impl Service for Callable {
     }
 }
 
-/// A service whose method forwards its context to a callable's invoke — the
-/// explicit form of "service A's method calls service B's invoke" from the
-/// TS specs.
-#[derive(Debug)]
+/// A service whose method invokes a callable through its traced context —
+/// the explicit form of "service A's method calls service B's invoke" from
+/// the TS specs. `ctx.invoke` resolves the callable through `own` and keeps
+/// the caller chain, exactly like `this.ctx['callable']()` in JS.
+#[service]
 struct Outer;
 
-impl Service for Outer {
-    const NAME: &'static str = "outer";
-}
-
+#[service]
 impl Outer {
-    fn call(&self, ctx: &ShadowContext) -> Option<Rc<dyn std::any::Any>> {
-        let callable = ctx.get::<Callable>().expect("callable");
-        let shadow = ctx.shadow_of("callable").expect("callable shadow");
-        // The callee's shadow becomes the new `own`; the caller chain stays
-        // unchanged (JS: each service hop only replaces the shadow).
-        callable.invoke(&ctx.for_service(shadow.ctx), None)
+    pub fn call(&self, ctx: &ShadowContext) -> Option<Rc<dyn std::any::Any>> {
+        ctx.invoke::<Callable>(None)
     }
 }
 
 /// A service whose methods resolve dependencies through the context recorded
 /// as its shadow — the explicit counterpart of the TS traceable `this.ctx`.
-#[derive(Debug)]
+#[service]
 struct Probe;
 
-impl Service for Probe {
-    const NAME: &'static str = "probe";
-}
-
+#[service]
 impl Probe {
-    fn dep(&self, ctx: &ShadowContext) -> Option<String> {
+    pub fn dep(&self, ctx: &ShadowContext) -> Option<String> {
         ctx.get_str("dep")
             .and_then(|value| value.downcast_ref::<String>().cloned())
     }
@@ -75,23 +67,20 @@ impl Probe {
 /// context (the explicit counterpart of "strips service shadow before
 /// creating plugins" in shadow.spec.ts); `load_own` is the control that
 /// creates it on the loader's own context instead.
-#[derive(Debug)]
+#[service]
 struct Loader {
     own_ctx: Context,
 }
 
-impl Service for Loader {
-    const NAME: &'static str = "loader";
-}
-
+#[service]
 impl Loader {
-    fn load(&self, ctx: &ShadowContext, plugin: &Plugin) -> Rc<cordis_core::Fiber> {
+    pub fn load(&self, ctx: &ShadowContext, plugin: &Plugin) -> Rc<cordis_core::Fiber> {
         // `plugin` derefs to the caller's context (JS: `this.ctx.plugin`
         // runs on the stripped caller ctx).
         ctx.plugin(plugin, None)
     }
 
-    fn load_own(&self, plugin: &Plugin) -> Rc<cordis_core::Fiber> {
+    pub fn load_own(&self, plugin: &Plugin) -> Rc<cordis_core::Fiber> {
         self.own_ctx.plugin(plugin, None)
     }
 }
@@ -112,6 +101,8 @@ async fn invoke_uses_service_shadow() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
+            use crate::behavior::shadow::OuterServiceExt;
+
             let root = Context::new();
             drop(
                 root.provide_str("dep", Rc::new("root".to_string()))
@@ -159,12 +150,11 @@ async fn invoke_uses_service_shadow() {
                 "callable's shadow must not be the caller realm"
             );
 
-            // Service A's method invokes the callable with the callee's
-            // shadow as `own`; the caller chain is preserved.
-            let outer = realm_y.get::<Outer>().expect("outer");
-            let result = outer
-                .call(&ShadowContext::new(realm_y.clone(), root.clone()))
-                .expect("callable must resolve dep");
+            // Service A's method invoked through the traced handle: the
+            // accessor built the context (own = Outer's shadow, caller =
+            // root), and `ctx.invoke` resolves the callable through own.
+            let outer = root.outer().expect("outer");
+            let result = outer.call().expect("callable must resolve dep");
             assert_eq!(dep_string(&result), "x");
         })
         .await;
@@ -175,6 +165,8 @@ async fn bound_ctx_contract() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
+            use crate::behavior::shadow::ProbeServiceExt;
+
             let root = Context::new();
             drop(
                 root.provide_str("dep", Rc::new("root".to_string()))
@@ -206,17 +198,17 @@ async fn bound_ctx_contract() {
             // is the provider fiber (root's here).
             assert!(Rc::ptr_eq(shadow.ctx.fiber(), root.fiber()));
 
-            // The method is called from `root` — a different context — yet
-            // resolves through the shadow as `own` (audit §3.3 reverse
-            // contract: no traceable caller switching).
-            let probe = root.get::<Probe>().expect("probe");
-            let result = probe.dep(&ShadowContext::new(shadow.ctx.clone(), root.clone()));
+            // Called through the traced handle from `root`: the accessor
+            // built own from the recorded shadow, so the method resolves in
+            // its own realm (audit §3.3 reverse contract: DI never follows
+            // the call site).
+            let result = root.probe().expect("probe").dep();
             assert_eq!(result.as_deref(), Some("own"));
 
-            // Control: with a different `own`, the same method resolves in
-            // that scope — `own` is explicit, never inferred from the call
-            // site.
-            let result = probe.dep(&ShadowContext::new(root.clone(), root.clone()));
+            // Explicit escape hatch: with a different `own`, the same method
+            // resolves in that scope — `own` is explicit, never inferred.
+            let bare = root.get::<Probe>().expect("probe");
+            let result = bare.dep(&ShadowContext::new(root.clone(), root.clone()));
             assert_eq!(result.as_deref(), Some("root"));
         })
         .await;
@@ -227,6 +219,8 @@ async fn caller_scoped_plugin() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
+            use crate::behavior::shadow::LoaderServiceExt;
+
             let root = Context::new();
             #[derive(Debug)]
             struct Server;
@@ -265,15 +259,11 @@ async fn caller_scoped_plugin() {
                 }
             };
 
-            let loader = root.get::<Loader>().expect("loader");
-
-            // Creating the plugin through the service method's context
-            // resolves its injects in the caller's scope (`caller`), not the
+            // Through the traced handle: `load` creates the plugin on the
+            // caller's context (the handle's caller chain = root), not the
             // loader's own (`own`).
-            let fiber = loader.load(
-                &ShadowContext::new(loader_scope.clone(), root.clone()),
-                &consumer,
-            );
+            let loader = root.loader().expect("loader");
+            let fiber = loader.load(&consumer);
             fiber.wait().await.unwrap();
             assert_eq!(applied.get(), 1);
             assert!(resolved.get(), "server must resolve in the caller scope");
