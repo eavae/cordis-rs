@@ -1,5 +1,10 @@
 //! Event dispatch service: the five dispatch modes (`emit`, `parallel`,
 //! `serial`, `bail`, `waterfall`), listener lifecycle and filters.
+//!
+//! Listeners may be synchronous or asynchronous. `parallel` starts every
+//! listener before awaiting any of them, `serial` awaits them in order and
+//! `waterfall` awaits the whole chain; `emit` and `bail` stay synchronous
+//! (as in Cordis) and consume only the first poll of a listener future.
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
@@ -351,8 +356,8 @@ impl EventsService {
         }
     }
 
-    /// Runs listeners sequentially, short-circuiting on the first truthy
-    /// result; errors propagate.
+    /// Runs listeners sequentially, awaiting each in order and
+    /// short-circuiting on the first truthy result; errors propagate.
     pub async fn serial(
         &self,
         ctx: &Context,
