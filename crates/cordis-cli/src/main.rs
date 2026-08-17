@@ -1,47 +1,43 @@
 //! cordis-cli entry point: parses command-line arguments and starts the
 //! runtime.
 
-fn main() -> anyhow::Result<()> {
-    let mut config = None;
-    let mut plugins_dir = None;
-    let mut create_dir = None;
-    let mut force = false;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "create" => {
-                create_dir = args.next();
-            }
-            "--force" | "-f" => {
-                force = true;
-            }
-            "-c" | "--config" => {
-                config = args.next();
-            }
-            "--plugins-dir" => {
-                plugins_dir = args.next();
-            }
-            "-h" | "--help" => {
-                println!(
-                    "cordis {} — usage: cordis create <name> | cordis [-c cordis.yml] [--plugins-dir plugins]",
-                    env!("CARGO_PKG_VERSION")
-                );
-                return Ok(());
-            }
-            other => {
-                eprintln!("unknown argument: {other}");
-                std::process::exit(2);
-            }
-        }
-    }
+use clap::{Parser, Subcommand};
 
-    if let Some(dir) = create_dir {
-        return cordis_cli::create_project(std::path::Path::new(&dir), force);
+/// Cordis plugin application launcher.
+#[derive(Parser)]
+#[command(name = "cordis", version, about)]
+struct Cli {
+    /// Config file (yaml/json); default `cordis.yml`.
+    #[arg(short, long)]
+    config: Option<String>,
+    /// Directory to scan for `.so` plugins; default `plugins`.
+    #[arg(long)]
+    plugins_dir: Option<String>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Scaffolds a new cordis project.
+    Create {
+        /// Directory to scaffold into.
+        name: String,
+        /// Overwrite an existing directory.
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    if let Some(Command::Create { name, force }) = cli.command {
+        return cordis_cli::create_project(std::path::Path::new(&name), force);
     }
 
     let options = cordis_cli::CliOptions {
-        config,
-        plugins_dir,
+        config: cli.config,
+        plugins_dir: cli.plugins_dir,
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
