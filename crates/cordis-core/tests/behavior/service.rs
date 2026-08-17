@@ -302,7 +302,7 @@ async fn service_macro_accessor() {
             let accessor = root.database().expect("database");
             let typed = root.get::<Database>().expect("database");
             assert_eq!(accessor.url, "cordis://local");
-            assert!(Rc::ptr_eq(&accessor, &typed));
+            assert!(Rc::ptr_eq(accessor.service(), &typed));
         })
         .await;
 }
@@ -338,6 +338,94 @@ async fn service_macro_accessor_uses_shadow() {
             // The caller chain still resolves nothing: the accessor did not
             // fall back to the caller's view.
             assert!(service_ctx.caller().database().is_none());
+        })
+        .await;
+}
+
+/// A counter whose `increase` registers an effect on the *traced* (caller)
+/// fiber — the explicit counterpart of the TS "traceable effect" cases in
+/// service.spec.ts.
+#[service]
+struct TraceableCounter {
+    value: Rc<std::cell::Cell<i32>>,
+}
+
+#[service]
+impl TraceableCounter {
+    /// Registers an increment effect on the traced context's fiber (the
+    /// caller's scope): the value increments while that scope is alive and
+    /// decrements when it is disposed.
+    pub fn increase(&self, ctx: &ShadowContext) {
+        let value = self.value.clone();
+        drop(
+            ctx.effect(
+                move || {
+                    value.set(value.get() + 1);
+                    Effect::Disposer(sync_disposer(move || {
+                        value.set(value.get() - 1);
+                    }))
+                },
+                "counter.increase",
+            )
+            .unwrap(),
+        );
+    }
+}
+
+#[service]
+struct TraceableFoo;
+
+#[service]
+impl TraceableFoo {
+    /// Resolves the counter through the traced context's own scope and
+    /// forwards the context, so the counter's effect follows the caller.
+    pub fn increase(&self, ctx: &ShadowContext) {
+        ctx.traceable_counter().expect("counter").increase();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn traceable_effect_follows_call_site() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            use crate::behavior::service::TraceableFooServiceExt;
+
+            let root = Context::new();
+            drop(
+                root.provide::<TraceableCounter>(Rc::new(TraceableCounter {
+                    value: Rc::new(Cell::new(0)),
+                }))
+                .unwrap(),
+            );
+            drop(root.provide::<TraceableFoo>(Rc::new(TraceableFoo)).unwrap());
+            let value = || root.get::<TraceableCounter>().unwrap().value.get();
+
+            // Called through the root accessor: the effect lands on the
+            // root fiber and survives the inject fiber's disposal.
+            root.traceable_foo().expect("foo").increase();
+            assert_eq!(value(), 1);
+
+            // Called through the inject callback's accessor: the effect
+            // lands on the inject fiber.
+            let fiber = root.inject(
+                &["traceable_foo"],
+                Rc::new(|ctx: &Context, _config| {
+                    ctx.traceable_foo().expect("foo").increase();
+                    Effect::None
+                }),
+            );
+            fiber.wait().await.unwrap();
+            assert_eq!(value(), 2);
+
+            // Disposing the inject fiber disposes only the effect registered
+            // through its accessor — the traceable effect follows the call
+            // site.
+            fiber.dispose().await;
+            assert_eq!(value(), 1);
+
+            root.traceable_foo().expect("foo").increase();
+            assert_eq!(value(), 2);
         })
         .await;
 }
