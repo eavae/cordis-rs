@@ -4,6 +4,14 @@
 //! [`host_spawn`] through the vtable; each boxed future is driven on the
 //! host's current-thread runtime and dropped (through the plugin's drop
 //! function) when it completes or when the plugin instance is disposed.
+//!
+//! Platform note: on macOS, `dlclose` never unloads an image that contains
+//! thread-local storage (a documented dyld limitation), and plugin dylibs
+//! embed TLS through their tokio dependency. Such images stay mapped for the
+//! process lifetime even after every task is dropped; the `Arc`-based
+//! library ownership below matters on Linux/Windows, where `dlclose` really
+//! unloads and dropping a plugin with pending tasks would otherwise call
+//! into unmapped code.
 
 use std::cell::Cell;
 use std::ffi::c_void;

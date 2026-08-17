@@ -4,6 +4,13 @@
 //! module provides the cache-busting core: content-hash artifact names
 //! (`name@hash.so`) and a manifest mapping artifacts to their declared
 //! dependencies (consumed by the dependency graph).
+//!
+//! Platform note: the content-hash names also keep reloads correct on macOS,
+//! where `dlclose` never unloads images with thread-local storage: a rebuilt
+//! plugin must get a fresh file name, otherwise `dlopen` returns the stale
+//! image that is still mapped. The flip side is that each distinct artifact
+//! stays mapped for the process lifetime, so long dev sessions accumulate
+//! address space; restarting the process reclaims it.
 
 use std::collections::BTreeMap;
 use std::path::Path;

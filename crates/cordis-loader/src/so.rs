@@ -78,6 +78,9 @@ impl std::error::Error for LoadError {}
 /// A loaded plugin library.
 ///
 /// Dropping the handle calls `plugin_dispose`.
+///
+/// On macOS the underlying image may stay mapped after the drop: dyld never
+/// unloads images with thread-local storage (see `host_runtime`).
 pub struct SoPlugin {
     path: PathBuf,
     version: u32,
@@ -85,7 +88,8 @@ pub struct SoPlugin {
     // the struct moves; the pending host tasks also hold clones, so the
     // library stays mapped until the last task drops (the plugin's boxed
     // futures are dropped through the plugin's drop function while the
-    // library is still loaded).
+    // library is still loaded). On macOS the image may be retained regardless
+    // (dylibs with thread-local storage are never unloaded by dyld).
     _library: Arc<Library>,
     /// Per-instance host runtime: owns every task the plugin spawned;
     /// disposed together with the plugin handle.
