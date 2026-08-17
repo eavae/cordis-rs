@@ -59,7 +59,7 @@ async fn loads_without_patches() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-d1a-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("cordis-include-a-{}", std::process::id()));
             let path = write_fixture(
                 &dir,
                 "base.yml",
@@ -92,7 +92,7 @@ async fn patch_disables_entry() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-d1b-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("cordis-include-b-{}", std::process::id()));
             let path = write_fixture(
                 &dir,
                 "base.yml",
@@ -131,7 +131,7 @@ async fn missing_file_with_initial_creates_it() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-d1c-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("cordis-include-c-{}", std::process::id()));
             fs::create_dir_all(&dir).unwrap();
             let path = dir.join("missing.yml").to_string_lossy().to_string();
             let root = Context::new();

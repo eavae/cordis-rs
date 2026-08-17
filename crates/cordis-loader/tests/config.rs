@@ -21,7 +21,7 @@ fn sample_config() -> Vec<EntryOptions> {
 
 #[test]
 fn parses_yaml_and_json_by_extension() {
-    let dir = std::env::temp_dir().join(format!("cordis-c7-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cordis-config-parse-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let yaml_path = dir.join("cordis.yml");
     let json_path = dir.join("cordis.json");
@@ -78,7 +78,7 @@ fn expr_survives_round_trip() {
 
 #[test]
 fn atomic_write_creates_and_readonly_fails_safely() {
-    let dir = std::env::temp_dir().join(format!("cordis-c7w-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cordis-config-write-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
     let path: PathBuf = dir.join("cordis.yml");
 

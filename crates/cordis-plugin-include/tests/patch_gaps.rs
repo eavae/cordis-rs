@@ -153,7 +153,8 @@ async fn patch_overrides_group_inject_intercept_isolate() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-g1a-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("cordis-patch-gap-a-{}", std::process::id()));
             let mut patch = PatchOptions {
                 id: Some("1".to_string()),
                 ..Default::default()
@@ -195,7 +196,8 @@ async fn patch_writes_arbitrary_extra_key_and_round_trips() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-g1b-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("cordis-patch-gap-b-{}", std::process::id()));
             let mut patch = PatchOptions {
                 id: Some("1".to_string()),
                 ..Default::default()
@@ -237,7 +239,8 @@ async fn patch_targets_two_level_nested_entry() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-g1c-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("cordis-patch-gap-c-{}", std::process::id()));
             let fixture = r#"
 - id: outer
   name: "@cordisjs/plugin-group"
@@ -270,7 +273,8 @@ async fn patch_inserts_into_nested_subgroup() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-g1d-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("cordis-patch-gap-d-{}", std::process::id()));
             let fixture = r#"
 - id: outer
   name: "@cordisjs/plugin-group"
@@ -323,7 +327,8 @@ async fn patch_null_clears_disabled_and_config() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-g1e-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("cordis-patch-gap-e-{}", std::process::id()));
             let patch = PatchOptions {
                 id: Some("1".to_string()),
                 disabled: Override::Clear,
@@ -353,7 +358,8 @@ async fn patch_after_root_insert_matches_js_semantics() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-g1f-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("cordis-patch-gap-f-{}", std::process::id()));
             let insert = PatchOptions {
                 insert: Some(vec![EntryOptions {
                     id: "new1".to_string(),
@@ -406,7 +412,8 @@ async fn patch_name_mismatch_warns_and_skips() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-g1g-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("cordis-patch-gap-g-{}", std::process::id()));
             let patch = PatchOptions {
                 id: Some("1".to_string()),
                 name: Some("wrong-name".to_string()),
@@ -439,7 +446,8 @@ async fn patch_matching_name_applies() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-g1h-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("cordis-patch-gap-h-{}", std::process::id()));
             let patch = PatchOptions {
                 id: Some("1".to_string()),
                 name: Some("greeter".to_string()),
@@ -472,7 +480,8 @@ async fn patch_nonexistent_id_warns() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-g1i-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("cordis-patch-gap-i-{}", std::process::id()));
             let patch = PatchOptions {
                 id: Some("nope".to_string()),
                 disabled: Override::Set(true),
@@ -504,7 +513,8 @@ async fn patch_insert_into_non_group_warns() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-g1j-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("cordis-patch-gap-j-{}", std::process::id()));
             let patch = PatchOptions {
                 id: Some("1".to_string()),
                 insert: Some(vec![EntryOptions {
