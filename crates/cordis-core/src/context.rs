@@ -99,6 +99,11 @@ pub(crate) struct StoreEntry {
     pub name: String,
     pub value: Rc<dyn Any>,
     pub fiber: std::rc::Weak<Fiber>,
+    /// The inner state of the context on which the service was provided
+    /// (the JS `symbols.shadow`). Only the inner is kept: holding a full
+    /// [`Context`] here would strongly pin the provider fiber and create an
+    /// `Rc` cycle through `Fiber::resolved`.
+    pub(crate) shadow_inner: Rc<ContextInner>,
     pub check: Option<ServiceCheck>,
     pub invoke: Option<InvokeFn>,
 }
@@ -180,6 +185,28 @@ impl ContextInner {
         let entry = self.lookup_non_strict(name)?;
         entry.value.clone().downcast::<S>().ok()
     }
+}
+
+/// The recorded shadow of a registered service (mirrors the JS
+/// `symbols.shadow` symbol).
+///
+/// In the TS reference the context a service belongs to is injected
+/// implicitly through a Proxy (`this.ctx[symbols.shadow]`). The Rust port
+/// (story card B10) passes contexts explicitly instead, and records the
+/// shadow here so the information stays queryable without hidden state: the
+/// service's own context is the one it was provided on, and the provider
+/// fiber is the fiber that registered it.
+#[derive(Clone, Debug)]
+pub struct ServiceShadow {
+    /// The service name (its [`Service::NAME`]).
+    pub name: String,
+    /// The context on which the service was provided. Resolving services
+    /// through this context follows the provider's isolate and intercept
+    /// chains.
+    pub ctx: Context,
+    /// The provider fiber (weak, mirroring how the TS runtime keeps fiber
+    /// references in `Message`).
+    pub fiber: std::rc::Weak<Fiber>,
 }
 
 /// The core object handed to plugins.
@@ -286,6 +313,31 @@ impl Context {
             .by_label
             .values()
             .any(|entry| entry.name == name)
+    }
+
+    /// Returns the recorded shadow of a registered service (mirrors reading
+    /// `ctx[symbols.shadow]` in the TS reference).
+    ///
+    /// The shadow is the context the service was provided on: its own
+    /// scope, with the provider's isolate and intercept chains. Unlike the
+    /// TS proxy, the Rust port never injects this context implicitly —
+    /// service methods receive contexts explicitly (story card B10) — so
+    /// this query exists to keep the information observable and auditable.
+    ///
+    /// The lookup is non-strict: the shadow remains available as long as the
+    /// entry exists, even while the provider fiber is unloading or failed
+    /// (mirrors the service object keeping its `ctx` in JS).
+    pub fn shadow_of(&self, name: &str) -> Option<ServiceShadow> {
+        let entry = self.inner.lookup_non_strict(name)?;
+        let fiber = entry.fiber.upgrade()?;
+        Some(ServiceShadow {
+            name: entry.name.clone(),
+            ctx: Context {
+                inner: entry.shadow_inner.clone(),
+                fiber: fiber.clone(),
+            },
+            fiber: entry.fiber.clone(),
+        })
     }
 
     /// Moves a store entry from `old_label` to `new_label` when its provider
@@ -438,12 +490,14 @@ impl Context {
                 }
                 let name = entry.name.clone();
                 let fiber = entry.fiber.clone();
+                let shadow_inner = entry.shadow_inner.clone();
                 let check = entry.check.clone();
                 let invoke = entry.invoke.clone();
                 *entry = Rc::new(StoreEntry {
                     name,
                     value,
                     fiber,
+                    shadow_inner,
                     check,
                     invoke,
                 });
@@ -527,6 +581,7 @@ impl Context {
                         name: name.clone(),
                         value,
                         fiber: Rc::downgrade(&ctx.fiber),
+                        shadow_inner: ctx.inner.clone(),
                         check: check.clone(),
                         invoke: invoke.clone(),
                     });

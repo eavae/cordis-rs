@@ -13,7 +13,7 @@ pub mod reflect;
 pub mod registry;
 pub mod service;
 
-pub use context::{Context, Label, MixinAccessor, MixinGet, MixinSet};
+pub use context::{Context, Label, MixinAccessor, MixinGet, MixinSet, ServiceShadow};
 pub use cordis_macros::{inject, service};
 pub use error::{ConfigValidator, ValidationError, ValidationIssue};
 pub use events::{
