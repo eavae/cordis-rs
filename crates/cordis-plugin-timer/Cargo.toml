@@ -13,3 +13,6 @@ workspace = true
 [dependencies]
 cordis-core = { path = "../cordis-core" }
 tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
