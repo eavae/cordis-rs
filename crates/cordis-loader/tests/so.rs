@@ -47,6 +47,10 @@ extern "C" fn log_message(message: *const std::ffi::c_char) {
 fn load_create_and_drop_disposes() {
     let _guard = lock_fixture();
     let path = fixture_path("cordis_fixture_hello");
+    // Keep the image mapped after `SoPlugin`'s dlclose so the fixture's
+    // process-global counter is still visible to `dispose_count` (Linux
+    // unloads the image at refcount 0; macOS dyld retains it).
+    let _keepalive = unsafe { Library::new(&path) }.unwrap();
     // SAFETY: the fixture is built by the workspace and used on one thread.
     let mut plugin = unsafe { SoPlugin::load(&path) }.expect("fixture must load");
     assert_eq!(plugin.version(), PLUGIN_API_VERSION);
@@ -84,6 +88,9 @@ fn dispose_count(path: &std::path::Path) -> u32 {
 fn repeated_loads_are_independent() {
     let _guard = lock_fixture();
     let path = fixture_path("cordis_fixture_hello");
+    // Keep the image mapped across the drops so `dispose_count` reopens the
+    // same instance (Linux unloads the image at refcount 0).
+    let _keepalive = unsafe { Library::new(&path) }.unwrap();
     // SAFETY: each plugin is used on one thread.
     let mut first = unsafe { SoPlugin::load(&path) }.unwrap();
     let mut second = unsafe { SoPlugin::load(&path) }.unwrap();
