@@ -6,6 +6,7 @@ license = "MIT"
 
 [lib]
 crate-type = ["cdylib"]
+test = false
 
 [dependencies]
 cordis-sdk = { path = "../../crates/cordis-sdk", default-features = false }

@@ -6,6 +6,7 @@ license = "MIT"
 
 [lib]
 crate-type = ["cdylib"]
+test = false
 
 [lints.rust]
 unsafe_code = "allow"
