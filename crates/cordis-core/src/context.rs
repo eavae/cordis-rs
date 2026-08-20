@@ -450,10 +450,13 @@ impl Context {
                     .map(|entry| entry.value.clone()))
             })
         });
-        let mut future =
-            self.events()
-                .expect("events service")
-                .waterfall(self, "internal/get", &args, tail);
+        let mut future = self.events().expect("events service").waterfall(
+            self,
+            "internal/get",
+            &args,
+            None,
+            tail,
+        );
         match poll_once(&mut future) {
             Poll::Ready(Ok(result)) => result,
             Poll::Ready(Err(_)) => None,
@@ -622,10 +625,13 @@ impl Context {
                 Ok(result)
             })
         });
-        let mut future =
-            self.events()
-                .expect("events service")
-                .waterfall(self, "internal/set", &args, tail);
+        let mut future = self.events().expect("events service").waterfall(
+            self,
+            "internal/set",
+            &args,
+            None,
+            tail,
+        );
         match poll_once(&mut future) {
             Poll::Ready(Ok(Some(result)))
                 if result.downcast_ref::<bool>().copied().unwrap_or(false) =>
@@ -1310,16 +1316,18 @@ impl Context {
     ///
     /// The chain is awaited as a whole; async listeners may call the `next`
     /// function and await it (mirrors the JS waterfall, where async
-    /// listeners make the whole chain awaitable).
+    /// listeners make the whole chain awaitable). An optional `this_arg`
+    /// filters listeners by scope (mirrors the JS `thisArg`).
     pub async fn waterfall(
         &self,
         event: &str,
         args: &[Rc<dyn Any>],
+        this_arg: Option<&dyn EventFilter>,
         tail: crate::events::WaterfallNext,
     ) -> Result<Option<Rc<dyn Any>>, Box<dyn std::error::Error>> {
         self.events()
             .expect("events service")
-            .waterfall(self, event, args, tail)
+            .waterfall(self, event, args, this_arg, tail)
             .await
     }
 

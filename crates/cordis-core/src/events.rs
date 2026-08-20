@@ -402,16 +402,18 @@ impl EventsService {
     ///
     /// The chain is awaited as a whole: listeners may be asynchronous and
     /// `next()` returns a future (mirrors the JS waterfall, where async
-    /// listeners make the whole chain awaitable).
+    /// listeners make the whole chain awaitable). An optional `this_arg`
+    /// filters listeners by scope (mirrors the JS `thisArg`).
     pub fn waterfall(
         &self,
         ctx: &Context,
         event: &str,
         args: &[Rc<dyn Any>],
+        this_arg: Option<&dyn EventFilter>,
         tail: WaterfallNext,
     ) -> BoxFuture<'static, ListenerResult> {
         let mut callbacks = self
-            .resolve("waterfall", event, args, None, ctx)
+            .resolve("waterfall", event, args, this_arg, ctx)
             .into_iter()
             .collect::<Vec<_>>();
         let first = if callbacks.is_empty() {

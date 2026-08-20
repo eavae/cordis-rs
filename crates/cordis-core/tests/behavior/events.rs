@@ -534,6 +534,7 @@ async fn events_ctx_waterfall() {
         .waterfall(
             "test/waterfall",
             &[Rc::new(1i64)],
+            None,
             Rc::new(|| {
                 Box::pin(async { Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new(2i64))) })
             }),
@@ -555,6 +556,7 @@ async fn events_ctx_waterfall() {
         .waterfall(
             "test/waterfall",
             &[Rc::new(1i64)],
+            None,
             Rc::new(|| {
                 Box::pin(async { Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new(2i64))) })
             }),
@@ -563,6 +565,77 @@ async fn events_ctx_waterfall() {
         .unwrap()
         .expect("result");
     assert_eq!(result.downcast_ref::<i64>().unwrap(), &3);
+}
+
+#[tokio::test]
+async fn events_ctx_waterfall_filter() {
+    let root = Context::new();
+    let count = Rc::new(Cell::new(0u32));
+    {
+        let count = count.clone();
+        root.on_filtered(
+            "test/waterfall-filter",
+            event_listener_async(move |args| {
+                let count = count.clone();
+                async move {
+                    count.set(count.get() + 1);
+                    let value = args[0].downcast_ref::<i64>().expect("value");
+                    let result: Option<Rc<dyn Any>> = Some(Rc::new(*value + 10));
+                    Ok(result)
+                }
+            }),
+            EventOptions::default(),
+            flag_filter(true),
+        )
+        .unwrap();
+    }
+
+    let tail: WaterfallNext = Rc::new(|| {
+        Box::pin(async { Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new(1i64))) })
+    });
+
+    // Unfiltered: the scoped listener receives the event.
+    let result = root
+        .waterfall(
+            "test/waterfall-filter",
+            &[Rc::new(1i64)],
+            None,
+            tail.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("result");
+    assert_eq!(result.downcast_ref::<i64>().unwrap(), &11);
+    assert_eq!(count.get(), 1);
+
+    // Filter rejects: the listener is skipped and the chain falls back to
+    // the tail.
+    let result = root
+        .waterfall(
+            "test/waterfall-filter",
+            &[Rc::new(1i64)],
+            Some(&Session { flag: false }),
+            tail.clone(),
+        )
+        .await
+        .unwrap()
+        .expect("result");
+    assert_eq!(result.downcast_ref::<i64>().unwrap(), &1);
+    assert_eq!(count.get(), 1);
+
+    // Filter accepts: the scoped listener runs again.
+    let result = root
+        .waterfall(
+            "test/waterfall-filter",
+            &[Rc::new(1i64)],
+            Some(&Session { flag: true }),
+            tail,
+        )
+        .await
+        .unwrap()
+        .expect("result");
+    assert_eq!(result.downcast_ref::<i64>().unwrap(), &11);
+    assert_eq!(count.get(), 2);
 }
 
 #[tokio::test]
@@ -607,7 +680,12 @@ async fn events_ctx_waterfall_async_chain() {
         })
     });
     let result = root
-        .waterfall("async-waterfall", &[Rc::new("hello".to_string())], tail)
+        .waterfall(
+            "async-waterfall",
+            &[Rc::new("hello".to_string())],
+            None,
+            tail,
+        )
         .await
         .unwrap()
         .expect("result");
@@ -622,6 +700,7 @@ async fn events_ctx_waterfall_async_chain() {
         .waterfall(
             "async-waterfall",
             &[Rc::new("blocked words".to_string())],
+            None,
             tail,
         )
         .await
