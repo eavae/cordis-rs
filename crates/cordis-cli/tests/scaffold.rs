@@ -4,17 +4,13 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-fn target_dir() -> PathBuf {
-    let mut path = std::env::current_dir().unwrap();
-    path.push("..");
-    path.push("..");
-    path.push("target");
-    path.push("debug");
-    path
+/// Path to the built `cordis-cli` binary; `cargo test` sets this for the
+/// integration tests of the package that owns the bin target.
+fn cli_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cordis-cli")
 }
 
 /// The generated project builds and its example `.so` plugin loads (visible
@@ -23,7 +19,7 @@ fn target_dir() -> PathBuf {
 fn generated_project_builds_and_runs() {
     let dir = std::env::temp_dir().join(format!("cordis-cli-scaffold-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    let output = Command::new(target_dir().join("cordis-cli"))
+    let output = Command::new(cli_bin())
         .arg("create")
         .arg(&dir)
         .output()
@@ -42,6 +38,10 @@ fn generated_project_builds_and_runs() {
     let mut build = Command::new("cargo")
         .arg("build")
         .current_dir(&dir)
+        // The generated project must build into its own target dir even when
+        // the parent test run overrides CARGO_TARGET_DIR.
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

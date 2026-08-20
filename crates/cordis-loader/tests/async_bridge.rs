@@ -25,17 +25,13 @@ fn reset_counters() {
 }
 
 fn fixture_path() -> PathBuf {
-    let mut path = std::env::current_dir().unwrap();
-    path.push("..");
-    path.push("..");
-    path.push("target");
-    path.push("debug");
-    #[cfg(target_os = "macos")]
-    let file = "libcordis_fixture_spawn.dylib";
-    #[cfg(target_os = "linux")]
-    let file = "libcordis_fixture_spawn.so";
-    path.push(file);
-    path
+    // `cargo test` does not emit fixture cdylibs; build them on demand.
+    cordis_fixture_builder::ensure_fixtures(&["cordis-fixture-spawn"]);
+    cordis_fixture_builder::artifact_dir().join(if cfg!(target_os = "macos") {
+        "libcordis_fixture_spawn.dylib"
+    } else {
+        "libcordis_fixture_spawn.so"
+    })
 }
 
 extern "C" fn log_message(message: *const std::ffi::c_char) {

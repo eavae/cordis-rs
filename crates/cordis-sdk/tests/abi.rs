@@ -10,11 +10,10 @@ use libloading::Library;
 static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 fn fixture_path(name: &str) -> PathBuf {
-    let mut path = std::env::current_dir().unwrap();
-    path.push("..");
-    path.push("..");
-    path.push("target");
-    path.push("debug");
+    // `cargo test` does not emit fixture cdylibs; build them on demand.
+    let package = name.replace('_', "-");
+    cordis_fixture_builder::ensure_fixtures(&[package.as_str()]);
+    let mut path = cordis_fixture_builder::artifact_dir();
     #[cfg(target_os = "macos")]
     let file = format!("lib{name}.dylib");
     #[cfg(target_os = "linux")]

@@ -25,3 +25,4 @@ tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 libloading.workspace = true
+cordis-fixture-builder = { path = "../../fixtures/builder" }

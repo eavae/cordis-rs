@@ -19,6 +19,7 @@ members = [
     "fixtures/spawn-fixture",
     "fixtures/meta",
     "fixtures/context",
+    "fixtures/builder",
 ]
 
 [workspace.package]

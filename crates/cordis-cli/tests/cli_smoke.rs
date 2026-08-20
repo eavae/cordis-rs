@@ -5,13 +5,20 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-fn target_dir() -> PathBuf {
-    let mut path = std::env::current_dir().unwrap();
-    path.push("..");
-    path.push("..");
-    path.push("target");
-    path.push("debug");
-    path
+/// Path to the built `cordis-cli` binary; `cargo test` sets this for the
+/// integration tests of the package that owns the bin target.
+fn cli_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_cordis-cli")
+}
+
+fn fixture_path() -> PathBuf {
+    // `cargo test` does not emit fixture cdylibs; build them on demand.
+    cordis_fixture_builder::ensure_fixtures(&["cordis-fixture-meta"]);
+    cordis_fixture_builder::artifact_dir().join(if cfg!(target_os = "macos") {
+        "libcordis_fixture_meta.dylib"
+    } else {
+        "libcordis_fixture_meta.so"
+    })
 }
 
 fn temp_dir(tag: &str) -> PathBuf {
@@ -27,17 +34,12 @@ fn cli_starts_and_exits_on_signal() {
     let dir = temp_dir("smoke");
     let plugins = dir.join("plugins");
     fs::create_dir_all(&plugins).unwrap();
-    let fixture = target_dir().join(if cfg!(target_os = "macos") {
-        "libcordis_fixture_meta.dylib"
-    } else {
-        "libcordis_fixture_meta.so"
-    });
     let plugin_path = plugins.join(if cfg!(target_os = "macos") {
         "meta.dylib"
     } else {
         "meta.so"
     });
-    fs::copy(&fixture, &plugin_path).unwrap();
+    fs::copy(fixture_path(), &plugin_path).unwrap();
     fs::write(
         dir.join("cordis.yml"),
         "- id: '1'\n  name: cordis-meta\n  config:\n    value: 1\n",
@@ -45,7 +47,7 @@ fn cli_starts_and_exits_on_signal() {
     .unwrap();
 
     let ready_file = dir.join("ready.signal");
-    let mut child = Command::new(target_dir().join("cordis-cli"))
+    let mut child = Command::new(cli_bin())
         .current_dir(&dir)
         .arg("-c")
         .arg(dir.join("cordis.yml"))
@@ -86,13 +88,8 @@ fn cli_accepts_cordis_shared_env() {
     let dir = temp_dir("shared");
     let plugins = dir.join("plugins");
     fs::create_dir_all(&plugins).unwrap();
-    let fixture = target_dir().join(if cfg!(target_os = "macos") {
-        "libcordis_fixture_meta.dylib"
-    } else {
-        "libcordis_fixture_meta.so"
-    });
     fs::copy(
-        &fixture,
+        fixture_path(),
         plugins.join(if cfg!(target_os = "macos") {
             "meta.dylib"
         } else {
@@ -106,7 +103,7 @@ fn cli_accepts_cordis_shared_env() {
     )
     .unwrap();
     let ready_file = dir.join("ready.signal");
-    let mut child = Command::new(target_dir().join("cordis-cli"))
+    let mut child = Command::new(cli_bin())
         .current_dir(&dir)
         .arg("-c")
         .arg(dir.join("cordis.yml"))
@@ -149,13 +146,8 @@ fn cli_fails_on_invalid_plugin_config() {
     let dir = temp_dir("invalid");
     let plugins = dir.join("plugins");
     fs::create_dir_all(&plugins).unwrap();
-    let fixture = target_dir().join(if cfg!(target_os = "macos") {
-        "libcordis_fixture_meta.dylib"
-    } else {
-        "libcordis_fixture_meta.so"
-    });
     fs::copy(
-        &fixture,
+        fixture_path(),
         plugins.join(if cfg!(target_os = "macos") {
             "meta.dylib"
         } else {
@@ -169,7 +161,7 @@ fn cli_fails_on_invalid_plugin_config() {
     )
     .unwrap();
 
-    let output = Command::new(target_dir().join("cordis-cli"))
+    let output = Command::new(cli_bin())
         .current_dir(&dir)
         .arg("-c")
         .arg(dir.join("cordis.yml"))

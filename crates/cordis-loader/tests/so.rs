@@ -1,8 +1,8 @@
 //! Host-side dynamic loader (`SoPlugin`).
 //!
-//! Fixtures are workspace cdylib members, so `cargo test --workspace`
-//! builds `libcordis_fixture_*.dylib` / `libcordis_fixture_*.so` into
-//! `target/debug` before these tests run.
+//! Fixture cdylibs are built on demand (`cargo build -p cordis-fixture-*`)
+//! before these tests open them, so a plain `cargo test --workspace` works
+//! on a clean checkout.
 
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
@@ -21,11 +21,10 @@ fn lock_fixture() -> MutexGuard<'static, ()> {
 }
 
 fn fixture_path(name: &str) -> PathBuf {
-    let mut path = std::env::current_dir().unwrap();
-    path.push("..");
-    path.push("..");
-    path.push("target");
-    path.push("debug");
+    // `cargo test` does not emit fixture cdylibs; build them on demand.
+    let package = name.replace('_', "-");
+    cordis_fixture_builder::ensure_fixtures(&[package.as_str()]);
+    let mut path = cordis_fixture_builder::artifact_dir();
     #[cfg(target_os = "macos")]
     let file = format!("lib{name}.dylib");
     #[cfg(target_os = "linux")]
