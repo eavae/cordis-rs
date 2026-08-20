@@ -1274,6 +1274,47 @@ impl Context {
             .emit_with(self, event, args, Some(this_arg));
     }
 
+    /// Resolves a listener snapshot without invoking the listeners (mirrors
+    /// the JS `_resolve` split used by publication boundaries that must
+    /// capture the snapshot before committing a mutation).
+    pub fn resolve_emit(
+        &self,
+        event: &str,
+        args: &[Rc<dyn Any>],
+        this_arg: Option<&dyn EventFilter>,
+    ) -> Vec<EventCallback> {
+        self.events()
+            .expect("events service")
+            .resolve_callbacks(self, event, args, this_arg)
+    }
+
+    /// Invokes a previously resolved listener snapshot with per-listener
+    /// containment: failures are logged, never propagated.
+    pub fn emit_resolved_contained(
+        &self,
+        event: &str,
+        args: &[Rc<dyn Any>],
+        callbacks: Vec<EventCallback>,
+    ) {
+        self.events()
+            .expect("events service")
+            .emit_resolved_contained(self, event, callbacks, args);
+    }
+
+    /// Invokes a previously resolved listener snapshot with veto semantics:
+    /// the first synchronous failure propagates; asynchronous rejections are
+    /// logged and cannot veto the synchronous boundary.
+    pub fn emit_resolved_veto(
+        &self,
+        event: &str,
+        args: &[Rc<dyn Any>],
+        callbacks: Vec<EventCallback>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.events()
+            .expect("events service")
+            .emit_resolved_veto(self, event, callbacks, args)
+    }
+
     /// Runs listeners concurrently (mirrors `ctx.parallel`).
     pub async fn parallel(
         &self,
@@ -1284,6 +1325,20 @@ impl Context {
         self.events()
             .expect("events service")
             .parallel(self, event, args, this_arg)
+            .await
+    }
+
+    /// Awaits an already-resolved listener snapshot together (mirrors the
+    /// JS split between `_resolve` and a later `parallel` dispatch).
+    pub async fn parallel_resolved(
+        &self,
+        event: &str,
+        callbacks: Vec<EventCallback>,
+        args: &[Rc<dyn Any>],
+    ) -> Result<(), ParallelError> {
+        self.events()
+            .expect("events service")
+            .parallel_resolved(event, callbacks, args)
             .await
     }
 

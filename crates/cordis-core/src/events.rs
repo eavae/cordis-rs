@@ -337,6 +337,18 @@ impl EventsService {
         this_arg: Option<&dyn EventFilter>,
     ) -> Result<(), ParallelError> {
         let callbacks = self.resolve("emit", event, args, this_arg, ctx);
+        self.parallel_resolved(event, callbacks, args).await
+    }
+
+    /// Awaits an already-resolved listener snapshot together, aggregating
+    /// errors (mirrors `Promise.allSettled` + `AggregateError`). Every
+    /// listener is started before any completion is awaited.
+    pub async fn parallel_resolved(
+        &self,
+        _event: &str,
+        callbacks: Vec<EventCallback>,
+        args: &[Rc<dyn Any>],
+    ) -> Result<(), ParallelError> {
         let results =
             futures_util::future::join_all(callbacks.into_iter().map(|callback| callback(args)))
                 .await;
@@ -457,6 +469,83 @@ impl EventsService {
                 }
             }
         }
+    }
+
+    /// Resolves the listener snapshot for one dispatch without invoking the
+    /// listeners. Fires `internal/dispatch` hooks and applies scope filters
+    /// exactly like the other dispatch modes, so a caller can capture the
+    /// snapshot at one point and invoke it later (the JS `_resolve` split).
+    pub fn resolve_callbacks(
+        &self,
+        ctx: &Context,
+        event: &str,
+        args: &[Rc<dyn Any>],
+        this_arg: Option<&dyn EventFilter>,
+    ) -> Vec<EventCallback> {
+        self.resolve("emit", event, args, this_arg, ctx)
+    }
+
+    /// Invokes an already-resolved listener snapshot with per-listener
+    /// containment: every failure is logged, never propagated, so a caller's
+    /// committed mutation cannot fail because an observer threw.
+    pub fn emit_resolved_contained(
+        &self,
+        ctx: &Context,
+        event: &str,
+        callbacks: Vec<EventCallback>,
+        args: &[Rc<dyn Any>],
+    ) {
+        let event = event.to_string();
+        for callback in callbacks {
+            let mut future = callback(args);
+            match poll_once(&mut future) {
+                Poll::Ready(Ok(_)) => {}
+                Poll::Ready(Err(error)) => {
+                    let logger = ctx.logger();
+                    logger.warn(format!("{event} listener threw: {error}"));
+                }
+                Poll::Pending => {
+                    let logger = ctx.logger();
+                    let event = event.clone();
+                    tokio::task::spawn_local(async move {
+                        if let Err(error) = future.await {
+                            logger.warn(format!("{event} listener rejected: {error}"));
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /// Invokes an already-resolved listener snapshot with veto semantics: the
+    /// first synchronous failure propagates and later listeners do not run;
+    /// asynchronous rejections are logged and cannot veto this synchronous
+    /// boundary. Used by publication points such as `session/created`.
+    pub fn emit_resolved_veto(
+        &self,
+        ctx: &Context,
+        event: &str,
+        callbacks: Vec<EventCallback>,
+        args: &[Rc<dyn Any>],
+    ) -> Result<(), Box<dyn Error>> {
+        let event = event.to_string();
+        for callback in callbacks {
+            let mut future = callback(args);
+            match poll_once(&mut future) {
+                Poll::Ready(Ok(_)) => {}
+                Poll::Ready(Err(error)) => return Err(error),
+                Poll::Pending => {
+                    let logger = ctx.logger();
+                    let event = event.clone();
+                    tokio::task::spawn_local(async move {
+                        if let Err(error) = future.await {
+                            logger.warn(format!("{event} listener rejected: {error}"));
+                        }
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn resolve(
