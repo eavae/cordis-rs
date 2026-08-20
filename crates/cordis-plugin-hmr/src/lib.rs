@@ -156,7 +156,11 @@ impl FileWatcher {
         let handle = tokio::task::spawn_local(async move {
             let mut pending: Option<PathBuf>;
             while let Some(path) = event_rx.recv().await {
-                if ignored(&path) {
+                // Directory events are noise for HMR: notify reports the
+                // parent directory when entries change, and routing a
+                // directory as a change would clobber the debounce slot with
+                // a path that can never be a config or source file.
+                if path.is_dir() || ignored(&path) {
                     continue;
                 }
                 pending = Some(path);
