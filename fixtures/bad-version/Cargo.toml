@@ -8,7 +8,7 @@ license = "MIT"
 crate-type = ["cdylib"]
 
 [dependencies]
-cordis-sdk = { path = "../../crates/cordis-sdk" }
+cordis-sdk = { path = "../../crates/cordis-sdk", default-features = false }
 
 [lints.rust]
 unsafe_code = "allow"
