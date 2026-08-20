@@ -118,14 +118,14 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "cordis"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "cordis-core",
 ]
 
 [[package]]
 name = "cordis-cli"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-core"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "cordis-macros",
  "futures-util",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-loader"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "anyhow",
  "cordis-core",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-macros"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-plugin-group"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "cordis-core",
  "cordis-loader",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-plugin-hmr"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "anyhow",
  "cordis-core",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-plugin-include"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "anyhow",
  "cordis-core",
@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-plugin-logger-console"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "cordis-core",
  "serde",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-plugin-timer"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "cordis-core",
  "tokio",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-sdk"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "cordis-core",
  "cordis-macros",
@@ -282,7 +282,7 @@ dependencies = [
 
 [[package]]
 name = "cordis-utils"
-version = "0.1.0"
+version = "4.0.0-rc.8"
 dependencies = [
  "cordis-core",
  "tokio",

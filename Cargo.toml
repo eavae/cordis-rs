@@ -22,7 +22,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+# Kept in lockstep with the upstream `cordis` package version this port
+# follows (see README.md §Version alignment).
+version = "4.0.0-rc.8"
 edition = "2024"
 license = "MIT"
 rust-version = "1.97"
