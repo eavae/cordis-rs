@@ -9,9 +9,12 @@ plugin-based applications.
 - It is a from-scratch port. It is not affiliated with or endorsed by the
   official Cordis project.
 - Design rationale and story cards live under `docs/stories/` (Chinese);
-  the plugin ABI protocol is documented in `docs/abi.md` (中文) and
-  `docs/abi.en.md` (English).
-- User-facing documentation should be provided in both Chinese and English.
+  the plugin ABI protocol is documented in `docs/abi.md` (English) and
+  `docs/abi_cn.md` (中文).
+- User-facing documentation should be provided in both Chinese and English:
+  the default file (`README.md`, `docs/X.md`) is English, and the Chinese
+  translation lives next to it with a `_cn` suffix (`README_cn.md`,
+  `docs/X_cn.md`).
 
 ## Commit conventions
 
