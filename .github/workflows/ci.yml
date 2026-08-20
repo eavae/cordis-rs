@@ -37,6 +37,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Build fixtures
+        run: cargo build -p cordis-fixture-hello -p cordis-fixture-bad-version -p cordis-fixture-not-a-plugin -p cordis-fixture-spawn -p cordis-fixture-meta -p cordis-fixture-context
+
       - name: Test
         run: cargo test --workspace
 

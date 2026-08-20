@@ -11,6 +11,13 @@ cargo fmt --all --check
 echo "== clippy =="
 cargo clippy --workspace --all-targets -- -D warnings
 
+echo "== build fixtures =="
+# Build fixture cdylibs up front so the tests below never race nested
+# `cargo build` calls against the same target dir. `-p` selection keeps the
+# sdk dependency free of its abi-exports (a `--workspace` build would enable
+# them and hit duplicate symbols when linking the cdylibs on Linux).
+cargo build -p cordis-fixture-hello -p cordis-fixture-bad-version -p cordis-fixture-not-a-plugin -p cordis-fixture-spawn -p cordis-fixture-meta -p cordis-fixture-context
+
 echo "== test =="
 cargo test --workspace
 
