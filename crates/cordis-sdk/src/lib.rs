@@ -62,6 +62,7 @@ mod tests {
     ) {
     }
 
+    #[cfg(feature = "abi-exports")]
     #[test]
     fn abi_symbols_are_exported() {
         assert_eq!(plugin_api_version(), PLUGIN_API_VERSION);

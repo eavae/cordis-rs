@@ -15,7 +15,7 @@ all = "warn"
 
 [dependencies]
 cordis-core = { path = "../cordis-core" }
-cordis-sdk = { path = "../cordis-sdk" }
+cordis-sdk = { path = "../cordis-sdk", default-features = false }
 tokio.workspace = true
 libloading.workspace = true
 serde.workspace = true
