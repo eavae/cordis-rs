@@ -1,7 +1,7 @@
 //! Logger-console plugin.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use cordis_core::{LogValue, LoggerLevel, LoggerType, Message};
 use cordis_plugin_logger_console::{Align, ConsoleConfig, ConsoleExporter, LabelStyle};
@@ -17,11 +17,11 @@ fn message(r#type: LoggerType, name: &str, ts: u64, args: Vec<LogValue>) -> Mess
     }
 }
 
-fn exporter(config: ConsoleConfig, lines: Rc<RefCell<Vec<String>>>) -> Rc<ConsoleExporter> {
+fn exporter(config: ConsoleConfig, lines: Arc<Mutex<Vec<String>>>) -> Arc<ConsoleExporter> {
     let lines2 = lines;
     let exporter = ConsoleExporter::new(
         config,
-        Rc::new(move |line| lines2.borrow_mut().push(line.to_string())),
+        Arc::new(move |line| lines2.lock().unwrap().push(line.to_string())),
     );
     // Reset the diff baseline for deterministic output.
     let base = Message::now_millis();
@@ -33,7 +33,7 @@ fn exporter(config: ConsoleConfig, lines: Rc<RefCell<Vec<String>>>) -> Rc<Consol
 #[test]
 fn formats_error() {
     let base = Message::now_millis();
-    let lines = Rc::new(RefCell::new(Vec::new()));
+    let lines = Arc::new(Mutex::new(Vec::new()));
     let exp = exporter(
         ConsoleConfig {
             colors: 0,
@@ -56,7 +56,7 @@ fn formats_error() {
 #[test]
 fn formats_object_with_diff() {
     let base = Message::now_millis();
-    let lines = Rc::new(RefCell::new(Vec::new()));
+    let lines = Arc::new(Mutex::new(Vec::new()));
     let exp = exporter(
         ConsoleConfig {
             colors: 0,
@@ -79,7 +79,7 @@ fn formats_object_with_diff() {
 #[test]
 fn custom_formatter_and_escaped_percent() {
     let base = Message::now_millis();
-    let lines = Rc::new(RefCell::new(Vec::new()));
+    let lines = Arc::new(Mutex::new(Vec::new()));
     let exp = exporter(
         ConsoleConfig {
             colors: 0,
@@ -89,8 +89,9 @@ fn custom_formatter_and_escaped_percent() {
         lines,
     );
     exp.formatters
-        .borrow_mut()
-        .insert('x', Rc::new(|_| "custom".to_string()));
+        .lock()
+        .unwrap()
+        .insert('x', Arc::new(|_| "custom".to_string()));
     let rendered = exp.render(&message(
         LoggerType::Info,
         "test",
@@ -103,7 +104,7 @@ fn custom_formatter_and_escaped_percent() {
 #[test]
 fn label_style_right_align_multiline() {
     let base = Message::now_millis();
-    let lines = Rc::new(RefCell::new(Vec::new()));
+    let lines = Arc::new(Mutex::new(Vec::new()));
     let exp = exporter(
         ConsoleConfig {
             colors: 0,
@@ -134,7 +135,7 @@ fn label_style_right_align_multiline() {
 #[test]
 fn export_filters_by_level() {
     let root = cordis_core::Context::new();
-    let lines = Rc::new(RefCell::new(Vec::new()));
+    let lines = Arc::new(Mutex::new(Vec::new()));
     let lines2 = lines.clone();
     let exporter = ConsoleExporter::new(
         ConsoleConfig {
@@ -146,10 +147,10 @@ fn export_filters_by_level() {
             )])),
             ..Default::default()
         },
-        Rc::new(move |line| lines2.borrow_mut().push(line.to_string())),
+        Arc::new(move |line| lines2.lock().unwrap().push(line.to_string())),
     );
     root.logger().exporter(exporter).unwrap();
     root.logger().named("test").debug("hidden");
     root.logger().named("test").info("shown");
-    assert_eq!(lines.borrow().as_slice(), &["[I] test shown"]);
+    assert_eq!(lines.lock().unwrap().as_slice(), &["[I] test shown"]);
 }

@@ -1,9 +1,10 @@
 //! Ported cases from `packages/core/tests/service.spec.ts` and
 //! `decorator.spec.ts`.
 
-use std::cell::{Cell, RefCell};
 use std::future::Future;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::task::{Poll, Waker};
 
 use cordis_core::{
@@ -14,23 +15,23 @@ use cordis_core::{
 /// A manually completed future used to block a service `init`.
 #[derive(Clone)]
 struct Gate {
-    fired: Rc<Cell<bool>>,
-    waker: Rc<RefCell<Option<Waker>>>,
+    fired: Arc<AtomicBool>,
+    waker: Arc<Mutex<Option<Waker>>>,
 }
 
 impl Gate {
     fn new() -> Self {
         Self {
-            fired: Rc::new(Cell::new(false)),
-            waker: Rc::new(RefCell::new(None)),
+            fired: Arc::new(AtomicBool::new(false)),
+            waker: Arc::new(Mutex::new(None)),
         }
     }
 
     fn wait(&self) -> impl Future<Output = ()> {
         let gate = self.clone();
         std::future::poll_fn(move |cx| {
-            *gate.waker.borrow_mut() = Some(cx.waker().clone());
-            if gate.fired.get() {
+            *gate.waker.lock().unwrap() = Some(cx.waker().clone());
+            if gate.fired.load(Ordering::SeqCst) {
                 Poll::Ready(())
             } else {
                 Poll::Pending
@@ -39,8 +40,8 @@ impl Gate {
     }
 
     fn fire(&self) {
-        self.fired.set(true);
-        if let Some(waker) = self.waker.borrow_mut().take() {
+        self.fired.store(true, Ordering::SeqCst);
+        if let Some(waker) = self.waker.lock().unwrap().take() {
             waker.wake();
         }
     }
@@ -71,18 +72,18 @@ async fn service_pending_inject() {
     local
         .run_until(async {
             let root = Context::new();
-            let callback = Rc::new(Cell::new(0u32));
+            let callback = Arc::new(AtomicU32::new(0));
             let consumer = {
                 let callback = callback.clone();
                 root.inject(
                     &["foo"],
-                    Rc::new(move |_ctx: &Context, _config| {
-                        callback.set(callback.get() + 1);
+                    Arc::new(move |_ctx: &Context, _config| {
+                        callback.store(callback.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                         Effect::None
                     }),
                 )
             };
-            assert_eq!(callback.get(), 0);
+            assert_eq!(callback.load(Ordering::SeqCst), 0);
 
             // `Service.init` blocks the injector until it resolves.
             let gate = Gate::new();
@@ -93,8 +94,8 @@ async fn service_pending_inject() {
                         is_group: false,
                         name: None,
                         inject: Vec::new(),
-                        apply: Rc::new(move |ctx: &Context, _config| {
-                            drop(ctx.provide::<Foo>(Rc::new(Foo)).unwrap());
+                        apply: Arc::new(move |ctx: &Context, _config| {
+                            drop(ctx.provide::<Foo>(Arc::new(Foo)).unwrap());
                             let gate = gate.clone();
                             Effect::Async(Box::pin(async move {
                                 gate.wait().await;
@@ -106,12 +107,16 @@ async fn service_pending_inject() {
                 )
             };
             tokio::task::yield_now().await;
-            assert_eq!(callback.get(), 0, "inject blocked by Service.init");
+            assert_eq!(
+                callback.load(Ordering::SeqCst),
+                0,
+                "inject blocked by Service.init"
+            );
 
             gate.fire();
             provider.wait().await.unwrap();
             consumer.wait().await.unwrap();
-            assert_eq!(callback.get(), 1);
+            assert_eq!(callback.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -122,38 +127,43 @@ async fn service_check_gates_injector() {
     local
         .run_until(async {
             let root = Context::new();
-            let available = Rc::new(Cell::new(false));
-            let callback = Rc::new(Cell::new(0u32));
+            let available = Arc::new(AtomicBool::new(false));
+            let callback = Arc::new(AtomicU32::new(0));
             let consumer = {
                 let callback = callback.clone();
                 root.inject(
                     &["foo"],
-                    Rc::new(move |_ctx: &Context, _config| {
-                        callback.set(callback.get() + 1);
+                    Arc::new(move |_ctx: &Context, _config| {
+                        callback.store(callback.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                         Effect::None
                     }),
                 )
             };
             let check = {
                 let available = available.clone();
-                Rc::new(move |_ctx: &Context| available.get()) as Rc<dyn Fn(&Context) -> bool>
+                Arc::new(move |_ctx: &Context| available.load(Ordering::SeqCst))
+                    as Arc<dyn Fn(&Context) -> bool + Send + Sync>
             };
             let handle = root
-                .provide_str_with_check("foo", Rc::new(Foo), Some(check.clone()))
+                .provide_str_with_check("foo", Arc::new(Foo), Some(check.clone()))
                 .unwrap();
             consumer.wait().await.unwrap();
-            assert_eq!(callback.get(), 0, "check=false keeps the injector pending");
-            assert_eq!(consumer.state.get(), FiberState::Pending);
+            assert_eq!(
+                callback.load(Ordering::SeqCst),
+                0,
+                "check=false keeps the injector pending"
+            );
+            assert_eq!(consumer.state(), FiberState::Pending);
 
             // Re-provide with the check now passing to trigger re-resolution.
             handle.dispose().await.unwrap();
-            available.set(true);
+            available.store(true, Ordering::SeqCst);
             drop(
-                root.provide_str_with_check("foo", Rc::new(Foo), Some(check))
+                root.provide_str_with_check("foo", Arc::new(Foo), Some(check))
                     .unwrap(),
             );
             consumer.wait().await.unwrap();
-            assert_eq!(callback.get(), 1);
+            assert_eq!(callback.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -164,9 +174,9 @@ async fn service_multiple_injects() {
     local
         .run_until(async {
             let root = Context::new();
-            let foo_count = Rc::new(Cell::new(0u32));
-            let bar_count = Rc::new(Cell::new(0u32));
-            let qux_count = Rc::new(Cell::new(0u32));
+            let foo_count = Arc::new(AtomicU32::new(0));
+            let bar_count = Arc::new(AtomicU32::new(0));
+            let qux_count = Arc::new(AtomicU32::new(0));
 
             let foo_fiber = root.plugin(
                 &Plugin {
@@ -175,9 +185,9 @@ async fn service_multiple_injects() {
                     inject: vec![("qux".to_string(), None)],
                     apply: {
                         let foo_count = foo_count.clone();
-                        Rc::new(move |ctx: &Context, _config| {
-                            foo_count.set(foo_count.get() + 1);
-                            drop(ctx.provide::<Foo>(Rc::new(Foo)).unwrap());
+                        Arc::new(move |ctx: &Context, _config| {
+                            foo_count.store(foo_count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                            drop(ctx.provide::<Foo>(Arc::new(Foo)).unwrap());
                             Effect::None
                         })
                     },
@@ -191,8 +201,8 @@ async fn service_multiple_injects() {
                     inject: vec![("foo".to_string(), None), ("qux".to_string(), None)],
                     apply: {
                         let bar_count = bar_count.clone();
-                        Rc::new(move |_ctx: &Context, _config| {
-                            bar_count.set(bar_count.get() + 1);
+                        Arc::new(move |_ctx: &Context, _config| {
+                            bar_count.store(bar_count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                             Effect::None
                         })
                     },
@@ -206,9 +216,9 @@ async fn service_multiple_injects() {
                     inject: Vec::new(),
                     apply: {
                         let qux_count = qux_count.clone();
-                        Rc::new(move |ctx: &Context, _config| {
-                            qux_count.set(qux_count.get() + 1);
-                            drop(ctx.provide::<Qux>(Rc::new(Qux)).unwrap());
+                        Arc::new(move |ctx: &Context, _config| {
+                            qux_count.store(qux_count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                            drop(ctx.provide::<Qux>(Arc::new(Qux)).unwrap());
                             Effect::None
                         })
                     },
@@ -219,9 +229,9 @@ async fn service_multiple_injects() {
             foo_fiber.wait().await.unwrap();
             bar_fiber.wait().await.unwrap();
 
-            assert_eq!(foo_count.get(), 1);
-            assert_eq!(bar_count.get(), 1);
-            assert_eq!(qux_count.get(), 1);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
+            assert_eq!(bar_count.load(Ordering::SeqCst), 1);
+            assert_eq!(qux_count.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -235,8 +245,8 @@ async fn decorator_method_injection_equivalent() {
             // inject list declares `foo`; the method runs when `foo` becomes
             // available and its disposer runs when it is removed.
             let root = Context::new();
-            let callback = Rc::new(Cell::new(0u32));
-            let dispose_called = Rc::new(Cell::new(0u32));
+            let callback = Arc::new(AtomicU32::new(0));
+            let dispose_called = Arc::new(AtomicU32::new(0));
             let bar = Plugin {
                 is_group: false,
                 name: None,
@@ -244,27 +254,28 @@ async fn decorator_method_injection_equivalent() {
                 apply: {
                     let callback = callback.clone();
                     let dispose_called = dispose_called.clone();
-                    Rc::new(move |_ctx: &Context, _config| {
-                        callback.set(callback.get() + 1);
+                    Arc::new(move |_ctx: &Context, _config| {
+                        callback.store(callback.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                         let dispose_called = dispose_called.clone();
                         Effect::Disposer(sync_disposer(move || {
-                            dispose_called.set(dispose_called.get() + 1);
+                            dispose_called
+                                .store(dispose_called.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                         }))
                     })
                 },
             };
             let bar_fiber = root.plugin(&bar, None);
             tokio::task::yield_now().await;
-            assert_eq!(callback.get(), 0);
-            assert_eq!(dispose_called.get(), 0);
+            assert_eq!(callback.load(Ordering::SeqCst), 0);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 0);
 
             let foo_fiber = root.plugin(
                 &Plugin {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, _config| {
-                        drop(ctx.provide::<Foo>(Rc::new(Foo)).unwrap());
+                    apply: Arc::new(|ctx: &Context, _config| {
+                        drop(ctx.provide::<Foo>(Arc::new(Foo)).unwrap());
                         Effect::None
                     }),
                 },
@@ -272,13 +283,13 @@ async fn decorator_method_injection_equivalent() {
             );
             foo_fiber.wait().await.unwrap();
             bar_fiber.wait().await.unwrap();
-            assert_eq!(callback.get(), 1);
-            assert_eq!(dispose_called.get(), 0);
+            assert_eq!(callback.load(Ordering::SeqCst), 1);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 0);
 
             foo_fiber.dispose().await;
             bar_fiber.wait().await.unwrap();
-            assert_eq!(callback.get(), 1);
-            assert_eq!(dispose_called.get(), 1);
+            assert_eq!(callback.load(Ordering::SeqCst), 1);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -293,7 +304,7 @@ async fn service_macro_accessor() {
             let root = Context::new();
             assert!(root.database().is_none());
             drop(
-                root.provide::<Database>(Rc::new(Database {
+                root.provide::<Database>(Arc::new(Database {
                     url: "cordis://local".to_string(),
                 }))
                 .unwrap(),
@@ -302,7 +313,7 @@ async fn service_macro_accessor() {
             let accessor = root.database().expect("database");
             let typed = root.get::<Database>().expect("database");
             assert_eq!(accessor.url, "cordis://local");
-            assert!(Rc::ptr_eq(accessor.service(), &typed));
+            assert!(Arc::ptr_eq(accessor.service(), &typed));
         })
         .await;
 }
@@ -316,16 +327,16 @@ async fn service_macro_accessor_uses_shadow() {
 
             let root = Context::new();
             // The database lives only in the own realm.
-            let ctx_own = root.isolate("database", Rc::from("own"));
+            let ctx_own = root.isolate("database", Arc::from("own"));
             drop(
                 ctx_own
-                    .provide::<Database>(Rc::new(Database {
+                    .provide::<Database>(Arc::new(Database {
                         url: "cordis://own".to_string(),
                     }))
                     .unwrap(),
             );
             // The caller realm cannot see it.
-            let ctx_caller = root.isolate("database", Rc::from("caller"));
+            let ctx_caller = root.isolate("database", Arc::from("caller"));
             assert!(ctx_caller.database().is_none());
 
             // The macro accessor on a ShadowContext resolves through the
@@ -347,7 +358,7 @@ async fn service_macro_accessor_uses_shadow() {
 /// service.spec.ts.
 #[service]
 struct TraceableCounter {
-    value: Rc<Cell<i32>>,
+    value: Arc<AtomicI32>,
 }
 
 #[service]
@@ -360,9 +371,9 @@ impl TraceableCounter {
         drop(
             ctx.effect(
                 move || {
-                    value.set(value.get() + 1);
+                    value.store(value.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                     Effect::Disposer(sync_disposer(move || {
-                        value.set(value.get() - 1);
+                        value.store(value.load(Ordering::SeqCst) - 1, Ordering::SeqCst);
                     }))
                 },
                 "counter.increase",
@@ -393,13 +404,21 @@ async fn traceable_effect_follows_call_site() {
 
             let root = Context::new();
             drop(
-                root.provide::<TraceableCounter>(Rc::new(TraceableCounter {
-                    value: Rc::new(Cell::new(0)),
+                root.provide::<TraceableCounter>(Arc::new(TraceableCounter {
+                    value: Arc::new(AtomicI32::new(0)),
                 }))
                 .unwrap(),
             );
-            drop(root.provide::<TraceableFoo>(Rc::new(TraceableFoo)).unwrap());
-            let value = || root.get::<TraceableCounter>().unwrap().value.get();
+            drop(
+                root.provide::<TraceableFoo>(Arc::new(TraceableFoo))
+                    .unwrap(),
+            );
+            let value = || {
+                root.get::<TraceableCounter>()
+                    .unwrap()
+                    .value
+                    .load(Ordering::SeqCst)
+            };
 
             // Called through the root accessor: the effect lands on the
             // root fiber and survives the inject fiber's disposal.
@@ -410,7 +429,7 @@ async fn traceable_effect_follows_call_site() {
             // lands on the inject fiber.
             let fiber = root.inject(
                 &["traceable_foo"],
-                Rc::new(|ctx: &Context, _config| {
+                Arc::new(|ctx: &Context, _config| {
                     ctx.traceable_foo().expect("foo").increase();
                     Effect::None
                 }),
@@ -438,13 +457,13 @@ async fn service_events_during_init() {
             // The pending-inject spec resolves `Service.init` through an
             // event; verify the event-based wake-up path.
             let root = Context::new();
-            let callback = Rc::new(Cell::new(0u32));
+            let callback = Arc::new(AtomicU32::new(0));
             let consumer = {
                 let callback = callback.clone();
                 root.inject(
                     &["foo"],
-                    Rc::new(move |_ctx: &Context, _config| {
-                        callback.set(callback.get() + 1);
+                    Arc::new(move |_ctx: &Context, _config| {
+                        callback.store(callback.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                         Effect::None
                     }),
                 )
@@ -457,8 +476,8 @@ async fn service_events_during_init() {
                         is_group: false,
                         name: None,
                         inject: Vec::new(),
-                        apply: Rc::new(move |ctx: &Context, _config| {
-                            drop(ctx.provide::<Foo>(Rc::new(Foo)).unwrap());
+                        apply: Arc::new(move |ctx: &Context, _config| {
+                            drop(ctx.provide::<Foo>(Arc::new(Foo)).unwrap());
                             let gate = gate.clone();
                             Effect::Async(Box::pin(async move {
                                 gate.wait().await;
@@ -480,11 +499,11 @@ async fn service_events_during_init() {
                 .unwrap(),
             );
             tokio::task::yield_now().await;
-            assert_eq!(callback.get(), 0);
+            assert_eq!(callback.load(Ordering::SeqCst), 0);
             root.emit("custom-event", &[]);
             provider.wait().await.unwrap();
             consumer.wait().await.unwrap();
-            assert_eq!(callback.get(), 1);
+            assert_eq!(callback.load(Ordering::SeqCst), 1);
         })
         .await;
 }

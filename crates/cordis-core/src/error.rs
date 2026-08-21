@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::error::Error;
 use std::fmt;
-use std::rc::Rc;
+use std::sync::Arc;
 
 /// A single validation issue (mirrors `StandardSchemaV1.Issue`).
 #[derive(Debug, Clone, PartialEq)]
@@ -48,5 +48,6 @@ impl fmt::Display for ValidationError {
 
 impl Error for ValidationError {}
 
-/// A config validator (`fn(&Rc<dyn Any>) -> Result<(), ValidationError>`).
-pub type ConfigValidator = Rc<dyn Fn(&Rc<dyn Any>) -> Result<(), ValidationError>>;
+/// A config validator (`fn(&Arc<dyn Any + Send + Sync>) -> Result<(), ValidationError>`).
+pub type ConfigValidator =
+    Arc<dyn Fn(&Arc<dyn Any + Send + Sync>) -> Result<(), ValidationError> + Send + Sync>;

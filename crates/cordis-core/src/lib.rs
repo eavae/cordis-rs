@@ -31,6 +31,6 @@ pub use logger::{
 pub use reflect::ReflectService;
 pub use registry::{Plugin, RegistryService};
 pub use service::{
-    ApplyFn, AsyncDisposerStream, BoxFuture, Config, Disposer, Effect, EffectItem, Service,
-    async_disposer, sync_disposer,
+    ApplyFn, AsyncDisposerStream, BoxError, BoxFuture, Config, Disposer, Effect, EffectItem,
+    Service, async_disposer, sync_disposer,
 };

@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fs;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cordis_core::{Context, Effect};
 use cordis_loader::{EntryOptions, Loader};
@@ -31,20 +31,22 @@ fn include_opts(config: IncludeConfig) -> EntryOptions {
 }
 
 fn setup_loader(loader: &Loader) {
-    loader
-        .builtins
-        .borrow_mut()
-        .insert("@cordisjs/plugin-include".to_string(), include_plugin());
+    {
+        let _guard = loader.tree.write_lock.lock().unwrap();
+        let mut builtins = (*loader.builtins.load_full()).clone();
+        builtins.insert("@cordisjs/plugin-include".to_string(), include_plugin());
+        loader.builtins.store(Arc::new(builtins));
+    }
     loader.mock(
         "greeter",
-        Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
+        Arc::new(|ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
             let value = config
                 .downcast_ref::<serde_yaml_ng::Value>()
                 .and_then(|value| value.get("value"))
                 .and_then(|value| value.as_str())
                 .unwrap_or("default")
                 .to_string();
-            drop(ctx.provide_str("greeting", Rc::new(value)).unwrap());
+            drop(ctx.provide_str("greeting", Arc::new(value)).unwrap());
             Effect::None
         }),
     );

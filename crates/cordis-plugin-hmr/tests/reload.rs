@@ -1,8 +1,8 @@
 //! Reload execution (entry re-apply) and rollback.
 
-use std::cell::Cell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{Context, Effect, Plugin};
 use cordis_loader::{EntryOptions, Loader};
@@ -21,13 +21,13 @@ fn opts(name: &str) -> EntryOptions {
     }
 }
 
-fn plugin(applied: Rc<Cell<u32>>) -> Plugin {
+fn plugin(applied: Arc<AtomicU32>) -> Plugin {
     Plugin {
         is_group: false,
         name: None,
         inject: Vec::new(),
-        apply: Rc::new(move |_ctx: &Context, _config| {
-            applied.set(applied.get() + 1);
+        apply: Arc::new(move |_ctx: &Context, _config| {
+            applied.store(applied.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
             Effect::None
         }),
     }
@@ -42,28 +42,34 @@ async fn entry_reload_reapplies_with_new_plugin() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(Cell::new(0u32));
-            loader
-                .tree
-                .plugins
-                .borrow_mut()
-                .insert("p".to_string(), plugin(applied.clone()));
+            let applied = Arc::new(AtomicU32::new(0));
+            {
+                let _guard = loader.tree.write_lock.lock().unwrap();
+                let mut plugins = (*loader.tree.plugins.load_full()).clone();
+                plugins.insert("p".to_string(), plugin(applied.clone()));
+                loader.tree.plugins.store(Arc::new(plugins));
+            }
             let tree = loader.tree_handle();
             let entry = tree.create(opts("p"), None, 0);
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
-            let config_before = entry.options.borrow().config.clone();
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
+            let config_before = entry.options.lock().unwrap().config.clone();
 
             // Swap in a new apply and reload the entry.
-            loader
-                .tree
-                .plugins
-                .borrow_mut()
-                .insert("p".to_string(), plugin(applied.clone()));
+            {
+                let _guard = loader.tree.write_lock.lock().unwrap();
+                let mut plugins = (*loader.tree.plugins.load_full()).clone();
+                plugins.insert("p".to_string(), plugin(applied.clone()));
+                loader.tree.plugins.store(Arc::new(plugins));
+            }
             entry.reload().await.expect("reload");
-            assert_eq!(applied.get(), 2, "reload must re-apply the entry");
             assert_eq!(
-                entry.options.borrow().config,
+                applied.load(Ordering::SeqCst),
+                2,
+                "reload must re-apply the entry"
+            );
+            assert_eq!(
+                entry.options.lock().unwrap().config,
                 config_before,
                 "entry options (config) must be preserved"
             );
@@ -79,40 +85,47 @@ async fn reload_rolls_back_on_failure() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(Cell::new(0u32));
-            loader
-                .tree
-                .plugins
-                .borrow_mut()
-                .insert("p".to_string(), plugin(applied.clone()));
+            let applied = Arc::new(AtomicU32::new(0));
+            {
+                let _guard = loader.tree.write_lock.lock().unwrap();
+                let mut plugins = (*loader.tree.plugins.load_full()).clone();
+                plugins.insert("p".to_string(), plugin(applied.clone()));
+                loader.tree.plugins.store(Arc::new(plugins));
+            }
             let tree = loader.tree_handle();
             let entry = tree.create(opts("p"), None, 0);
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
 
             // The "new artifact" fails on apply.
-            loader.tree.plugins.borrow_mut().insert(
-                "p".to_string(),
-                Plugin {
-                    is_group: false,
-                    name: None,
-                    inject: Vec::new(),
-                    apply: Rc::new(|_ctx: &Context, _config| {
-                        Effect::Error("boom".to_string().into())
-                    }),
-                },
-            );
+            {
+                let _guard = loader.tree.write_lock.lock().unwrap();
+                let mut plugins = (*loader.tree.plugins.load_full()).clone();
+                plugins.insert(
+                    "p".to_string(),
+                    Plugin {
+                        is_group: false,
+                        name: None,
+                        inject: Vec::new(),
+                        apply: Arc::new(|_ctx: &Context, _config| {
+                            Effect::Error("boom".to_string().into())
+                        }),
+                    },
+                );
+                loader.tree.plugins.store(Arc::new(plugins));
+            }
             assert!(entry.reload().await.is_err(), "reload must fail");
 
             // Roll back to the previous plugin and re-apply.
-            loader
-                .tree
-                .plugins
-                .borrow_mut()
-                .insert("p".to_string(), plugin(applied.clone()));
+            {
+                let _guard = loader.tree.write_lock.lock().unwrap();
+                let mut plugins = (*loader.tree.plugins.load_full()).clone();
+                plugins.insert("p".to_string(), plugin(applied.clone()));
+                loader.tree.plugins.store(Arc::new(plugins));
+            }
             entry.reload().await.expect("rollback reload");
             assert_eq!(
-                applied.get(),
+                applied.load(Ordering::SeqCst),
                 2,
                 "rollback must restore the previous plugin"
             );

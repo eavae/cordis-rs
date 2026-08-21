@@ -9,12 +9,14 @@
 //!   merged by [`Context::resolve_config`].
 
 use std::any::Any;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::rc::{Rc, Weak};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::task::Poll;
+
+use arc_swap::ArcSwap;
 
 use crate::error::ConfigValidator;
 use crate::events::{
@@ -23,23 +25,30 @@ use crate::events::{
 use crate::fiber::{CordisError, EffectHandle, Fiber, FiberState};
 use crate::logger::Logger;
 use crate::registry::{Plugin, RegistryService};
-use crate::service::{ApplyFn, Config, Effect, Service, sync_disposer};
+use crate::service::{ApplyFn, BoxError, Config, Effect, Service, sync_disposer};
 use crate::{EventsService, LoggerService, ReflectService};
 
 static NEXT_LABEL_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A service availability check (`Service::check` in the TS reference).
-pub type ServiceCheck = Rc<dyn Fn(&Context) -> bool>;
+pub type ServiceCheck = Arc<dyn Fn(&Context) -> bool + Send + Sync>;
 
 /// A mixin getter: resolves the associated value for the source service.
-pub type MixinGet = Rc<dyn Fn(&Context) -> Option<Rc<dyn Any>>>;
+pub type MixinGet = Arc<dyn Fn(&Context) -> Option<Arc<dyn Any + Send + Sync>> + Send + Sync>;
 
 /// A mixin setter.
-pub type MixinSet = Rc<dyn Fn(&Context, Rc<dyn Any>)>;
+pub type MixinSet = Arc<dyn Fn(&Context, Arc<dyn Any + Send + Sync>) + Send + Sync>;
 
 /// A callable-service invocation handler (`[Service.invoke]` in the TS
 /// reference).
-pub type InvokeFn = Rc<dyn Fn(&ShadowContext, Option<&Rc<dyn Any>>) -> Option<Rc<dyn Any>>>;
+pub type InvokeFn = Arc<
+    dyn Fn(
+            &ShadowContext,
+            Option<&Arc<dyn Any + Send + Sync>>,
+        ) -> Option<Arc<dyn Any + Send + Sync>>
+        + Send
+        + Sync,
+>;
 
 /// A registered accessor (`Property.Accessor` in reflect.ts).
 pub struct MixinAccessor {
@@ -57,28 +66,50 @@ struct SetError(String);
 /// A service label. Labels compare by value: contexts isolated with the same
 /// label share the same service instance (mirrors `Symbol('name')` equality
 /// in the TS reference).
-pub type Label = Rc<str>;
+pub type Label = Arc<str>;
 
 /// One immutable layer of the isolate chain.
-#[derive(Debug, Default)]
 pub(crate) struct IsolateLayer {
-    entries: RefCell<HashMap<String, Label>>,
-    parent: RefCell<Option<Rc<Self>>>,
+    state: ArcSwap<IsolateState>,
+}
+
+/// The mutable part of an isolate layer; replaced atomically on change.
+#[derive(Clone, Debug, Default)]
+struct IsolateState {
+    entries: HashMap<String, Label>,
+    parent: Option<Arc<IsolateLayer>>,
+}
+
+impl Default for IsolateLayer {
+    fn default() -> Self {
+        Self {
+            state: ArcSwap::from_pointee(IsolateState::default()),
+        }
+    }
+}
+
+impl std::fmt::Debug for IsolateLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IsolateLayer")
+            .field("state", &self.state.load_full())
+            .finish()
+    }
 }
 
 impl IsolateLayer {
     fn lookup(&self, name: &str) -> Option<Label> {
-        if let Some(label) = self.entries.borrow().get(name) {
+        let state = self.state.load_full();
+        if let Some(label) = state.entries.get(name) {
             return Some(label.clone());
         }
-        self.parent.borrow().as_ref()?.lookup(name)
+        state.parent.as_ref()?.lookup(name)
     }
 
     /// Returns the bottom-most (root) layer of the chain.
-    fn bottom(self: &Rc<Self>) -> Rc<Self> {
+    fn bottom(self: &Arc<Self>) -> Arc<Self> {
         let mut layer = self.clone();
         loop {
-            let next = layer.parent.borrow().clone();
+            let next = layer.state.load_full().parent.clone();
             match next {
                 Some(parent) => layer = parent,
                 None => return layer,
@@ -87,27 +118,119 @@ impl IsolateLayer {
     }
 
     fn insert(&self, name: &str, label: Label) {
-        self.entries.borrow_mut().insert(name.to_string(), label);
+        let mut state = (*self.state.load_full()).clone();
+        state.entries.insert(name.to_string(), label);
+        self.state.store(Arc::new(state));
+    }
+
+    fn remove(&self, name: &str) {
+        let mut state = (*self.state.load_full()).clone();
+        state.entries.remove(name);
+        self.state.store(Arc::new(state));
+    }
+
+    fn clear(&self) {
+        let mut state = (*self.state.load_full()).clone();
+        state.entries.clear();
+        self.state.store(Arc::new(state));
+    }
+
+    /// Creates a layer with the given entries and parent chain.
+    fn with(entries: HashMap<String, Label>, parent: Option<Arc<Self>>) -> Arc<Self> {
+        Arc::new(Self {
+            state: ArcSwap::from_pointee(IsolateState { entries, parent }),
+        })
+    }
+
+    /// Re-points the parent chain (mirrors `Object.setPrototypeOf`).
+    fn set_parent(&self, parent: Option<Arc<Self>>) {
+        let mut state = (*self.state.load_full()).clone();
+        state.parent = parent;
+        self.state.store(Arc::new(state));
     }
 }
 
 /// One immutable layer of the intercept chain.
-#[derive(Debug, Default)]
 pub(crate) struct InterceptLayer {
-    pub(crate) entries: RefCell<HashMap<String, Rc<dyn Any>>>,
-    pub(crate) parent: RefCell<Option<Rc<Self>>>,
+    state: ArcSwap<InterceptState>,
+}
+
+/// The mutable part of an intercept layer; replaced atomically on change.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InterceptState {
+    pub(crate) entries: HashMap<String, Arc<dyn Any + Send + Sync>>,
+    pub(crate) parent: Option<Arc<InterceptLayer>>,
+}
+
+impl Default for InterceptLayer {
+    fn default() -> Self {
+        Self {
+            state: ArcSwap::from_pointee(InterceptState::default()),
+        }
+    }
+}
+
+impl std::fmt::Debug for InterceptLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InterceptLayer")
+            .field("state", &self.state.load_full())
+            .finish()
+    }
+}
+
+impl InterceptLayer {
+    /// Loads the current snapshot.
+    pub(crate) fn load(&self) -> Arc<InterceptState> {
+        self.state.load_full()
+    }
+
+    /// Creates a layer with the given entries and parent chain.
+    pub(crate) fn with(
+        entries: HashMap<String, Arc<dyn Any + Send + Sync>>,
+        parent: Option<Arc<Self>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            state: ArcSwap::from_pointee(InterceptState { entries, parent }),
+        })
+    }
+
+    pub(crate) fn insert(&self, name: &str, config: Arc<dyn Any + Send + Sync>) {
+        let mut state = (*self.state.load_full()).clone();
+        state.entries.insert(name.to_string(), config);
+        self.state.store(Arc::new(state));
+    }
+
+    pub(crate) fn remove(&self, name: &str) {
+        let mut state = (*self.state.load_full()).clone();
+        state.entries.remove(name);
+        self.state.store(Arc::new(state));
+    }
+
+    pub(crate) fn clear(&self) {
+        let mut state = (*self.state.load_full()).clone();
+        state.entries.clear();
+        self.state.store(Arc::new(state));
+    }
+
+    /// Re-points the parent chain (mirrors `Object.setPrototypeOf`).
+    pub(crate) fn set_parent(&self, parent: Option<Arc<Self>>) {
+        let mut state = (*self.state.load_full()).clone();
+        state.parent = parent;
+        self.state.store(Arc::new(state));
+    }
 }
 
 /// An entry of the shared service store.
+#[derive(Clone)]
 pub(crate) struct StoreEntry {
     pub name: String,
-    pub value: Rc<dyn Any>,
+    pub value: Arc<dyn Any + Send + Sync>,
     pub fiber: Weak<Fiber>,
     /// The inner state of the context on which the service was provided
     /// (the JS `symbols.shadow`). Only the inner is kept: holding a full
     /// [`Context`] here would strongly pin the provider fiber and create an
-    /// `Rc` cycle through `Fiber::resolved`.
-    pub(crate) shadow_inner: Rc<ContextInner>,
+    /// `Arc` cycle through `Fiber::resolved`.
+    pub(crate) shadow_inner: Arc<ContextInner>,
     pub check: Option<ServiceCheck>,
     pub invoke: Option<InvokeFn>,
 }
@@ -116,27 +239,31 @@ impl std::fmt::Debug for StoreEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StoreEntry")
             .field("name", &self.name)
-            .field("fiber_uid", &self.fiber.upgrade().map(|f| f.uid.get()))
+            .field("fiber_uid", &self.fiber.upgrade().map(|f| f.uid()))
             .finish()
     }
 }
 
 /// The service store shared by a whole context chain.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Store {
-    pub(crate) by_label: HashMap<Label, Rc<StoreEntry>>,
+    pub(crate) by_label: HashMap<Label, Arc<StoreEntry>>,
 }
 
 /// Shared inner state of a [`Context`].
 pub(crate) struct ContextInner {
-    pub isolate: Rc<IsolateLayer>,
-    pub intercept: Rc<InterceptLayer>,
-    pub store: Rc<RefCell<Store>>,
-    pub meta: RefCell<Vec<(String, Rc<dyn Any>)>>,
+    pub isolate: Arc<IsolateLayer>,
+    pub intercept: Arc<InterceptLayer>,
+    pub store: Arc<ArcSwap<Store>>,
+    /// Serializes compound snapshot mutations (store / props / layer writes).
+    /// Never held while dispatching events or running effects. Reads stay
+    /// lock-free via `ArcSwap` / atomics.
+    pub write_lock: Arc<Mutex<()>>,
+    pub meta: Mutex<Vec<(String, Arc<dyn Any + Send + Sync>)>>,
     /// Shared accessor table for the whole context tree (mirrors the single
     /// `ReflectService.props` in the TS reference; accessors registered by
     /// any fiber are visible tree-wide).
-    pub props: Rc<RefCell<HashMap<String, Rc<MixinAccessor>>>>,
+    pub props: Arc<ArcSwap<HashMap<String, Arc<MixinAccessor>>>>,
 }
 
 impl std::fmt::Debug for ContextInner {
@@ -144,8 +271,8 @@ impl std::fmt::Debug for ContextInner {
         f.debug_struct("ContextInner")
             .field("isolate", &self.isolate)
             .field("intercept", &self.intercept)
-            .field("store", &self.store)
-            .field("meta", &self.meta)
+            .field("store", &self.store.load_full())
+            .field("meta", &self.meta.lock().unwrap())
             .finish_non_exhaustive()
     }
 }
@@ -158,13 +285,13 @@ impl ContextInner {
 
     /// Strict store lookup: the entry must exist and its fiber must be
     /// `ACTIVE` (mirrors `_getImpl(name, true)` in reflect.ts).
-    pub(crate) fn lookup_strict(&self, name: &str) -> Option<Rc<StoreEntry>> {
+    pub(crate) fn lookup_strict(&self, name: &str) -> Option<Arc<StoreEntry>> {
         let label = self.isolate.lookup(name)?;
-        let entry = self.store.borrow().by_label.get(&label)?.clone();
+        let entry = self.store.load_full().by_label.get(&label)?.clone();
         let active = entry
             .fiber
             .upgrade()
-            .is_some_and(|fiber| fiber.state.get() == FiberState::Active);
+            .is_some_and(|fiber| fiber.state() == FiberState::Active);
         if active { Some(entry) } else { None }
     }
 
@@ -172,19 +299,19 @@ impl ContextInner {
     /// need not be `ACTIVE`. Framework services (events/logger/reflect/
     /// registry) stay reachable even while their fiber is unloading, mirroring
     /// the TS prototype properties.
-    pub(crate) fn lookup_non_strict(&self, name: &str) -> Option<Rc<StoreEntry>> {
+    pub(crate) fn lookup_non_strict(&self, name: &str) -> Option<Arc<StoreEntry>> {
         let label = self.isolate.lookup(name)?;
-        self.store.borrow().by_label.get(&label).cloned()
+        self.store.load_full().by_label.get(&label).cloned()
     }
 
     /// Typed service lookup by name.
-    pub(crate) fn get_service<S: Service>(&self, name: &str) -> Option<Rc<S>> {
+    pub(crate) fn get_service<S: Service>(&self, name: &str) -> Option<Arc<S>> {
         let entry = self.lookup_strict(name)?;
         entry.value.clone().downcast::<S>().ok()
     }
 
     /// Non-strict typed lookup (see [`ContextInner::lookup_non_strict`]).
-    pub(crate) fn get_service_non_strict<S: Service>(&self, name: &str) -> Option<Rc<S>> {
+    pub(crate) fn get_service_non_strict<S: Service>(&self, name: &str) -> Option<Arc<S>> {
         let entry = self.lookup_non_strict(name)?;
         entry.value.clone().downcast::<S>().ok()
     }
@@ -270,22 +397,22 @@ impl ShadowContext {
 
     /// Dynamic dependency read through the service's own scope (mirrors
     /// `this.ctx[name]` in the TS reference).
-    pub fn get_str(&self, name: &str) -> Option<Rc<dyn Any>> {
+    pub fn get_str(&self, name: &str) -> Option<Arc<dyn Any + Send + Sync>> {
         self.own.get_str(name)
     }
 
     /// Strict dynamic dependency read through the service's own scope.
-    pub fn get_str_strict(&self, name: &str) -> Result<Rc<dyn Any>, String> {
+    pub fn get_str_strict(&self, name: &str) -> Result<Arc<dyn Any + Send + Sync>, String> {
         self.own.get_str_strict(name)
     }
 
     /// Non-strict dynamic dependency read through the service's own scope.
-    pub fn get_str_non_strict(&self, name: &str) -> Option<Rc<dyn Any>> {
+    pub fn get_str_non_strict(&self, name: &str) -> Option<Arc<dyn Any + Send + Sync>> {
         self.own.get_str_non_strict(name)
     }
 
     /// Typed dependency read through the service's own scope.
-    pub fn get<S: Service>(&self) -> Option<Rc<S>> {
+    pub fn get<S: Service>(&self) -> Option<Arc<S>> {
         self.own.get::<S>()
     }
 
@@ -310,7 +437,11 @@ impl ShadowContext {
     /// `this.ctx[name](...)`): the callable is resolved through the
     /// service's own scope and the invocation receives this method's caller
     /// chain.
-    pub fn invoke_str(&self, name: &str, init: Option<Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
+    pub fn invoke_str(
+        &self,
+        name: &str,
+        init: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
         let entry = self.own.inner.lookup_strict(name)?;
         let invoke = entry.invoke.as_ref()?;
         let own = Context {
@@ -327,7 +458,10 @@ impl ShadowContext {
     }
 
     /// Typed variant of [`ShadowContext::invoke_str`].
-    pub fn invoke<S: Service>(&self, init: Option<Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
+    pub fn invoke<S: Service>(
+        &self,
+        init: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
         self.invoke_str(S::NAME, init)
     }
 
@@ -355,12 +489,13 @@ impl Deref for ShadowContext {
 
 /// The core object handed to plugins.
 ///
-/// A context is intentionally `!Send`: the whole runtime is single-threaded
-/// and uses `Rc`/`RefCell` without locks (difficulty 3 decision).
+/// A context is `Send + Sync`: shared state lives behind `Arc` with
+/// lock-free snapshots (`ArcSwap`), atomics and short-scoped `Mutex`es, so
+/// plugin tasks can run on worker threads.
 #[derive(Clone)]
 pub struct Context {
-    pub(crate) inner: Rc<ContextInner>,
-    pub(crate) fiber: Rc<Fiber>,
+    pub(crate) inner: Arc<ContextInner>,
+    pub(crate) fiber: Arc<Fiber>,
 }
 
 impl std::fmt::Debug for Context {
@@ -375,15 +510,16 @@ impl Context {
     /// The root owns an `ACTIVE` fiber and provides the four framework
     /// services (`events`, `logger`, `reflect`, `registry`).
     pub fn new() -> Self {
-        let isolate = Rc::new(IsolateLayer::default());
-        let intercept = Rc::new(InterceptLayer::default());
-        let store = Rc::new(RefCell::new(Store::default()));
-        let inner = Rc::new(ContextInner {
+        let isolate = Arc::new(IsolateLayer::default());
+        let intercept = Arc::new(InterceptLayer::default());
+        let store = Arc::new(ArcSwap::from_pointee(Store::default()));
+        let inner = Arc::new(ContextInner {
             isolate,
             intercept,
             store,
-            meta: RefCell::new(Vec::new()),
-            props: Rc::new(RefCell::new(HashMap::new())),
+            write_lock: Arc::new(Mutex::new(())),
+            meta: Mutex::new(Vec::new()),
+            props: Arc::new(ArcSwap::from_pointee(HashMap::new())),
         });
         let fiber = Fiber::root(inner.clone());
         let ctx = Self { inner, fiber };
@@ -395,19 +531,19 @@ impl Context {
         ctx.provide_inner(RegistryService::default());
         // context.ts clears the root fiber's disposables after framework
         // services are registered, so they don't surface as user effects.
-        ctx.fiber.disposables.borrow_mut().clear();
+        ctx.fiber.disposables.lock().unwrap().clear();
         ctx
     }
 
     /// Returns the fiber associated with this context.
-    pub fn fiber(&self) -> &Rc<Fiber> {
+    pub fn fiber(&self) -> &Arc<Fiber> {
         &self.fiber
     }
 
     /// Whether both contexts share the same inner state segment (used by the
     /// loader to identify an entry's own context).
     pub fn shares_inner(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.inner, &other.inner)
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// Resolves the isolate label for `name` along this context's chain.
@@ -416,7 +552,7 @@ impl Context {
     }
 
     /// Returns a context sharing this context's state but bound to `fiber`.
-    pub fn with_fiber(&self, fiber: Rc<Fiber>) -> Self {
+    pub fn with_fiber(&self, fiber: Arc<Fiber>) -> Self {
         Self {
             inner: self.inner.clone(),
             fiber,
@@ -431,16 +567,16 @@ impl Context {
     /// Dynamic access runs through the `internal/get` waterfall: listeners
     /// may override the value or call `next()` to fall back to the strict
     /// store lookup.
-    pub fn get_str(&self, name: &str) -> Option<Rc<dyn Any>> {
+    pub fn get_str(&self, name: &str) -> Option<Arc<dyn Any + Send + Sync>> {
         let error = format!("cannot get property \"{name}\" without inject");
-        let args: Vec<Rc<dyn Any>> = vec![
-            Rc::new(self.clone()),
-            Rc::new(name.to_string()),
-            Rc::new(error),
+        let args: Vec<Arc<dyn Any + Send + Sync>> = vec![
+            Arc::new(self.clone()),
+            Arc::new(name.to_string()),
+            Arc::new(error),
         ];
         let this = self.clone();
         let name = name.to_string();
-        let tail: WaterfallNext = Rc::new(move || {
+        let tail: WaterfallNext = Arc::new(move || {
             let this = this.clone();
             let name = name.clone();
             Box::pin(async move {
@@ -473,7 +609,7 @@ impl Context {
     pub fn provides(&self, name: &str) -> bool {
         self.inner
             .store
-            .borrow()
+            .load_full()
             .by_label
             .values()
             .any(|entry| entry.name == name)
@@ -511,9 +647,10 @@ impl Context {
         name: &str,
         old_label: &Label,
         new_label: &Label,
-        provider: &Rc<Fiber>,
+        provider: &Arc<Fiber>,
     ) -> bool {
-        let mut store = self.inner.store.borrow_mut();
+        let _guard = self.inner.write_lock.lock().unwrap();
+        let mut store = (*self.inner.store.load_full()).clone();
         let Some(entry) = store.by_label.get(old_label).cloned() else {
             return false;
         };
@@ -523,12 +660,13 @@ impl Context {
         let owned_by = entry
             .fiber
             .upgrade()
-            .is_some_and(|fiber| Rc::ptr_eq(&fiber, provider));
+            .is_some_and(|fiber| Arc::ptr_eq(&fiber, provider));
         if !owned_by || store.by_label.contains_key(new_label) {
             return false;
         }
         store.by_label.remove(old_label);
         store.by_label.insert(new_label.clone(), entry);
+        self.inner.store.store(Arc::new(store));
         true
     }
 
@@ -536,24 +674,38 @@ impl Context {
     /// itself now resolves `new_label` (mirrors the TS isolate patch-context
     /// delimiter guard: the impl's fiber realm moved with it).
     pub fn migrate_label(&self, name: &str, old_label: &Label, new_label: &Label) -> bool {
-        let mut store = self.inner.store.borrow_mut();
-        let Some(entry) = store.by_label.get(old_label).cloned() else {
-            return false;
-        };
-        if entry.name != name || store.by_label.contains_key(new_label) {
-            return false;
-        }
-        let provider_moved = entry.fiber.upgrade().is_some_and(|fiber| {
-            fiber
-                .ctx
-                .isolate_label(name)
-                .is_some_and(|label| &label == new_label)
-        });
+        // Lock-order discipline: resolve the isolate label before taking the
+        // write lock, so no path holds the store lock while touching isolate.
+        let provider_moved = self
+            .inner
+            .store
+            .load_full()
+            .by_label
+            .get(old_label)
+            .cloned()
+            .is_some_and(|entry| {
+                entry.name == name
+                    && entry.fiber.upgrade().is_some_and(|fiber| {
+                        fiber
+                            .ctx
+                            .isolate_label(name)
+                            .is_some_and(|label| &label == new_label)
+                    })
+            });
         if !provider_moved {
             return false;
         }
-        store.by_label.remove(old_label);
+        let _guard = self.inner.write_lock.lock().unwrap();
+        let mut store = (*self.inner.store.load_full()).clone();
+        let Some(entry) = store.by_label.remove(old_label) else {
+            return false;
+        };
+        if store.by_label.contains_key(new_label) {
+            store.by_label.insert(old_label.clone(), entry);
+            return false;
+        }
         store.by_label.insert(new_label.clone(), entry);
+        self.inner.store.store(Arc::new(store));
         true
     }
 
@@ -562,8 +714,8 @@ impl Context {
     ///
     /// Returns an error with the TS-compatible message when the property is
     /// missing or the context is inactive.
-    pub fn get_str_strict(&self, name: &str) -> Result<Rc<dyn Any>, String> {
-        if self.fiber.uid.get().is_none() {
+    pub fn get_str_strict(&self, name: &str) -> Result<Arc<dyn Any + Send + Sync>, String> {
+        if self.fiber.uid().is_none() {
             return Err(format!(
                 "cannot get required service \"{name}\" in inactive context"
             ));
@@ -578,7 +730,7 @@ impl Context {
     /// Unlike [`Context::get_str`] this bypasses the `internal/get`
     /// waterfall and returns the value of any registered entry, even while
     /// the provider fiber is unloading or failed.
-    pub fn get_str_non_strict(&self, name: &str) -> Option<Rc<dyn Any>> {
+    pub fn get_str_non_strict(&self, name: &str) -> Option<Arc<dyn Any + Send + Sync>> {
         self.inner
             .lookup_non_strict(name)
             .map(|entry| entry.value.clone())
@@ -590,7 +742,8 @@ impl Context {
     /// Rust contexts have no dynamic own properties, so the "own property"
     /// source of the TS `has` handler is not applicable.
     pub fn has_str(&self, name: &str) -> bool {
-        self.inner.props.borrow().contains_key(name) || self.inner.lookup_non_strict(name).is_some()
+        self.inner.props.load_full().contains_key(name)
+            || self.inner.lookup_non_strict(name).is_some()
     }
 
     /// Dynamic set (mirrors `ctx[name] = value` in the TS reference).
@@ -603,25 +756,26 @@ impl Context {
     /// provided the service may set its value; otherwise the
     /// `"cannot set property \"{name}\" in multiple fibers"` error is
     /// returned.
-    pub fn set_str(&self, name: &str, value: Rc<dyn Any>) -> Result<(), String> {
+    pub fn set_str(&self, name: &str, value: Arc<dyn Any + Send + Sync>) -> Result<(), String> {
         let error = format!("cannot set property \"{name}\" without provide");
-        let args: Vec<Rc<dyn Any>> = vec![
-            Rc::new(self.clone()),
-            Rc::new(name.to_string()),
+        let args: Vec<Arc<dyn Any + Send + Sync>> = vec![
+            Arc::new(self.clone()),
+            Arc::new(name.to_string()),
             value.clone(),
-            Rc::new(error.clone()),
+            Arc::new(error.clone()),
         ];
         let this = self.clone();
         let name = name.to_string();
-        let tail: WaterfallNext = Rc::new(move || {
+        let tail: WaterfallNext = Arc::new(move || {
             let this = this.clone();
             let name = name.clone();
             let value = value.clone();
             Box::pin(async move {
-                let result: Option<Rc<dyn Any>> = match this.set_str_impl(&name, value) {
-                    Ok(()) => Some(Rc::new(true)),
-                    Err(message) => Some(Rc::new(SetError(message))),
-                };
+                let result: Option<Arc<dyn Any + Send + Sync>> =
+                    match this.set_str_impl(&name, value) {
+                        Ok(()) => Some(Arc::new(true)),
+                        Err(message) => Some(Arc::new(SetError(message))),
+                    };
                 Ok(result)
             })
         });
@@ -651,14 +805,15 @@ impl Context {
         }
     }
 
-    fn set_str_impl(&self, name: &str, value: Rc<dyn Any>) -> Result<(), String> {
+    fn set_str_impl(&self, name: &str, value: Arc<dyn Any + Send + Sync>) -> Result<(), String> {
         let label = self
             .inner
             .isolate
             .lookup(name)
             .ok_or_else(|| format!("cannot set property \"{name}\" without provide"))?;
-        let mut store = self.inner.store.borrow_mut();
-        match store.by_label.get_mut(&label) {
+        let _guard = self.inner.write_lock.lock().unwrap();
+        let mut store = (*self.inner.store.load_full()).clone();
+        match store.by_label.get(&label).cloned() {
             Some(entry) => {
                 // Ownership: only the providing fiber may update the value
                 // (mirrors reflect.set "cannot set property in multiple
@@ -666,7 +821,7 @@ impl Context {
                 let owned = entry
                     .fiber
                     .upgrade()
-                    .is_some_and(|fiber| Rc::ptr_eq(&fiber, &self.fiber));
+                    .is_some_and(|fiber| Arc::ptr_eq(&fiber, &self.fiber));
                 if !owned {
                     return Err(format!("cannot set property \"{name}\" in multiple fibers"));
                 }
@@ -675,18 +830,22 @@ impl Context {
                 let shadow_inner = entry.shadow_inner.clone();
                 let check = entry.check.clone();
                 let invoke = entry.invoke.clone();
-                *entry = Rc::new(StoreEntry {
-                    name,
-                    value,
-                    fiber,
-                    shadow_inner,
-                    check,
-                    invoke,
-                });
+                store.by_label.insert(
+                    label,
+                    Arc::new(StoreEntry {
+                        name,
+                        value,
+                        fiber,
+                        shadow_inner,
+                        check,
+                        invoke,
+                    }),
+                );
             }
             None => return Err(format!("cannot set property \"{name}\" without provide")),
         }
-        drop(store);
+        self.inner.store.store(Arc::new(store));
+        drop(_guard);
         // Notify injectors that the service value changed.
         drop(self.notify(name));
         Ok(())
@@ -698,7 +857,7 @@ impl Context {
     }
 
     /// Looks up a typed service.
-    pub fn get<S: Service>(&self) -> Option<Rc<S>> {
+    pub fn get<S: Service>(&self) -> Option<Arc<S>> {
         self.get_str(S::NAME)?.downcast::<S>().ok()
     }
 
@@ -708,7 +867,11 @@ impl Context {
     /// no label exists yet, one is created on the root layer (mirroring
     /// `ctx.root[symbols.isolate][name] ??= Symbol(name)` in the TS source).
     /// The returned handle disposes the registration and notifies consumers.
-    pub fn provide_str(&self, name: &str, value: Rc<dyn Any>) -> Result<Rc<EffectHandle>, String> {
+    pub fn provide_str(
+        &self,
+        name: &str,
+        value: Arc<dyn Any + Send + Sync>,
+    ) -> Result<Arc<EffectHandle>, String> {
         self.provide_str_with_check(name, value, None)
     }
 
@@ -716,29 +879,29 @@ impl Context {
     pub fn provide_str_with_check(
         &self,
         name: &str,
-        value: Rc<dyn Any>,
+        value: Arc<dyn Any + Send + Sync>,
         check: Option<ServiceCheck>,
-    ) -> Result<Rc<EffectHandle>, String> {
+    ) -> Result<Arc<EffectHandle>, String> {
         self.provide_inner_impl(name, value, check, None)
     }
 
     fn provide_inner_impl(
         &self,
         name: &str,
-        value: Rc<dyn Any>,
+        value: Arc<dyn Any + Send + Sync>,
         check: Option<ServiceCheck>,
         invoke: Option<InvokeFn>,
-    ) -> Result<Rc<EffectHandle>, String> {
+    ) -> Result<Arc<EffectHandle>, String> {
         self.fiber.assert_active().map_err(|e| e.message)?;
         {
-            let props = self.inner.props.borrow();
+            let props = self.inner.props.load_full();
             if props.contains_key(name) {
                 return Err(format!("property \"{name}\" is already declared"));
             }
         }
         let label = self.ensure_label(name);
         {
-            let store = self.inner.store.borrow();
+            let store = self.inner.store.load_full();
             if let Some(existing) = store.by_label.get(&label) {
                 return Err(format!(
                     "service \"{}\" has been registered at <{}>",
@@ -758,21 +921,33 @@ impl Context {
             .fiber
             .effect(
                 move || {
-                    let entry = Rc::new(StoreEntry {
+                    let entry = Arc::new(StoreEntry {
                         name: name.clone(),
                         value,
-                        fiber: Rc::downgrade(&ctx.fiber),
+                        fiber: Arc::downgrade(&ctx.fiber),
                         shadow_inner: ctx.inner.clone(),
                         check: check.clone(),
                         invoke: invoke.clone(),
                     });
-                    ctx.inner
-                        .store
-                        .borrow_mut()
-                        .by_label
-                        .insert(label.clone(), entry.clone());
-                    ctx.fiber.resolved.borrow_mut().insert(name.clone(), entry);
-                    if ctx.fiber.state.get() == FiberState::Active {
+                    let _guard = ctx.inner.write_lock.lock().unwrap();
+                    let mut store = (*ctx.inner.store.load_full()).clone();
+                    // Re-check under the write lock: a concurrent registration
+                    // may have won the race since the pre-check above.
+                    if store.by_label.contains_key(&label) {
+                        drop(_guard);
+                        return Effect::Error(
+                            format!("service \"{name}\" is already registered").into(),
+                        );
+                    }
+                    store.by_label.insert(label.clone(), entry.clone());
+                    ctx.inner.store.store(Arc::new(store));
+                    drop(_guard);
+                    ctx.fiber
+                        .resolved
+                        .lock()
+                        .unwrap()
+                        .insert(name.clone(), entry);
+                    if ctx.fiber.state() == FiberState::Active {
                         ctx.notify(&name);
                     }
                     let ctx = ctx.clone();
@@ -781,14 +956,18 @@ impl Context {
                         let name = name.clone();
                         let label = label;
                         Box::pin(async move {
-                            ctx.inner.store.borrow_mut().by_label.remove(&label);
+                            let _guard = ctx.inner.write_lock.lock().unwrap();
+                            let mut store = (*ctx.inner.store.load_full()).clone();
+                            store.by_label.remove(&label);
+                            ctx.inner.store.store(Arc::new(store));
+                            drop(_guard);
                             let fibers = ctx.notify(&name);
                             // The TS reference awaits the affected fibers
                             // here; the current implementation keeps the
                             // removal and notify synchronous, which matches
                             // the fiber spec expectations under fake timers.
                             let _ = fibers;
-                            ctx.fiber.resolved.borrow_mut().remove(&name);
+                            ctx.fiber.resolved.lock().unwrap().remove(&name);
                             Ok(())
                         })
                     }))
@@ -800,15 +979,18 @@ impl Context {
     }
 
     /// Registers a typed service.
-    pub fn provide<S: Service>(&self, value: Rc<S>) -> Result<Rc<EffectHandle>, String> {
+    pub fn provide<S: Service>(&self, value: Arc<S>) -> Result<Arc<EffectHandle>, String> {
         let check = {
             let value = value.clone();
-            Rc::new(move |ctx: &Self| value.check(ctx)) as ServiceCheck
+            Arc::new(move |ctx: &Self| value.check(ctx)) as ServiceCheck
         };
         let invoke = {
             let value = value.clone();
-            Rc::new(move |ctx: &ShadowContext, init: Option<&Rc<dyn Any>>| value.invoke(ctx, init))
-                as InvokeFn
+            Arc::new(
+                move |ctx: &ShadowContext, init: Option<&Arc<dyn Any + Send + Sync>>| {
+                    value.invoke(ctx, init)
+                },
+            ) as InvokeFn
         };
         self.provide_inner_impl(S::NAME, value, Some(check), Some(invoke))
     }
@@ -819,7 +1001,11 @@ impl Context {
     /// callable's recorded shadow (its own registration context) and whose
     /// caller is this context — the faithful counterpart of the JS proxy
     /// injecting `this.ctx` into `[Service.invoke]`.
-    pub fn invoke_str(&self, name: &str, init: Option<Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
+    pub fn invoke_str(
+        &self,
+        name: &str,
+        init: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
         let entry = self.inner.lookup_strict(name)?;
         let invoke = entry.invoke.as_ref()?;
         let own = Self {
@@ -836,7 +1022,10 @@ impl Context {
     }
 
     /// Invokes a typed callable service.
-    pub fn invoke<S: Service>(&self, init: Option<Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
+    pub fn invoke<S: Service>(
+        &self,
+        init: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
         self.invoke_str(S::NAME, init)
     }
 
@@ -847,82 +1036,74 @@ impl Context {
     /// while services already visible to the parent remain visible to the
     /// child unless the child isolates the same name with a different label.
     pub fn isolate(&self, name: &str, label: Label) -> Self {
-        let layer = Rc::new(IsolateLayer {
-            entries: RefCell::new(HashMap::from([(name.to_string(), label)])),
-            parent: RefCell::new(Some(self.inner.isolate.clone())),
-        });
+        let layer = IsolateLayer::with(
+            HashMap::from([(name.to_string(), label)]),
+            Some(self.inner.isolate.clone()),
+        );
         self.spawn(layer, self.inner.intercept.clone())
     }
 
     /// Returns a context with an empty isolate layer on top (used by the
     /// loader to scope entry services per-realm).
     pub fn with_isolate_layer(&self) -> Self {
-        let layer = Rc::new(IsolateLayer {
-            entries: RefCell::new(HashMap::new()),
-            parent: RefCell::new(Some(self.inner.isolate.clone())),
-        });
+        let layer = IsolateLayer::with(HashMap::new(), Some(self.inner.isolate.clone()));
         self.spawn(layer, self.inner.intercept.clone())
     }
 
     /// Sets an isolate label on this context's top layer.
     pub fn set_isolate(&self, name: &str, label: Label) {
-        self.inner
-            .isolate
-            .entries
-            .borrow_mut()
-            .insert(name.to_string(), label);
+        let _guard = self.inner.write_lock.lock().unwrap();
+        self.inner.isolate.insert(name, label);
     }
 
     /// Removes an isolate label from this context's top layer.
     pub fn remove_isolate(&self, name: &str) {
-        self.inner.isolate.entries.borrow_mut().remove(name);
+        let _guard = self.inner.write_lock.lock().unwrap();
+        self.inner.isolate.remove(name);
     }
 
     /// Clears all entries on this context's top isolate layer.
     pub fn clear_isolate_layer(&self) {
-        self.inner.isolate.entries.borrow_mut().clear();
+        let _guard = self.inner.write_lock.lock().unwrap();
+        self.inner.isolate.clear();
     }
 
     /// Returns a context with an empty intercept layer on top.
     pub fn with_intercept_layer(&self) -> Self {
-        let layer = Rc::new(InterceptLayer {
-            entries: RefCell::new(HashMap::new()),
-            parent: RefCell::new(Some(self.inner.intercept.clone())),
-        });
+        let layer = InterceptLayer::with(HashMap::new(), Some(self.inner.intercept.clone()));
         self.spawn(self.inner.isolate.clone(), layer)
     }
 
     /// Sets an intercept config on this context's top layer.
-    pub fn set_intercept(&self, name: &str, config: Rc<dyn Any>) {
-        self.inner
-            .intercept
-            .entries
-            .borrow_mut()
-            .insert(name.to_string(), config);
+    pub fn set_intercept(&self, name: &str, config: Arc<dyn Any + Send + Sync>) {
+        let _guard = self.inner.write_lock.lock().unwrap();
+        self.inner.intercept.insert(name, config);
     }
 
     /// Removes an intercept config from this context's top layer.
     pub fn remove_intercept(&self, name: &str) {
-        self.inner.intercept.entries.borrow_mut().remove(name);
+        let _guard = self.inner.write_lock.lock().unwrap();
+        self.inner.intercept.remove(name);
     }
 
     /// Clears all entries on this context's top intercept layer.
     pub fn clear_intercept_layer(&self) {
-        self.inner.intercept.entries.borrow_mut().clear();
+        let _guard = self.inner.write_lock.lock().unwrap();
+        self.inner.intercept.clear();
     }
 
     /// Returns a new context with an additional intercept layer.
     ///
     /// Config entries registered here override entries from parent layers
     /// when [`Context::resolve_config`] merges the chain.
-    pub fn intercept<C: Config>(&self, name: &str, config: C) -> Self {
-        let layer = Rc::new(InterceptLayer {
-            entries: RefCell::new(HashMap::from([(
+    pub fn intercept<C: Config + Send + Sync>(&self, name: &str, config: C) -> Self {
+        let layer = InterceptLayer::with(
+            HashMap::from([(
                 name.to_string(),
-                Rc::new(config) as Rc<dyn Any>,
-            )])),
-            parent: RefCell::new(Some(self.inner.intercept.clone())),
-        });
+                Arc::new(config) as Arc<dyn Any + Send + Sync>,
+            )]),
+            Some(self.inner.intercept.clone()),
+        );
         self.spawn(self.inner.isolate.clone(), layer)
     }
 
@@ -930,19 +1111,19 @@ impl Context {
     ///
     /// Metadata entries are appended to those of the parent; lookups prefer
     /// the nearest entry with the same key.
-    pub fn extend(&self, meta: &[(&str, Rc<dyn Any>)]) -> Self {
+    pub fn extend(&self, meta: &[(&str, Arc<dyn Any + Send + Sync>)]) -> Self {
         let ctx = self.spawn(self.inner.isolate.clone(), self.inner.intercept.clone());
-        let mut entries = self.inner.meta.borrow().clone();
+        let mut entries = self.inner.meta.lock().unwrap().clone();
         for (key, value) in meta {
             entries.push((key.to_string(), value.clone()));
         }
-        *ctx.inner.meta.borrow_mut() = entries;
+        *ctx.inner.meta.lock().unwrap() = entries;
         ctx
     }
 
     /// Returns a metadata value previously attached via [`Context::extend`].
-    pub fn meta<T: Any>(&self, key: &str) -> Option<Rc<T>> {
-        for (k, value) in self.inner.meta.borrow().iter().rev() {
+    pub fn meta<T: Any + Send + Sync>(&self, key: &str) -> Option<Arc<T>> {
+        for (k, value) in self.inner.meta.lock().unwrap().iter().rev() {
             if k == key {
                 return value.clone().downcast::<T>().ok();
             }
@@ -956,13 +1137,14 @@ impl Context {
     /// layer, then `head`; later entries override earlier ones (mirrors
     /// `Service::resolveConfig` in the TS reference).
     pub fn resolve_config<C: Config>(&self, name: &str, base: Option<&C>, head: Option<&C>) -> C {
-        let mut configs: Vec<Rc<dyn Any>> = Vec::new();
+        let mut configs: Vec<Arc<dyn Any + Send + Sync>> = Vec::new();
         let mut layer = Some(self.inner.intercept.clone());
         while let Some(current) = layer {
-            if let Some(config) = current.entries.borrow().get(name) {
+            let state = current.load();
+            if let Some(config) = state.entries.get(name) {
                 configs.push(config.clone());
             }
-            layer = current.parent.borrow().clone();
+            layer = state.parent.clone();
         }
         configs.reverse();
 
@@ -985,14 +1167,15 @@ impl Context {
 
     /// The intercept chain for `name`, nearest layer first (mirrors reading
     /// `ctx[Context.intercept]` and walking its prototype chain).
-    pub fn intercept_chain(&self, name: &str) -> Vec<Rc<dyn Any>> {
+    pub fn intercept_chain(&self, name: &str) -> Vec<Arc<dyn Any + Send + Sync>> {
         let mut result = Vec::new();
         let mut layer = Some(self.inner.intercept.clone());
         while let Some(current) = layer {
-            if let Some(config) = current.entries.borrow().get(name) {
+            let state = current.load();
+            if let Some(config) = state.entries.get(name) {
                 result.push(config.clone());
             }
-            layer = current.parent.borrow().clone();
+            layer = state.parent.clone();
         }
         result
     }
@@ -1001,8 +1184,13 @@ impl Context {
     /// chains (mirrors `Object.setPrototypeOf(ctx, parent.ctx)` when an entry
     /// moves between groups; the fiber keeps running).
     pub fn reparent(&self, new_parent: &Self) {
-        *self.inner.isolate.parent.borrow_mut() = Some(new_parent.inner.isolate.clone());
-        *self.inner.intercept.parent.borrow_mut() = Some(new_parent.inner.intercept.clone());
+        let _guard = self.inner.write_lock.lock().unwrap();
+        self.inner
+            .isolate
+            .set_parent(Some(new_parent.inner.isolate.clone()));
+        self.inner
+            .intercept
+            .set_parent(Some(new_parent.inner.intercept.clone()));
     }
 
     /// Registers mixin accessors (mirrors `ctx.mixin(source, map)`).
@@ -1011,12 +1199,12 @@ impl Context {
     /// resolve the target service or value. The registration is an effect of
     /// the current fiber and is removed when the fiber unloads.
     pub fn mixin(&self, source: &str, entries: &[(&str, &str)]) -> Result<(), String> {
-        let accessors: Vec<(String, Rc<MixinAccessor>)> = entries
+        let accessors: Vec<(String, Arc<MixinAccessor>)> = entries
             .iter()
             .map(|(key, target_name)| {
                 let target_name = target_name.to_string();
-                let get: MixinGet = Rc::new(move |ctx| ctx.get_str(&target_name));
-                (key.to_string(), Rc::new(MixinAccessor { get, set: None }))
+                let get: MixinGet = Arc::new(move |ctx| ctx.get_str(&target_name));
+                (key.to_string(), Arc::new(MixinAccessor { get, set: None }))
             })
             .collect();
         self.register_accessors(source, accessors)
@@ -1036,7 +1224,7 @@ impl Context {
             .map(|(key, accessor)| {
                 let get = accessor.get.clone();
                 let set = accessor.set.clone();
-                (key.to_string(), Rc::new(MixinAccessor { get, set }))
+                (key.to_string(), Arc::new(MixinAccessor { get, set }))
             })
             .collect();
         self.register_accessors(source, accessors)
@@ -1053,7 +1241,7 @@ impl Context {
         name: &str,
         get: MixinGet,
         set: Option<MixinSet>,
-    ) -> Result<Rc<EffectHandle>, String> {
+    ) -> Result<Arc<EffectHandle>, String> {
         let this = self.clone();
         let name = name.to_string();
         let label = format!("ctx.accessor({name:?})");
@@ -1063,24 +1251,30 @@ impl Context {
                     // Conflicts with an existing accessor or a same-name
                     // service are rejected (mirrors the TS accessor effect).
                     let exists = this.inner.lookup_non_strict(&name).is_some()
-                        || this.inner.props.borrow().contains_key(&name);
+                        || this.inner.props.load_full().contains_key(&name);
                     if exists {
                         return Effect::Error(
                             format!("property \"{name}\" is already declared").into(),
                         );
                     }
-                    this.inner
-                        .props
-                        .borrow_mut()
-                        .insert(name.clone(), Rc::new(MixinAccessor { get, set }));
+                    let _guard = this.inner.write_lock.lock().unwrap();
+                    let mut props = (*this.inner.props.load_full()).clone();
+                    if props.contains_key(&name) {
+                        drop(_guard);
+                        return Effect::Error(
+                            format!("property \"{name}\" is already declared").into(),
+                        );
+                    }
+                    props.insert(name.clone(), Arc::new(MixinAccessor { get, set }));
+                    this.inner.props.store(Arc::new(props));
+                    drop(_guard);
                     let this_for_dispose = this.clone();
                     let name_for_dispose = name;
                     Effect::Disposer(sync_disposer(move || {
-                        this_for_dispose
-                            .inner
-                            .props
-                            .borrow_mut()
-                            .remove(&name_for_dispose);
+                        let _guard = this_for_dispose.inner.write_lock.lock().unwrap();
+                        let mut props = (*this_for_dispose.inner.props.load_full()).clone();
+                        props.remove(&name_for_dispose);
+                        this_for_dispose.inner.props.store(Arc::new(props));
                     }))
                 },
                 &label,
@@ -1091,7 +1285,7 @@ impl Context {
     fn register_accessors(
         &self,
         source: &str,
-        entries: Vec<(String, Rc<MixinAccessor>)>,
+        entries: Vec<(String, Arc<MixinAccessor>)>,
     ) -> Result<(), String> {
         let this = self.clone();
         let source = source.to_string();
@@ -1101,7 +1295,8 @@ impl Context {
             .effect(
                 move || {
                     let conflict = {
-                        let mut props = this.inner.props.borrow_mut();
+                        let _guard = this.inner.write_lock.lock().unwrap();
+                        let mut props = (*this.inner.props.load_full()).clone();
                         let mut conflict = None;
                         for (key, accessor) in entries {
                             let full = format!("{source}.{key}");
@@ -1111,6 +1306,9 @@ impl Context {
                             }
                             props.insert(key, accessor);
                         }
+                        if conflict.is_none() {
+                            this.inner.props.store(Arc::new(props));
+                        }
                         conflict
                     };
                     if let Some(message) = conflict {
@@ -1118,10 +1316,12 @@ impl Context {
                     }
                     let this_for_dispose = this.clone();
                     Effect::Disposer(sync_disposer(move || {
-                        let mut props = this_for_dispose.inner.props.borrow_mut();
+                        let _guard = this_for_dispose.inner.write_lock.lock().unwrap();
+                        let mut props = (*this_for_dispose.inner.props.load_full()).clone();
                         for key in keys {
                             props.remove(&key);
                         }
+                        this_for_dispose.inner.props.store(Arc::new(props));
                     }))
                 },
                 &label,
@@ -1132,18 +1332,23 @@ impl Context {
 
     /// Resolves an associated value `source.key` (mirrors the property
     /// access `ctx[source].key` in the TS reference).
-    pub fn resolve_assoc(&self, source: &str, key: &str) -> Option<Rc<dyn Any>> {
+    pub fn resolve_assoc(&self, source: &str, key: &str) -> Option<Arc<dyn Any + Send + Sync>> {
         let _ = source;
-        let props = self.inner.props.borrow();
+        let props = self.inner.props.load_full();
         let accessor = props.get(key)?.clone();
         (accessor.get)(self)
     }
 
     /// Sets an associated value `source.key`.
-    pub fn set_assoc(&self, source: &str, key: &str, value: Rc<dyn Any>) -> Result<(), String> {
+    pub fn set_assoc(
+        &self,
+        source: &str,
+        key: &str,
+        value: Arc<dyn Any + Send + Sync>,
+    ) -> Result<(), String> {
         let full = format!("{source}.{key}");
         let accessor = {
-            let props = self.inner.props.borrow();
+            let props = self.inner.props.load_full();
             props
                 .get(key)
                 .cloned()
@@ -1159,12 +1364,20 @@ impl Context {
     }
 
     /// Registers a plugin on this context (see [`RegistryService::plugin`]).
-    pub fn plugin(&self, plugin: &Plugin, config: Option<Rc<dyn Any>>) -> Rc<Fiber> {
+    pub fn plugin(
+        &self,
+        plugin: &Plugin,
+        config: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Arc<Fiber> {
         self.plugin_with_validator(plugin, config, None)
     }
 
     /// Registers a plugin via the registry service (used by the loader).
-    pub fn registry_plugin(&self, plugin: &Plugin, config: Option<Rc<dyn Any>>) -> Rc<Fiber> {
+    pub fn registry_plugin(
+        &self,
+        plugin: &Plugin,
+        config: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Arc<Fiber> {
         let registry = self
             .get::<RegistryService>()
             .expect("registry service must be present");
@@ -1175,9 +1388,9 @@ impl Context {
     pub fn plugin_with_validator(
         &self,
         plugin: &Plugin,
-        config: Option<Rc<dyn Any>>,
+        config: Option<Arc<dyn Any + Send + Sync>>,
         validator: Option<ConfigValidator>,
-    ) -> Rc<Fiber> {
+    ) -> Arc<Fiber> {
         let registry = self
             .get::<RegistryService>()
             .expect("registry service must be present");
@@ -1186,7 +1399,7 @@ impl Context {
 
     /// Registers an inject callback (a plugin whose only role is consuming
     /// the declared dependencies).
-    pub fn inject(&self, deps: &[&str], callback: ApplyFn) -> Rc<Fiber> {
+    pub fn inject(&self, deps: &[&str], callback: ApplyFn) -> Arc<Fiber> {
         let plugin = Plugin {
             is_group: false,
             name: None,
@@ -1201,7 +1414,7 @@ impl Context {
         &self,
         execute: F,
         label: &str,
-    ) -> Result<Rc<EffectHandle>, crate::fiber::CordisError>
+    ) -> Result<Arc<EffectHandle>, crate::fiber::CordisError>
     where
         F: FnOnce() -> Effect,
     {
@@ -1214,7 +1427,7 @@ impl Context {
         event: &str,
         callback: EventCallback,
         options: EventOptions,
-    ) -> Result<Rc<EffectHandle>, CordisError> {
+    ) -> Result<Arc<EffectHandle>, CordisError> {
         self.events()
             .expect("events service")
             .on(self, event, callback, options)
@@ -1231,7 +1444,7 @@ impl Context {
     /// waterfall, or a dynamic get would recurse forever through the events
     /// service lookup. The framework services are always reachable, even
     /// while the owning fiber is unloading.
-    fn events(&self) -> Option<Rc<EventsService>> {
+    fn events(&self) -> Option<Arc<EventsService>> {
         self.inner.get_service_non_strict::<EventsService>("events")
     }
 
@@ -1242,7 +1455,7 @@ impl Context {
         callback: EventCallback,
         options: EventOptions,
         filter: crate::events::ListenerFilter,
-    ) -> Result<Rc<EffectHandle>, CordisError> {
+    ) -> Result<Arc<EffectHandle>, CordisError> {
         self.events()
             .expect("events service")
             .on_filtered(self, event, callback, options, filter)
@@ -1254,21 +1467,26 @@ impl Context {
         event: &str,
         callback: EventCallback,
         options: EventOptions,
-    ) -> Result<Rc<EffectHandle>, CordisError> {
+    ) -> Result<Arc<EffectHandle>, CordisError> {
         self.events()
             .expect("events service")
             .once(self, event, callback, options)
     }
 
     /// Emits an event (mirrors `ctx.emit`).
-    pub fn emit(&self, event: &str, args: &[Rc<dyn Any>]) {
+    pub fn emit(&self, event: &str, args: &[Arc<dyn Any + Send + Sync>]) {
         self.events()
             .expect("events service")
             .emit(self, event, args);
     }
 
     /// Emits with a filter (mirrors `ctx.emit(thisArg, name, ...)`).
-    pub fn emit_with(&self, event: &str, args: &[Rc<dyn Any>], this_arg: &dyn EventFilter) {
+    pub fn emit_with(
+        &self,
+        event: &str,
+        args: &[Arc<dyn Any + Send + Sync>],
+        this_arg: &dyn EventFilter,
+    ) {
         self.events()
             .expect("events service")
             .emit_with(self, event, args, Some(this_arg));
@@ -1280,7 +1498,7 @@ impl Context {
     pub fn resolve_emit(
         &self,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Vec<EventCallback> {
         self.events()
@@ -1293,7 +1511,7 @@ impl Context {
     pub fn emit_resolved_contained(
         &self,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         callbacks: Vec<EventCallback>,
     ) {
         self.events()
@@ -1307,9 +1525,9 @@ impl Context {
     pub fn emit_resolved_veto(
         &self,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         callbacks: Vec<EventCallback>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), BoxError> {
         self.events()
             .expect("events service")
             .emit_resolved_veto(self, event, callbacks, args)
@@ -1319,7 +1537,7 @@ impl Context {
     pub async fn parallel(
         &self,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Result<(), ParallelError> {
         self.events()
@@ -1334,7 +1552,7 @@ impl Context {
         &self,
         event: &str,
         callbacks: Vec<EventCallback>,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
     ) -> Result<(), ParallelError> {
         self.events()
             .expect("events service")
@@ -1346,9 +1564,9 @@ impl Context {
     pub async fn serial(
         &self,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
-    ) -> Result<Option<Rc<dyn Any>>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Arc<dyn Any + Send + Sync>>, BoxError> {
         self.events()
             .expect("events service")
             .serial(self, event, args, this_arg)
@@ -1359,9 +1577,9 @@ impl Context {
     pub fn bail(
         &self,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
-    ) -> Result<Option<Rc<dyn Any>>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Arc<dyn Any + Send + Sync>>, BoxError> {
         self.events()
             .expect("events service")
             .bail(self, event, args, this_arg)
@@ -1376,10 +1594,10 @@ impl Context {
     pub async fn waterfall(
         &self,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
         tail: crate::events::WaterfallNext,
-    ) -> Result<Option<Rc<dyn Any>>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Arc<dyn Any + Send + Sync>>, BoxError> {
         self.events()
             .expect("events service")
             .waterfall(self, event, args, this_arg, tail)
@@ -1387,7 +1605,7 @@ impl Context {
     }
 
     /// Notifies fibers that depend on `name` (mirrors `ReflectService.notify`).
-    pub fn notify(&self, name: &str) -> Vec<Rc<Fiber>> {
+    pub fn notify(&self, name: &str) -> Vec<Arc<Fiber>> {
         let Some(registry) = self.get::<RegistryService>() else {
             return Vec::new();
         };
@@ -1396,20 +1614,21 @@ impl Context {
 
     /// Notifies fibers whose isolate label for `name` matches one of
     /// `labels` (used by the loader's realm migration).
-    pub fn notify_with_labels(&self, name: &str, labels: &[Label]) -> Vec<Rc<Fiber>> {
+    pub fn notify_with_labels(&self, name: &str, labels: &[Label]) -> Vec<Arc<Fiber>> {
         let Some(registry) = self.get::<RegistryService>() else {
             return Vec::new();
         };
         registry.notify_with_labels(name, labels)
     }
 
-    fn spawn(&self, isolate: Rc<IsolateLayer>, intercept: Rc<InterceptLayer>) -> Self {
+    fn spawn(&self, isolate: Arc<IsolateLayer>, intercept: Arc<InterceptLayer>) -> Self {
         Self {
-            inner: Rc::new(ContextInner {
+            inner: Arc::new(ContextInner {
                 isolate,
                 intercept,
                 store: self.inner.store.clone(),
-                meta: RefCell::new(self.inner.meta.borrow().clone()),
+                write_lock: self.inner.write_lock.clone(),
+                meta: Mutex::new(self.inner.meta.lock().unwrap().clone()),
                 props: self.inner.props.clone(),
             }),
             fiber: self.fiber.clone(),
@@ -1417,11 +1636,12 @@ impl Context {
     }
 
     fn ensure_label(&self, name: &str) -> Label {
+        let _guard = self.inner.write_lock.lock().unwrap();
         if let Some(label) = self.inner.isolate.lookup(name) {
             return label;
         }
         let id = NEXT_LABEL_ID.fetch_add(1, Ordering::Relaxed);
-        let label: Label = Rc::from(format!("{name}#{id}"));
+        let label: Label = Arc::from(format!("{name}#{id}"));
         self.inner.isolate.bottom().insert(name, label.clone());
         label
     }
@@ -1429,7 +1649,7 @@ impl Context {
     fn provide_inner<S: Service>(&self, value: S) {
         // Framework services never collide and live for the whole chain.
         drop(
-            self.provide_str(S::NAME, Rc::new(value))
+            self.provide_str(S::NAME, Arc::new(value))
                 .expect("framework service must register"),
         );
     }

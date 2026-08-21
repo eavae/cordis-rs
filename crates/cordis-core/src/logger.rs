@@ -2,11 +2,13 @@
 //! naming.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use arc_swap::ArcSwap;
 
 use serde::{Deserialize, Deserializer};
 
@@ -100,10 +102,10 @@ impl LoggerType {
 }
 
 /// A custom formatter (`%x`).
-pub type LogFormatter = Rc<dyn Fn(&LogValue) -> String>;
+pub type LogFormatter = Arc<dyn Fn(&LogValue) -> String + Send + Sync>;
 
 /// Formatter table.
-pub type FormatterTable = Rc<HashMap<char, LogFormatter>>;
+pub type FormatterTable = Arc<HashMap<char, LogFormatter>>;
 
 /// A log argument value before formatting.
 #[derive(Debug, Clone, PartialEq)]
@@ -188,7 +190,7 @@ pub trait LoggerExporter {
     }
 
     /// Per-name level overrides plus `default`.
-    fn levels(&self) -> Option<Rc<HashMap<String, LoggerLevel>>> {
+    fn levels(&self) -> Option<Arc<HashMap<String, LoggerLevel>>> {
         None
     }
 
@@ -208,22 +210,22 @@ pub struct SimpleExporter {
     /// Maximum line length.
     pub max_length: usize,
     /// Per-name level overrides plus `default`.
-    pub levels: Option<Rc<HashMap<String, LoggerLevel>>>,
+    pub levels: Option<Arc<HashMap<String, LoggerLevel>>>,
     /// Custom formatters (`%x`).
     pub formatters: Option<FormatterTable>,
     /// The sink that receives every exported message.
-    pub handler: Rc<dyn Fn(&Message)>,
+    pub handler: Arc<dyn Fn(&Message) + Send + Sync>,
 }
 
 impl SimpleExporter {
     /// Creates an exporter that records messages into a shared vector.
-    pub fn capturing(captured: Rc<RefCell<Vec<Message>>>) -> Rc<Self> {
-        Rc::new(Self {
+    pub fn capturing(captured: Arc<Mutex<Vec<Message>>>) -> Arc<Self> {
+        Arc::new(Self {
             colors: 0,
             max_length: 10240,
             levels: None,
             formatters: None,
-            handler: Rc::new(move |message| captured.borrow_mut().push(message.clone())),
+            handler: Arc::new(move |message| captured.lock().unwrap().push(message.clone())),
         })
     }
 }
@@ -237,7 +239,7 @@ impl LoggerExporter for SimpleExporter {
         self.max_length
     }
 
-    fn levels(&self) -> Option<Rc<HashMap<String, LoggerLevel>>> {
+    fn levels(&self) -> Option<Arc<HashMap<String, LoggerLevel>>> {
         self.levels.clone()
     }
 
@@ -270,33 +272,35 @@ impl Config for LoggerIntercept {
 
 /// Logger service, available on every context as `ctx.logger`.
 pub struct LoggerService {
-    pub(crate) buffer: Rc<RefCell<Vec<Message>>>,
-    pub(crate) buffer_size: Rc<Cell<usize>>,
-    exporters: Rc<RefCell<HashMap<u64, Rc<dyn LoggerExporter>>>>,
-    sn_message: Cell<u64>,
-    sn_exporter: Cell<u64>,
+    pub(crate) buffer: Arc<Mutex<Vec<Message>>>,
+    pub(crate) buffer_size: Arc<AtomicUsize>,
+    exporters: Arc<ArcSwap<HashMap<u64, Arc<dyn LoggerExporter + Send + Sync>>>>,
+    write_lock: Arc<Mutex<()>>,
+    sn_message: AtomicU64,
+    sn_exporter: AtomicU64,
 }
 
 impl Default for LoggerService {
     fn default() -> Self {
         let service = Self {
-            buffer: Rc::new(RefCell::new(Vec::new())),
-            buffer_size: Rc::new(Cell::new(1000)),
-            exporters: Rc::new(RefCell::new(HashMap::new())),
-            sn_message: Cell::new(0),
-            sn_exporter: Cell::new(0),
+            buffer: Arc::new(Mutex::new(Vec::new())),
+            buffer_size: Arc::new(AtomicUsize::new(1000)),
+            exporters: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            write_lock: Arc::new(Mutex::new(())),
+            sn_message: AtomicU64::new(0),
+            sn_exporter: AtomicU64::new(0),
         };
         // The default exporter keeps the bounded in-memory buffer (mirrors
         // the `LoggerService` constructor).
-        let buffer = Rc::clone(&service.buffer);
-        let buffer_size = Rc::clone(&service.buffer_size);
-        service.exporters.borrow_mut().insert(
-            0,
-            Rc::new(BufferExporter {
-                buffer,
-                buffer_size,
-            }) as Rc<dyn LoggerExporter>,
-        );
+        let buffer = Arc::clone(&service.buffer);
+        let buffer_size = Arc::clone(&service.buffer_size);
+        let buffer_exporter = Arc::new(BufferExporter {
+            buffer,
+            buffer_size,
+        }) as Arc<dyn LoggerExporter + Send + Sync>;
+        service
+            .exporters
+            .store(Arc::new(HashMap::from([(0, buffer_exporter)])));
         service
     }
 }
@@ -310,20 +314,25 @@ impl LoggerService {
     pub fn exporter(
         &self,
         ctx: &Context,
-        exporter: Rc<dyn LoggerExporter>,
-    ) -> Result<Rc<EffectHandle>, crate::fiber::CordisError> {
-        let id = {
-            let next = self.sn_exporter.get() + 1;
-            self.sn_exporter.set(next);
-            next
-        };
-        let exporters = Rc::clone(&self.exporters);
+        exporter: Arc<dyn LoggerExporter + Send + Sync>,
+    ) -> Result<Arc<EffectHandle>, crate::fiber::CordisError> {
+        let id = { self.sn_exporter.fetch_add(1, Ordering::Relaxed) + 1 };
+        let exporters = self.exporters.clone();
+        let write_lock = self.write_lock.clone();
         ctx.fiber().effect(
             move || {
-                exporters.borrow_mut().insert(id, exporter.clone());
-                let exporters = Rc::clone(&exporters);
+                let _guard = write_lock.lock().unwrap();
+                let mut table = (*exporters.load_full()).clone();
+                table.insert(id, exporter.clone());
+                exporters.store(Arc::new(table));
+                drop(_guard);
+                let exporters = exporters.clone();
+                let write_lock = write_lock.clone();
                 Effect::Disposer(sync_disposer(move || {
-                    exporters.borrow_mut().remove(&id);
+                    let _guard = write_lock.lock().unwrap();
+                    let mut table = (*exporters.load_full()).clone();
+                    table.remove(&id);
+                    exporters.store(Arc::new(table));
                 }))
             },
             "ctx.logger.exporter()",
@@ -332,7 +341,7 @@ impl LoggerService {
 
     /// The exporter count (used by tests).
     pub fn exporter_count(&self) -> usize {
-        self.exporters.borrow().len()
+        self.exporters.load_full().len()
     }
 
     /// Resolves the effective name: intercept config → explicit name →
@@ -361,13 +370,14 @@ impl LoggerService {
 
     /// Resolves the effective level from the intercept config.
     pub(crate) fn intercept_config(&self, ctx: &Context) -> LoggerIntercept {
-        let mut configs: Vec<Rc<dyn Any>> = Vec::new();
+        let mut configs: Vec<Arc<dyn Any + Send + Sync>> = Vec::new();
         let mut layer = Some(ctx.inner.intercept.clone());
         while let Some(current) = layer {
-            if let Some(config) = current.entries.borrow().get("logger") {
+            let state = current.load();
+            if let Some(config) = state.entries.get("logger") {
                 configs.push(config.clone());
             }
-            layer = current.parent.borrow().clone();
+            layer = state.parent.clone();
         }
         configs.reverse();
         let mut result = LoggerIntercept::default();
@@ -388,13 +398,9 @@ impl LoggerService {
     /// Emits a message to all exporters that pass the level filter.
     pub(crate) fn log(&self, _ctx: &Context, r#type: LoggerType, name: &str, args: Vec<LogValue>) {
         let level = r#type.level();
-        let sn = {
-            let next = self.sn_message.get() + 1;
-            self.sn_message.set(next);
-            next
-        };
+        let sn = { self.sn_message.fetch_add(1, Ordering::Relaxed) + 1 };
         let ts = now_millis();
-        let exporters = self.exporters.borrow();
+        let exporters = self.exporters.load_full();
         for exporter in exporters.values() {
             let target = exporter
                 .levels()
@@ -421,8 +427,8 @@ impl LoggerService {
     }
 
     fn push_buffer(&self, message: Message) {
-        let size = self.buffer_size.get();
-        let mut buffer = self.buffer.borrow_mut();
+        let size = self.buffer_size.load(Ordering::Relaxed);
+        let mut buffer = self.buffer.lock().unwrap();
         buffer.push(message);
         let overflow = buffer.len().saturating_sub(size);
         if overflow > 0 {
@@ -432,13 +438,13 @@ impl LoggerService {
 
     /// The current message buffer.
     pub fn buffer(&self) -> Vec<Message> {
-        self.buffer.borrow().clone()
+        self.buffer.lock().unwrap().clone()
     }
 
     /// Adjusts the buffer size.
     pub fn set_buffer_size(&self, size: usize) {
-        self.buffer_size.set(size);
-        let mut buffer = self.buffer.borrow_mut();
+        self.buffer_size.store(size, Ordering::Relaxed);
+        let mut buffer = self.buffer.lock().unwrap();
         let overflow = buffer.len().saturating_sub(size);
         if overflow > 0 {
             buffer.drain(..overflow);
@@ -448,14 +454,14 @@ impl LoggerService {
 
 /// The built-in exporter that maintains the bounded message buffer.
 struct BufferExporter {
-    buffer: Rc<RefCell<Vec<Message>>>,
-    buffer_size: Rc<Cell<usize>>,
+    buffer: Arc<Mutex<Vec<Message>>>,
+    buffer_size: Arc<AtomicUsize>,
 }
 
 impl LoggerExporter for BufferExporter {
     fn export(&self, message: &Message) {
-        let size = self.buffer_size.get();
-        let mut buffer = self.buffer.borrow_mut();
+        let size = self.buffer_size.load(Ordering::Relaxed);
+        let mut buffer = self.buffer.lock().unwrap();
         buffer.push(message.clone());
         let overflow = buffer.len().saturating_sub(size);
         if overflow > 0 {
@@ -467,7 +473,7 @@ impl LoggerExporter for BufferExporter {
 /// A logger bound to a context (mirrors the callable `ctx.logger(name)`).
 #[derive(Clone)]
 pub struct Logger {
-    service: Rc<LoggerService>,
+    service: Arc<LoggerService>,
     /// The intercept chain (the caller's context; JS `this.ctx`).
     ctx: Context,
     /// The fiber used for the fallback name (the service's own shadow; JS
@@ -516,8 +522,8 @@ impl Logger {
     /// Registers an exporter through this logger's context.
     pub fn exporter(
         &self,
-        exporter: Rc<dyn LoggerExporter>,
-    ) -> Result<Rc<EffectHandle>, crate::fiber::CordisError> {
+        exporter: Arc<dyn LoggerExporter + Send + Sync>,
+    ) -> Result<Arc<EffectHandle>, crate::fiber::CordisError> {
         self.service.exporter(&self.ctx, exporter)
     }
 
@@ -765,11 +771,7 @@ impl LoggerService {
     /// Records an error directly into the buffer (kept for the fiber error
     /// sink; exporters supersede it for user-facing logs).
     pub fn error(&self, message: impl fmt::Display) {
-        let sn = {
-            let next = self.sn_message.get() + 1;
-            self.sn_message.set(next);
-            next
-        };
+        let sn = { self.sn_message.fetch_add(1, Ordering::Relaxed) + 1 };
         self.push_buffer(Message {
             sn,
             ts: now_millis(),
@@ -783,7 +785,8 @@ impl LoggerService {
     /// Number of recorded errors (kept for compatibility).
     pub fn error_count(&self) -> usize {
         self.buffer
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .filter(|message| message.r#type == LoggerType::Error)
             .count()

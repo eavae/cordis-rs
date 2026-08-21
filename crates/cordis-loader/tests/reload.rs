@@ -140,8 +140,8 @@ async fn dispose_then_reapply_works() {
                 0,
             );
             tree.await_tree().await;
-            let fiber = entry.fiber.borrow().clone().expect("fiber");
-            assert_eq!(fiber.state.get(), FiberState::Active);
+            let fiber = entry.fiber.lock().unwrap().clone().expect("fiber");
+            assert_eq!(fiber.state(), FiberState::Active);
             assert!(
                 LOGGED
                     .lock()

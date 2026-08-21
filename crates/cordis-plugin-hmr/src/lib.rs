@@ -8,9 +8,8 @@ pub mod graph;
 pub mod reload;
 
 use std::any::Any;
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use cordis_core::{Context, Effect, Service, sync_disposer};
 use cordis_loader::Loader;
@@ -79,7 +78,7 @@ pub fn hmr_plugin() -> cordis_core::Plugin {
         is_group: false,
         name: Some("hmr".to_string()),
         inject: vec![("loader".to_string(), None)],
-        apply: Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
+        apply: Arc::new(|ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
             let loader = ctx.get::<Loader>().expect("loader");
             let config = config
                 .downcast_ref::<serde_yaml_ng::Value>()
@@ -100,7 +99,7 @@ pub fn hmr_plugin() -> cordis_core::Plugin {
 /// The running file watcher.
 pub struct FileWatcher {
     handle: Option<tokio::task::JoinHandle<()>>,
-    watcher: Rc<RefCell<Option<RecommendedWatcher>>>,
+    watcher: Arc<Mutex<Option<RecommendedWatcher>>>,
     watched: Vec<PathBuf>,
 }
 
@@ -108,10 +107,10 @@ impl FileWatcher {
     /// Starts watching; returns a handle that stops the watcher on drop.
     pub fn start(
         ctx: Context,
-        loader: Rc<Loader>,
+        loader: Arc<Loader>,
         config: HmrConfig,
         base_dir: PathBuf,
-    ) -> Rc<Self> {
+    ) -> Arc<Self> {
         let (tx, rx) = std::sync::mpsc::channel();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<PathBuf>(64);
         let watcher = match RecommendedWatcher::new(
@@ -121,18 +120,18 @@ impl FileWatcher {
             Ok(watcher) => watcher,
             Err(error) => {
                 ctx.logger().error(format!("cannot start watcher: {error}"));
-                return Rc::new(Self {
+                return Arc::new(Self {
                     handle: None,
-                    watcher: Rc::new(RefCell::new(None)),
+                    watcher: Arc::new(Mutex::new(None)),
                     watched: Vec::new(),
                 });
             }
         };
-        let watcher = Rc::new(RefCell::new(Some(watcher)));
+        let watcher = Arc::new(Mutex::new(Some(watcher)));
         let mut watched = Vec::new();
         for root in &config.root {
             let path = base_dir.join(root);
-            if let Some(watcher) = watcher.borrow_mut().as_mut() {
+            if let Some(watcher) = watcher.lock().unwrap().as_mut() {
                 if let Err(error) = watcher.watch(&path, RecursiveMode::Recursive) {
                     ctx.logger()
                         .warn(format!("cannot watch {}: {error}", path.display()));
@@ -171,7 +170,7 @@ impl FileWatcher {
             }
         });
 
-        Rc::new(Self {
+        Arc::new(Self {
             handle: Some(handle),
             watcher,
             watched,
@@ -183,7 +182,7 @@ impl FileWatcher {
         if let Some(handle) = &self.handle {
             handle.abort();
         }
-        if let Some(watcher) = self.watcher.borrow_mut().as_mut() {
+        if let Some(watcher) = self.watcher.lock().unwrap().as_mut() {
             for path in &self.watched {
                 let _ = watcher.unwatch(path);
             }
@@ -191,10 +190,10 @@ impl FileWatcher {
     }
 }
 
-fn compile_ignored(patterns: &[String], base: &Path) -> Rc<dyn Fn(&Path) -> bool> {
+fn compile_ignored(patterns: &[String], base: &Path) -> Arc<dyn Fn(&Path) -> bool + Send + Sync> {
     let patterns = patterns.to_vec();
     let base = base.to_path_buf();
-    Rc::new(move |path: &Path| {
+    Arc::new(move |path: &Path| {
         let relative = path.strip_prefix(&base).unwrap_or(path);
         let components: Vec<String> = relative
             .components()
@@ -219,7 +218,7 @@ async fn route_change(ctx: &Context, loader: &Loader, path: &Path) {
     }
     ctx.emit(
         "hmr/change",
-        &[Rc::new(path.to_string_lossy().into_owned())],
+        &[Arc::new(path.to_string_lossy().into_owned())],
     );
 }
 

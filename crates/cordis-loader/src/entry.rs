@@ -1,9 +1,11 @@
 //! Entry, EntryGroup and EntryTree.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use arc_swap::ArcSwap;
 
 use cordis_core::{Context, Fiber, Plugin};
 use serde::{Deserialize, Serialize};
@@ -12,7 +14,7 @@ use tokio::sync::Notify;
 use crate::evaluator::{MinijinjaEvaluator, evaluate_config};
 
 /// The tree's write callback (config write-back).
-pub type WriteCallback = Rc<dyn Fn()>;
+pub type WriteCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// A single entry's options (mirrors `EntryOptions` in entry.ts).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -61,31 +63,31 @@ pub enum IsolateValue {
 /// A group of entries (mirrors `EntryGroup` in group.ts).
 pub struct EntryGroup {
     /// The owning tree.
-    pub tree: Rc<EntryTree>,
+    pub tree: Arc<EntryTree>,
     /// The group's context; entries inherit its isolate and intercept
     /// layers.
     pub ctx: Context,
     /// The parent group, if any (`None` for the root group).
-    pub parent: Option<Rc<Self>>,
+    pub parent: Option<Arc<Self>>,
     /// Direct child entries of this group.
-    pub entries: RefCell<Vec<Rc<Entry>>>,
+    pub entries: Mutex<Vec<Arc<Entry>>>,
     /// The group plugin's fiber, once initialized.
-    pub fiber: RefCell<Option<Rc<Fiber>>>,
+    pub fiber: Mutex<Option<Arc<Fiber>>>,
     /// The entry that owns this group (when the group belongs to an entry).
-    pub entry: RefCell<Option<Rc<Entry>>>,
+    pub entry: Mutex<Option<Arc<Entry>>>,
 }
 
 impl EntryGroup {
     /// Creates an empty group under `parent` (or the root group when
     /// `parent` is `None`).
-    pub fn new(tree: Rc<EntryTree>, ctx: Context, parent: Option<Rc<Self>>) -> Rc<Self> {
-        Rc::new(Self {
+    pub fn new(tree: Arc<EntryTree>, ctx: Context, parent: Option<Arc<Self>>) -> Arc<Self> {
+        Arc::new(Self {
             tree,
             ctx,
             parent,
-            entries: RefCell::new(Vec::new()),
-            fiber: RefCell::new(None),
-            entry: RefCell::new(None),
+            entries: Mutex::new(Vec::new()),
+            fiber: Mutex::new(None),
+            entry: Mutex::new(None),
         })
     }
 }
@@ -93,7 +95,7 @@ impl EntryGroup {
 impl std::fmt::Debug for EntryGroup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EntryGroup")
-            .field("entries", &self.entries.borrow().len())
+            .field("entries", &self.entries.lock().unwrap().len())
             .finish()
     }
 }
@@ -106,17 +108,19 @@ pub struct EntryTree {
     pub enable_logs: bool,
     /// Name → plugin table (builtins/mocks; `.so` loading is handled by the
     /// loader).
-    pub plugins: Rc<RefCell<HashMap<String, Plugin>>>,
+    pub plugins: Arc<ArcSwap<HashMap<String, Plugin>>>,
     /// `cordis:` builtin plugins.
-    pub builtins: Rc<RefCell<HashMap<String, Plugin>>>,
+    pub builtins: Arc<ArcSwap<HashMap<String, Plugin>>>,
     /// Called after every structural change (config write-back).
-    pub write_callback: Rc<RefCell<Option<WriteCallback>>>,
+    pub write_callback: Arc<Mutex<Option<WriteCallback>>>,
     /// The root group of the tree.
-    pub root: Rc<RefCell<Option<Rc<EntryGroup>>>>,
+    pub root: Arc<Mutex<Option<Arc<EntryGroup>>>>,
     /// Number of pending entry tasks (used by the `await` intercept).
-    pub tasks: Rc<Cell<usize>>,
+    pub tasks: Arc<AtomicUsize>,
     /// Notifies waiters when a pending entry task settles.
-    pub tasks_notify: Rc<Notify>,
+    pub tasks_notify: Arc<Notify>,
+    /// Serializes structural tree mutations (plugin tables, root).
+    pub write_lock: Arc<Mutex<()>>,
 }
 
 impl EntryTree {
@@ -124,19 +128,20 @@ impl EntryTree {
     pub const SEP: &'static str = ":";
 
     /// Creates a tree with an empty root group.
-    pub fn new(ctx: &Context) -> Rc<Self> {
-        let tree = Rc::new(Self {
+    pub fn new(ctx: &Context) -> Arc<Self> {
+        let tree = Arc::new(Self {
             ctx: ctx.clone(),
             enable_logs: true,
-            plugins: Rc::new(RefCell::new(HashMap::new())),
-            builtins: Rc::new(RefCell::new(HashMap::new())),
-            write_callback: Rc::new(RefCell::new(None)),
-            root: Rc::new(RefCell::new(None)),
-            tasks: Rc::new(Cell::new(0)),
-            tasks_notify: Rc::new(Notify::new()),
+            plugins: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            builtins: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            write_callback: Arc::new(Mutex::new(None)),
+            root: Arc::new(Mutex::new(None)),
+            tasks: Arc::new(AtomicUsize::new(0)),
+            tasks_notify: Arc::new(Notify::new()),
+            write_lock: Arc::new(Mutex::new(())),
         });
         let root = EntryGroup::new(tree.clone(), ctx.clone(), None);
-        *tree.root.borrow_mut() = Some(root);
+        *tree.root.lock().unwrap() = Some(root);
         tree
     }
 
@@ -148,15 +153,15 @@ impl EntryTree {
         if let Some(builtin) = name.strip_prefix("cordis:") {
             return self
                 .builtins
-                .borrow()
+                .load_full()
                 .get(builtin)
                 .cloned()
                 .ok_or_else(|| format!("cannot resolve builtin \"{name}\""));
         }
-        if let Some(plugin) = self.plugins.borrow().get(name).cloned() {
+        if let Some(plugin) = self.plugins.load_full().get(name).cloned() {
             return Ok(plugin);
         }
-        if let Some(plugin) = self.builtins.borrow().get(name).cloned() {
+        if let Some(plugin) = self.builtins.load_full().get(name).cloned() {
             return Ok(plugin);
         }
         Err(format!("cannot resolve plugin \"{name}\""))
@@ -164,12 +169,17 @@ impl EntryTree {
 
     /// Registers a plugin under a name (mock/builtin table).
     pub fn register_plugin(&self, name: &str, plugin: Plugin) {
-        self.plugins.borrow_mut().insert(name.to_string(), plugin);
+        let _guard = self.write_lock.lock().unwrap();
+        let mut table = (*self.plugins.load_full()).clone();
+        table.insert(name.to_string(), plugin);
+        self.plugins.store(Arc::new(table));
     }
 
     /// Runs the write callback (mirrors `tree.write()`).
     pub fn write(&self) {
-        if let Some(callback) = &*self.write_callback.borrow() {
+        // Clone the callback out of the lock: user callbacks may re-enter the
+        // tree, and holding the guard across the call would self-deadlock.
+        if let Some(callback) = self.write_callback.lock().unwrap().clone() {
             callback();
         }
     }
@@ -180,24 +190,25 @@ impl EntryTree {
             .entries()
             .iter()
             .filter(|entry| {
-                entry.init_task.get()
+                entry.init_task.load(Ordering::Acquire)
                     || entry
                         .fiber
-                        .borrow()
+                        .lock()
+                        .unwrap()
                         .as_ref()
                         .is_some_and(|fiber| fiber.inertia_active())
-                    || (entry.fiber.borrow().is_none()
+                    || (entry.fiber.lock().unwrap().is_none()
                         && !entry.disabled()
-                        && entry.options.borrow().group != Some(true))
+                        && entry.options.lock().unwrap().group != Some(true))
             })
             .count();
-        (self.tasks.get()).max(pending)
+        self.tasks.load(Ordering::Relaxed).max(pending)
     }
 
     /// All entries in the tree (depth-first).
-    pub fn entries(&self) -> Vec<Rc<Entry>> {
+    pub fn entries(&self) -> Vec<Arc<Entry>> {
         let mut result = Vec::new();
-        let root = self.root.borrow();
+        let root = self.root.lock().unwrap();
         if let Some(root) = root.as_ref() {
             collect_entries(root, &mut result);
         }
@@ -205,26 +216,28 @@ impl EntryTree {
     }
 
     /// Finds an entry by id.
-    pub fn resolve(&self, id: &str) -> Option<Rc<Entry>> {
+    pub fn resolve(&self, id: &str) -> Option<Arc<Entry>> {
         self.entries().into_iter().find(|entry| entry.id() == id)
     }
 
     /// Resolves an entry by id, walking nested groups via `:` separators.
-    pub fn resolve_path(&self, id: &str) -> Result<Rc<Entry>, String> {
+    pub fn resolve_path(&self, id: &str) -> Result<Arc<Entry>, String> {
         let parts: Vec<&str> = id.split(Self::SEP).collect();
         let tree: &Self = self;
-        let mut current: Rc<EntryGroup> = tree
+        let mut current: Arc<EntryGroup> = tree
             .root
-            .borrow()
+            .lock()
+            .unwrap()
             .clone()
             .ok_or_else(|| format!("cannot resolve entry {id}"))?;
         for (index, part) in parts.iter().enumerate() {
             let is_last = index + 1 == parts.len();
             let entry = current
                 .entries
-                .borrow()
+                .lock()
+                .unwrap()
                 .iter()
-                .find(|entry| entry.options.borrow().id == *part)
+                .find(|entry| entry.options.lock().unwrap().id == *part)
                 .cloned()
                 .ok_or_else(|| format!("cannot resolve entry {id}"))?;
             if is_last {
@@ -232,7 +245,8 @@ impl EntryTree {
             }
             current = entry
                 .subgroup
-                .borrow()
+                .lock()
+                .unwrap()
                 .clone()
                 .ok_or_else(|| format!("cannot resolve entry {id}"))?;
         }
@@ -240,18 +254,20 @@ impl EntryTree {
     }
 
     /// Resolves a group; `None` resolves the root group.
-    pub fn resolve_group(&self, id: Option<&str>) -> Result<Rc<EntryGroup>, String> {
+    pub fn resolve_group(&self, id: Option<&str>) -> Result<Arc<EntryGroup>, String> {
         match id {
             None => self
                 .root
-                .borrow()
+                .lock()
+                .unwrap()
                 .clone()
                 .ok_or_else(|| "tree has no root".to_string()),
             Some(id) => {
                 let entry = self.resolve_path(id)?;
                 entry
                     .subgroup
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .clone()
                     .ok_or_else(|| format!("entry {id} is not a group"))
             }
@@ -268,7 +284,7 @@ impl EntryTree {
             if !self
                 .entries()
                 .iter()
-                .any(|entry| entry.options.borrow().id == id)
+                .any(|entry| entry.options.lock().unwrap().id == id)
             {
                 options.id = id.clone();
                 return id;
@@ -278,44 +294,44 @@ impl EntryTree {
 
     /// Creates an entry under a parent group (mirrors `tree.create`).
     pub fn create(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         options: EntryOptions,
         parent: Option<&str>,
         position: usize,
-    ) -> Rc<Entry> {
+    ) -> Arc<Entry> {
         let group = self
             .resolve_group(parent)
             .expect("cannot resolve parent group");
         let mut options = options;
         self.ensure_id(&mut options);
         let entry = Entry::new(self.clone(), group.clone(), options.clone());
-        let mut entries = group.entries.borrow_mut();
+        let mut entries = group.entries.lock().unwrap();
         let position = position.min(entries.len());
         entries.insert(position, entry.clone());
         drop(entries);
         self.write();
         entry.update(PartialEntryOptions::from_options(&options), true, false);
-        entry.init_task.set(true);
+        entry.init_task.store(true, Ordering::Release);
         let this = entry.clone();
         tokio::task::spawn_local(async move {
             this.init_inner().await;
-            this.init_task.set(false);
+            this.init_task.store(false, Ordering::Release);
         });
         entry
     }
 
     /// Removes an entry (mirrors `tree.remove`).
-    pub fn remove(self: &Rc<Self>, id: &str) {
+    pub fn remove(self: &Arc<Self>, id: &str) {
         let entry = self
             .resolve_path(id)
             .unwrap_or_else(|error| panic!("{error}"));
-        entry
-            .parent
-            .borrow()
+        let parent = entry.parent.lock().unwrap();
+        parent
             .entries
-            .borrow_mut()
-            .retain(|item| !Rc::ptr_eq(item, &entry));
-        if let Some(fiber) = entry.fiber.borrow().clone() {
+            .lock()
+            .unwrap()
+            .retain(|item| !Arc::ptr_eq(item, &entry));
+        if let Some(fiber) = entry.fiber.lock().unwrap().clone() {
             self.spawn_dispose(fiber);
         }
         self.write();
@@ -323,12 +339,12 @@ impl EntryTree {
 
     /// Disposes a fiber as a counted tree task, so [`EntryTree::await_tree`]
     /// waits for it (mirrors `tree.await` observing `fiber.inertia`).
-    pub(crate) fn spawn_dispose(self: &Rc<Self>, fiber: Rc<Fiber>) {
-        self.tasks.set(self.tasks.get() + 1);
+    pub(crate) fn spawn_dispose(self: &Arc<Self>, fiber: Arc<Fiber>) {
+        self.tasks.fetch_add(1, Ordering::AcqRel);
         let tree = self.clone();
         tokio::task::spawn_local(async move {
             let _ = fiber.dispose().await;
-            tree.tasks.set(tree.tasks.get().saturating_sub(1));
+            tree.tasks.fetch_sub(1, Ordering::AcqRel);
             tree.tasks_notify.notify_waiters();
         });
     }
@@ -339,47 +355,58 @@ impl EntryTree {
     /// and intercept realms follow the move. The fiber is only restarted when
     /// a realm label actually changes; plain moves keep the fiber running
     /// (mirrors the TS patch-context flow).
-    pub fn move_entry(self: &Rc<Self>, id: &str, parent: Option<&str>) {
+    pub fn move_entry(self: &Arc<Self>, id: &str, parent: Option<&str>) {
         let entry = self
             .resolve_path(id)
             .unwrap_or_else(|error| panic!("{error}"));
-        let source = entry.parent.borrow().clone();
+        let source = entry.parent.lock().unwrap().clone();
         let target = self
             .resolve_group(parent)
             .unwrap_or_else(|error| panic!("{error}"));
-        if Rc::ptr_eq(&source, &target) {
+        if Arc::ptr_eq(&source, &target) {
             return;
         }
         // Names whose realm might change with the move: the plugin's declared
         // injects (entry options may leave them to the plugin), plus the
         // service it provides under its own name.
-        let mut names: Vec<String> = entry.options.borrow().inject.clone().unwrap_or_default();
-        if let Ok(plugin) = self.import(&entry.options.borrow().name) {
+        let mut names: Vec<String> = entry
+            .options
+            .lock()
+            .unwrap()
+            .inject
+            .clone()
+            .unwrap_or_default();
+        if let Ok(plugin) = self.import(&entry.options.lock().unwrap().name) {
             for (name, _) in &plugin.inject {
                 if !names.contains(name) {
                     names.push(name.clone());
                 }
             }
         }
-        let own_name = entry.options.borrow().name.clone();
+        let own_name = entry.options.lock().unwrap().name.clone();
         if !names.contains(&own_name) {
             names.push(own_name);
         }
         let old_labels: HashMap<String, Option<cordis_core::Label>> = names
             .iter()
-            .map(|name| (name.clone(), entry.ctx.borrow().isolate_label(name)))
+            .map(|name| (name.clone(), entry.ctx.lock().unwrap().isolate_label(name)))
             .collect();
 
         source
             .entries
-            .borrow_mut()
-            .retain(|item| !Rc::ptr_eq(item, &entry));
-        target.entries.borrow_mut().push(entry.clone());
-        *entry.parent.borrow_mut() = target;
+            .lock()
+            .unwrap()
+            .retain(|item| !Arc::ptr_eq(item, &entry));
+        target.entries.lock().unwrap().push(entry.clone());
+        *entry.parent.lock().unwrap() = target;
 
         // Re-point the context chain at the new parent and re-apply the
         // entry's own realm layers.
-        entry.ctx.borrow().reparent(&entry.parent.borrow().ctx);
+        entry
+            .ctx
+            .lock()
+            .unwrap()
+            .reparent(&entry.parent.lock().unwrap().ctx);
         entry.apply_realm_layers();
         self.write();
 
@@ -391,7 +418,7 @@ impl EntryTree {
             .into_iter()
             .filter_map(|name| {
                 let old = old_labels.get(&name).cloned().flatten();
-                let new = entry.ctx.borrow().isolate_label(&name);
+                let new = entry.ctx.lock().unwrap().isolate_label(&name);
                 (old != new).then_some((name, old, new))
             })
             .collect();
@@ -401,13 +428,13 @@ impl EntryTree {
             // first so the loader's self-dispose hook stays silent). Once the
             // entry re-provides under the new realm, wake dependents so their
             // inject checks re-run (mirrors the TS patch-context order).
-            let fiber = entry.fiber.borrow().clone();
-            *entry.fiber.borrow_mut() = None;
+            let fiber = entry.fiber.lock().unwrap().clone();
+            *entry.fiber.lock().unwrap() = None;
             if let Some(fiber) = fiber {
                 self.spawn_dispose(fiber);
             }
-            if !entry.disabled() && entry.options.borrow().group != Some(true) {
-                entry.init_task.set(true);
+            if !entry.disabled() && entry.options.lock().unwrap().group != Some(true) {
+                entry.init_task.store(true, Ordering::Release);
                 let this = entry;
                 let notify: Vec<(String, Vec<cordis_core::Label>)> = changed
                     .iter()
@@ -424,24 +451,26 @@ impl EntryTree {
                     .collect();
                 tokio::task::spawn_local(async move {
                     this.init_inner().await;
-                    this.init_task.set(false);
+                    this.init_task.store(false, Ordering::Release);
                     for (name, labels) in notify {
-                        let _ = this.ctx.borrow().notify_with_labels(&name, &labels);
+                        let _ = this.ctx.lock().unwrap().notify_with_labels(&name, &labels);
                     }
                 });
             }
         } else if entry.disabled() {
-            let fiber = entry.fiber.borrow().clone();
-            *entry.fiber.borrow_mut() = None;
+            let fiber = entry.fiber.lock().unwrap().clone();
+            *entry.fiber.lock().unwrap() = None;
             if let Some(fiber) = fiber {
                 self.spawn_dispose(fiber);
             }
-        } else if entry.fiber.borrow().is_none() && entry.options.borrow().group != Some(true) {
-            entry.init_task.set(true);
+        } else if entry.fiber.lock().unwrap().is_none()
+            && entry.options.lock().unwrap().group != Some(true)
+        {
+            entry.init_task.store(true, Ordering::Release);
             let this = entry;
             tokio::task::spawn_local(async move {
                 this.init_inner().await;
-                this.init_task.set(false);
+                this.init_task.store(false, Ordering::Release);
             });
         }
     }
@@ -452,15 +481,15 @@ impl EntryTree {
             .resolve_path(id)
             .unwrap_or_else(|error| panic!("{error}"));
         entry.update(options, false, false);
-        if entry.fiber.borrow().is_none()
+        if entry.fiber.lock().unwrap().is_none()
             && !entry.disabled()
-            && entry.options.borrow().disabled != Some(true)
+            && entry.options.lock().unwrap().disabled != Some(true)
         {
-            entry.init_task.set(true);
+            entry.init_task.store(true, Ordering::Release);
             let this = entry;
             tokio::task::spawn_local(async move {
                 this.init_inner().await;
-                this.init_task.set(false);
+                this.init_task.store(false, Ordering::Release);
             });
         }
     }
@@ -472,13 +501,14 @@ impl EntryTree {
     /// `init_inner`, which notifies `tasks_notify`.
     pub async fn await_tree(&self) {
         loop {
-            let pending_fibers: Vec<Rc<Fiber>> = self
+            let pending_fibers: Vec<Arc<Fiber>> = self
                 .entries()
                 .iter()
                 .filter_map(|entry| {
                     entry
                         .fiber
-                        .borrow()
+                        .lock()
+                        .unwrap()
                         .as_ref()
                         .filter(|fiber| fiber.inertia_active())
                         .cloned()
@@ -538,10 +568,10 @@ fn fast_random() -> u64 {
     })
 }
 
-fn collect_entries(group: &Rc<EntryGroup>, result: &mut Vec<Rc<Entry>>) {
-    for entry in group.entries.borrow().iter() {
+fn collect_entries(group: &Arc<EntryGroup>, result: &mut Vec<Arc<Entry>>) {
+    for entry in group.entries.lock().unwrap().iter() {
         result.push(entry.clone());
-        if let Some(subgroup) = &*entry.subgroup.borrow() {
+        if let Some(subgroup) = &*entry.subgroup.lock().unwrap() {
             collect_entries(subgroup, result);
         }
     }
@@ -550,33 +580,33 @@ fn collect_entries(group: &Rc<EntryGroup>, result: &mut Vec<Rc<Entry>>) {
 /// A single config entry (mirrors `Entry` in entry.ts).
 pub struct Entry {
     /// The owning tree.
-    pub tree: Rc<EntryTree>,
+    pub tree: Arc<EntryTree>,
     /// The entry's context; rebuilt when the entry moves between groups.
-    pub ctx: RefCell<Context>,
+    pub ctx: Mutex<Context>,
     /// The owning group; updated when the entry moves between groups.
-    pub parent: RefCell<Rc<EntryGroup>>,
+    pub parent: Mutex<Arc<EntryGroup>>,
     /// The entry's resolved options.
-    pub options: RefCell<EntryOptions>,
+    pub options: Mutex<EntryOptions>,
     /// The entry's root fiber, once applied.
-    pub fiber: RefCell<Option<Rc<Fiber>>>,
+    pub fiber: Mutex<Option<Arc<Fiber>>>,
     /// The subgroup created when this entry is a group.
-    pub subgroup: RefCell<Option<Rc<EntryGroup>>>,
-    init_task: Cell<bool>,
+    pub subgroup: Mutex<Option<Arc<EntryGroup>>>,
+    init_task: AtomicBool,
 }
 
 impl Entry {
     /// Creates an entry; call `update` immediately afterwards.
-    pub fn new(tree: Rc<EntryTree>, parent: Rc<EntryGroup>, options: EntryOptions) -> Rc<Self> {
+    pub fn new(tree: Arc<EntryTree>, parent: Arc<EntryGroup>, options: EntryOptions) -> Arc<Self> {
         let ctx = parent.ctx.clone();
         let ctx = ctx.with_isolate_layer().with_intercept_layer();
-        let entry = Rc::new(Self {
+        let entry = Arc::new(Self {
             tree,
-            ctx: RefCell::new(ctx),
-            parent: RefCell::new(parent),
-            options: RefCell::new(options),
-            fiber: RefCell::new(None),
-            subgroup: RefCell::new(None),
-            init_task: Cell::new(false),
+            ctx: Mutex::new(ctx),
+            parent: Mutex::new(parent),
+            options: Mutex::new(options),
+            fiber: Mutex::new(None),
+            subgroup: Mutex::new(None),
+            init_task: AtomicBool::new(false),
         });
         entry.apply_realm_layers();
         entry
@@ -585,11 +615,11 @@ impl Entry {
     /// Merges this entry's `inject` declarations into `fiber`'s inject map
     /// (mirrors `Inject.resolve(entry.options.inject, fiber.inject)`; the
     /// entry's declaration wins on conflicts).
-    pub(crate) fn merge_inject_into(&self, fiber: &Rc<Fiber>) {
-        let Some(names) = self.options.borrow().inject.clone() else {
+    pub(crate) fn merge_inject_into(&self, fiber: &Arc<Fiber>) {
+        let Some(names) = self.options.lock().unwrap().inject.clone() else {
             return;
         };
-        let mut inject = fiber.inject.borrow_mut();
+        let mut inject = fiber.inject.lock().unwrap();
         for name in names {
             inject.insert(name, None);
         }
@@ -597,27 +627,39 @@ impl Entry {
 
     /// Rebuilds the entry's top isolate/intercept layers from its options.
     fn apply_realm_layers(&self) {
-        self.ctx.borrow().clear_isolate_layer();
-        self.ctx.borrow().clear_intercept_layer();
-        let isolate = self.options.borrow().isolate.clone().unwrap_or_default();
+        let isolate = self
+            .options
+            .lock()
+            .unwrap()
+            .isolate
+            .clone()
+            .unwrap_or_default();
+        let id = self.options.lock().unwrap().id.clone();
+        let intercept = self
+            .options
+            .lock()
+            .unwrap()
+            .intercept
+            .clone()
+            .unwrap_or_default();
+        let ctx = self.ctx.lock().unwrap();
+        ctx.clear_isolate_layer();
+        ctx.clear_intercept_layer();
         for (name, value) in isolate {
             let label = match value {
-                IsolateValue::Flag(true) => {
-                    Rc::<str>::from(format!("{name}#{}", self.options.borrow().id))
-                }
-                IsolateValue::Label(label) => Rc::<str>::from(format!("{name}@{label}")),
+                IsolateValue::Flag(true) => Arc::<str>::from(format!("{name}#{id}")),
+                IsolateValue::Label(label) => Arc::<str>::from(format!("{name}@{label}")),
                 IsolateValue::Flag(false) => continue,
             };
-            self.ctx.borrow().set_isolate(&name, label);
+            ctx.set_isolate(&name, label);
         }
         // The entry's own intercept overrides fill its top intercept layer;
         // parent layers stay reachable through the context chain (mirrors
         // the TS `entry.ctx[Context.intercept]` prototype chain).
-        let intercept = self.options.borrow().intercept.clone().unwrap_or_default();
         if let serde_yaml_ng::Value::Mapping(map) = intercept {
             for (name, value) in map {
                 if let Some(name) = name.as_str() {
-                    self.ctx.borrow().set_intercept(name, Rc::new(value));
+                    ctx.set_intercept(name, Arc::new(value));
                 }
             }
         }
@@ -625,28 +667,28 @@ impl Entry {
 
     /// The full id, prefixed by ancestor entry ids (mirrors `entry.id`).
     pub fn id(&self) -> String {
-        let id = self.options.borrow().id.clone();
+        let id = self.options.lock().unwrap().id.clone();
         match self.ancestor_entry() {
             Some(ancestor) => format!("{}{}{}", ancestor.id(), EntryTree::SEP, id),
             None => id,
         }
     }
 
-    fn ancestor_entry(&self) -> Option<Rc<Self>> {
-        self.parent.borrow().entry.borrow().clone()
+    fn ancestor_entry(&self) -> Option<Arc<Self>> {
+        self.parent.lock().unwrap().entry.lock().unwrap().clone()
     }
 
     /// Whether the entry (or an ancestor) is disabled (mirrors `entry.disabled`).
     pub fn disabled(&self) -> bool {
-        if self.options.borrow().group == Some(true) {
+        if self.options.lock().unwrap().group == Some(true) {
             return false;
         }
-        if self.options.borrow().disabled == Some(true) {
+        if self.options.lock().unwrap().disabled == Some(true) {
             return true;
         }
         let mut entry = self.ancestor_entry();
         while let Some(current) = entry {
-            if current.options.borrow().disabled == Some(true) {
+            if current.options.lock().unwrap().disabled == Some(true) {
                 return true;
             }
             entry = current.ancestor_entry();
@@ -656,14 +698,14 @@ impl Entry {
 
     /// Applies a partial options update (mirrors `entry.update`).
     pub fn update(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         options: PartialEntryOptions,
         create: bool,
         clear_missing: bool,
     ) {
-        let legacy = self.options.borrow().clone();
+        let legacy = self.options.lock().unwrap().clone();
         {
-            let mut current = self.options.borrow_mut();
+            let mut current = self.options.lock().unwrap();
             if create {
                 *current = options.into_options(current.id.clone(), current.name.clone());
             } else if clear_missing {
@@ -675,24 +717,30 @@ impl Entry {
 
         // Groups are always "enabled" per `disabled()`, but explicitly
         // disabling a group entry still stops its subtree.
-        let group_disabled = self.options.borrow().group == Some(true)
-            && self.options.borrow().disabled == Some(true);
+        let group_disabled = self.options.lock().unwrap().group == Some(true)
+            && self.options.lock().unwrap().disabled == Some(true);
         if group_disabled || self.disabled() {
-            let fiber = self.fiber.borrow().clone();
+            let fiber = self.fiber.lock().unwrap().clone();
             if let Some(fiber) = fiber {
                 self.tree.spawn_dispose(fiber);
             }
-            *self.fiber.borrow_mut() = None;
+            *self.fiber.lock().unwrap() = None;
             return;
         }
 
-        let changed = self.options.borrow().diff(&legacy);
+        let changed = self.options.lock().unwrap().diff(&legacy);
         if changed
             .iter()
             .any(|key| *key == "isolate" || *key == "intercept")
         {
             let old_isolate = legacy.isolate.clone().unwrap_or_default();
-            let new_isolate = self.options.borrow().isolate.clone().unwrap_or_default();
+            let new_isolate = self
+                .options
+                .lock()
+                .unwrap()
+                .isolate
+                .clone()
+                .unwrap_or_default();
             let changed_names: Vec<String> = new_isolate
                 .keys()
                 .chain(old_isolate.keys())
@@ -704,18 +752,19 @@ impl Entry {
                 .map(|name| {
                     let label = self
                         .ctx
-                        .borrow()
+                        .lock()
+                        .unwrap()
                         .isolate_label(name)
-                        .unwrap_or_else(|| Rc::from("") as cordis_core::Label);
+                        .unwrap_or_else(|| Arc::from("") as cordis_core::Label);
                     (name.clone(), label)
                 })
                 .collect();
             self.apply_realm_layers();
-            let fiber = self.fiber.borrow().clone();
-            let is_group = self.options.borrow().group == Some(true);
+            let fiber = self.fiber.lock().unwrap().clone();
+            let is_group = self.options.lock().unwrap().group == Some(true);
             if is_group
                 && let Some(fiber) = &fiber
-                && fiber.uid.get().is_some()
+                && fiber.uid().is_some()
             {
                 let config = self.resolve_applied_config();
                 let fiber = fiber.clone();
@@ -725,8 +774,12 @@ impl Entry {
                 // labels (mirrors the loader's store migration; the provider
                 // may be a child entry living under the changed realm).
                 for (name, old_label) in &old_labels {
-                    if let Some(new_label) = self.ctx.borrow().isolate_label(name) {
-                        self.ctx.borrow().migrate_label(name, old_label, &new_label);
+                    let new_label = self.ctx.lock().unwrap().isolate_label(name);
+                    if let Some(new_label) = new_label {
+                        self.ctx
+                            .lock()
+                            .unwrap()
+                            .migrate_label(name, old_label, &new_label);
                     }
                 }
             }
@@ -736,25 +789,32 @@ impl Entry {
                 if let Some(old) = old_labels.get(name) {
                     labels.push(old.clone());
                 }
-                if let Some(new) = self.ctx.borrow().isolate_label(name) {
+                let new = self.ctx.lock().unwrap().isolate_label(name);
+                if let Some(new) = new {
                     labels.push(new);
                 }
-                let _ = self.ctx.borrow().notify_with_labels(name, &labels);
+                let _ = self.ctx.lock().unwrap().notify_with_labels(name, &labels);
             }
             return;
         }
 
-        if self.fiber.borrow().is_some() {
+        let has_fiber = self.fiber.lock().unwrap().is_some();
+        if has_fiber {
             if changed.is_empty() {
                 return;
             }
+
             self.patch_context();
         }
     }
 
     fn patch_context(&self) {
-        if let Some(fiber) = self.fiber.borrow().clone() {
+        // Clone out of the lock first: the config resolution below must not
+        // run while the fiber guard is held (re-entry would self-deadlock).
+        let fiber = self.fiber.lock().unwrap().clone();
+        if let Some(fiber) = fiber {
             let config = self.resolve_applied_config();
+
             tokio::task::spawn_local(fiber.update_with(config, true));
         }
     }
@@ -762,8 +822,10 @@ impl Entry {
     /// Resolves the config for the currently registered plugin (mirrors the
     /// TS `_resolveConfig(this.fiber.runtime!.callback)`), falling back to the
     /// raw config when the plugin cannot be re-imported.
-    fn resolve_applied_config(&self) -> Option<Rc<dyn Any>> {
-        match self.tree.import(&self.options.borrow().name) {
+    fn resolve_applied_config(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        let name = self.options.lock().unwrap().name.clone();
+
+        match self.tree.import(&name) {
             Ok(plugin) => match self.resolve_config_value(&plugin) {
                 Ok(config) => config,
                 Err(error) => {
@@ -777,7 +839,10 @@ impl Entry {
         }
     }
 
-    fn resolve_config_value(&self, plugin: &Plugin) -> Result<Option<Rc<dyn Any>>, String> {
+    fn resolve_config_value(
+        &self,
+        plugin: &Plugin,
+    ) -> Result<Option<Arc<dyn Any + Send + Sync>>, String> {
         // Group plugins receive their config list as-is (mirrors the TS
         // `_resolveConfig` check against `EntryGroup.key`).
         if plugin.is_group {
@@ -785,49 +850,50 @@ impl Entry {
         }
         // Non-group plugins: evaluate `!expr` in the config (mirrors the TS
         // `_resolveConfig` interpolation).
-        let Some(config) = self.options.borrow().config.clone() else {
+        let Some(config) = self.options.lock().unwrap().config.clone() else {
             return Ok(None);
         };
         let Some(loader) = self.tree.ctx.get::<crate::Loader>() else {
-            return Ok(Some(Rc::new(config) as Rc<dyn Any>));
+            return Ok(Some(Arc::new(config) as Arc<dyn Any + Send + Sync>));
         };
         evaluate_config(&config, &MinijinjaEvaluator, &loader.eval_env())
-            .map(|value| Some(Rc::new(value) as Rc<dyn Any>))
+            .map(|value| Some(Arc::new(value) as Arc<dyn Any + Send + Sync>))
             .map_err(|error| format!("config evaluation failed: {error}"))
     }
 
-    fn raw_config(&self) -> Option<Rc<dyn Any>> {
+    fn raw_config(&self) -> Option<Arc<dyn Any + Send + Sync>> {
         self.options
-            .borrow()
+            .lock()
+            .unwrap()
             .config
             .clone()
-            .map(|value| Rc::new(value) as Rc<dyn Any>)
+            .map(|value| Arc::new(value) as Arc<dyn Any + Send + Sync>)
     }
 
     /// Initializes the entry: imports the plugin and creates its fiber
     /// (idempotent, mirrors `entry.init`).
-    pub async fn init(self: &Rc<Self>) {
-        if self.init_task.replace(true) {
+    pub async fn init(self: &Arc<Self>) {
+        if self.init_task.swap(true, Ordering::AcqRel) {
             return;
         }
         self.init_inner().await;
-        self.init_task.set(false);
+        self.init_task.store(false, Ordering::Release);
     }
 
     /// Reloads the entry with the plugin currently registered under its
     /// name: disposes the old fiber and re-applies.
-    pub async fn reload(self: &Rc<Self>) -> Result<(), String> {
+    pub async fn reload(self: &Arc<Self>) -> Result<(), String> {
         // Clear the fiber first so the loader's self-dispose hook does not
         // mistake this intentional reload for a plugin self-dispose.
-        let fiber = self.fiber.borrow().clone();
-        *self.fiber.borrow_mut() = None;
+        let fiber = self.fiber.lock().unwrap().clone();
+        *self.fiber.lock().unwrap() = None;
         if let Some(fiber) = fiber {
             let _ = tokio::task::spawn_local(fiber.dispose()).await;
         }
-        self.init_task.set(false);
+        self.init_task.store(false, Ordering::Release);
         self.init().await;
-        match self.fiber.borrow().clone() {
-            Some(fiber) if fiber.state.get() == cordis_core::FiberState::Failed => {
+        match self.fiber.lock().unwrap().clone() {
+            Some(fiber) if fiber.state() == cordis_core::FiberState::Failed => {
                 Err(format!("entry {} failed to reload", self.id()))
             }
             Some(_) => Ok(()),
@@ -837,38 +903,42 @@ impl Entry {
 
     /// Ungated initialization used by `create` (the pending flag is set by
     /// the caller).
-    pub(crate) async fn init_inner(self: &Rc<Self>) {
+    pub(crate) async fn init_inner(self: &Arc<Self>) {
         let result = self.import_and_apply().await;
         if let Err(error) = result {
-            self.ctx.borrow().logger().error(error);
+            self.ctx.lock().unwrap().logger().error(error);
         }
         // The current init task is finishing; clear its flag so the settle
         // check below sees a quiet tree (mirrors the TS `entry.init`, which
         // notifies `loader` once all tasks settle).
-        self.init_task.set(false);
+        self.init_task.store(false, Ordering::Release);
         self.tree.tasks_notify.notify_waiters();
         if self.tree.get_tasks() == 0 {
-            let _ = self.ctx.borrow().notify("loader");
+            let _ = self.ctx.lock().unwrap().notify("loader");
         }
     }
 
-    async fn import_and_apply(self: &Rc<Self>) -> Result<(), String> {
+    async fn import_and_apply(self: &Arc<Self>) -> Result<(), String> {
         if self.disabled() {
             return Ok(());
         }
         // The plugin is always resolved by `options.name` (mirrors the TS
         // `entry._init`, which imports `this.options.name`). `group: true`
         // only carries the lifecycle semantics of being a group container.
-        let plugin = self.tree.import(&self.options.borrow().name)?;
+        let plugin = self.tree.import(&self.options.lock().unwrap().name)?;
         let config = self.resolve_config_value(&plugin)?;
-        self.tree.tasks.set(self.tree.tasks.get() + 1);
-        let fiber = self.ctx.borrow().registry_plugin(&plugin, config);
-        *self.fiber.borrow_mut() = Some(fiber.clone());
-        if let Some(loader) = self.ctx.borrow().get::<crate::Loader>() {
+        self.tree.tasks.fetch_add(1, Ordering::AcqRel);
+        // Clone the context out of the lock before registering: the plugin
+        // registration emits `internal/plugin`, whose loader callback
+        // re-enters this entry's context (self-deadlock if the guard is held).
+        let ctx = self.ctx.lock().unwrap().clone();
+        let fiber = ctx.registry_plugin(&plugin, config);
+        *self.fiber.lock().unwrap() = Some(fiber.clone());
+        if let Some(loader) = ctx.get::<crate::Loader>() {
             loader.show_log("apply", self);
         }
         let result = fiber.wait().await.map_err(|error| error.to_string());
-        self.tree.tasks.set(self.tree.tasks.get().saturating_sub(1));
+        self.tree.tasks.fetch_sub(1, Ordering::AcqRel);
         self.tree.tasks_notify.notify_waiters();
         result
     }
@@ -876,14 +946,14 @@ impl Entry {
     /// The outer stack lines for error reporting (mirrors `getOuterStack`).
     pub fn get_outer_stack(&self) -> Vec<String> {
         let mut result = Vec::new();
-        let mut entry: Option<Rc<Self>> = self.ancestor_entry();
-        let mut own_id = self.options.borrow().id.clone();
+        let mut entry: Option<Arc<Self>> = self.ancestor_entry();
+        let mut own_id = self.options.lock().unwrap().id.clone();
         loop {
             let base = "cordis";
             result.push(format!("    at {base}#{own_id}"));
             match entry {
                 Some(current) => {
-                    own_id = current.options.borrow().id.clone();
+                    own_id = current.options.lock().unwrap().id.clone();
                     entry = current.ancestor_entry();
                 }
                 None => break,
@@ -897,7 +967,7 @@ impl std::fmt::Debug for Entry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Entry")
             .field("id", &self.id())
-            .field("name", &self.options.borrow().name)
+            .field("name", &self.options.lock().unwrap().name)
             .field("disabled", &self.disabled())
             .finish()
     }

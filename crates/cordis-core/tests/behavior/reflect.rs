@@ -3,8 +3,9 @@
 //! `accessor`).
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use cordis_core::{Context, Effect, FiberState, Plugin, ReflectService, Service, event_callback};
 
@@ -33,12 +34,12 @@ async fn access_check() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, _config| {
+                    apply: Arc::new(|ctx: &Context, _config| {
                         // Reserved properties (`prototype`, `constructor`) are
                         // ordinary Rust items; no special handling is needed.
                         let error = ctx.get_str_strict("bar").unwrap_err();
                         assert_eq!(error, "cannot get property \"bar\" without inject");
-                        let error = ctx.set_str("bar", Rc::new(0i32)).unwrap_err();
+                        let error = ctx.set_str("bar", Arc::new(0i32)).unwrap_err();
                         assert_eq!(error, "cannot set property \"bar\" without provide");
                         Effect::None
                     }),
@@ -52,16 +53,16 @@ async fn access_check() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, _config| {
-                        let error = ctx.set_str("foo", Rc::new(0i32)).unwrap_err();
+                    apply: Arc::new(|ctx: &Context, _config| {
+                        let error = ctx.set_str("foo", Arc::new(0i32)).unwrap_err();
                         assert_eq!(error, "cannot set property \"foo\" without provide");
-                        drop(ctx.provide::<Foo>(Rc::new(Foo)).unwrap());
-                        let error = ctx.provide::<Foo>(Rc::new(Foo)).unwrap_err();
+                        drop(ctx.provide::<Foo>(Arc::new(Foo)).unwrap());
+                        let error = ctx.provide::<Foo>(Arc::new(Foo)).unwrap_err();
                         assert!(
                             error.contains("service \"foo\" has been registered at <root>"),
                             "{error}"
                         );
-                        ctx.set_str("foo", Rc::new(1i32)).unwrap();
+                        ctx.set_str("foo", Arc::new(1i32)).unwrap();
                         Effect::None
                     }),
                 },
@@ -78,8 +79,8 @@ async fn service_inject_leak() {
     local
         .run_until(async {
             let root = Context::new();
-            drop(root.provide::<Foo>(Rc::new(Foo)).unwrap());
-            let fiber = root.inject(&["foo"], Rc::new(|_ctx, _config| Effect::None));
+            drop(root.provide::<Foo>(Arc::new(Foo)).unwrap());
+            let fiber = root.inject(&["foo"], Arc::new(|_ctx, _config| Effect::None));
             fiber.wait().await.unwrap();
             assert!(fiber.context().get_str_strict("foo").is_ok());
 
@@ -99,9 +100,9 @@ async fn service_injection_and_mixin_get() {
     local
         .run_until(async {
             let root = Context::new();
-            drop(root.provide::<Foo>(Rc::new(Foo)).unwrap());
+            drop(root.provide::<Foo>(Arc::new(Foo)).unwrap());
             root.mixin("foo", &[("bar", "foo.bar")]).unwrap();
-            drop(root.provide_str("foo.bar", Rc::new(1i32)).unwrap());
+            drop(root.provide_str("foo.bar", Arc::new(1i32)).unwrap());
 
             // foo is a service, bar is a mixin accessor.
             assert!(root.get_str("foo").is_some());
@@ -119,15 +120,15 @@ async fn reflect_set_ownership_check() {
     local
         .run_until(async {
             let root = Context::new();
-            let service_updates = Rc::new(RefCell::new(Vec::<String>::new()));
+            let service_updates = Arc::new(Mutex::new(Vec::<String>::new()));
             let updates = service_updates.clone();
             drop(
                 root.on(
                     "internal/service",
-                    event_callback(move |args: &[Rc<dyn Any>]| {
+                    event_callback(move |args: &[Arc<dyn Any + Send + Sync>]| {
                         let name = args[0].downcast_ref::<String>().unwrap().clone();
                         let value = args[1].downcast_ref::<i32>().copied().unwrap_or_default();
-                        updates.borrow_mut().push(format!("{name}={value}"));
+                        updates.lock().unwrap().push(format!("{name}={value}"));
                         Ok(None)
                     }),
                     cordis_core::EventOptions::default(),
@@ -139,8 +140,8 @@ async fn reflect_set_ownership_check() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, _config| {
-                        drop(ctx.provide_str("foo", Rc::new(1i32)).unwrap());
+                    apply: Arc::new(|ctx: &Context, _config| {
+                        drop(ctx.provide_str("foo", Arc::new(1i32)).unwrap());
                         Effect::None
                     }),
                 },
@@ -149,7 +150,7 @@ async fn reflect_set_ownership_check() {
             provider.wait().await.unwrap();
 
             // A different fiber (root) cannot set the value.
-            let error = root.set_str("foo", Rc::new(2i32)).unwrap_err();
+            let error = root.set_str("foo", Arc::new(2i32)).unwrap_err();
             assert_eq!(
                 error, "cannot set property \"foo\" in multiple fibers",
                 "ownership must reject cross-fiber writes"
@@ -157,16 +158,19 @@ async fn reflect_set_ownership_check() {
 
             // The owning fiber can update, and the change is broadcast
             // through `internal/service` (the notify path).
-            provider.context().set_str("foo", Rc::new(2i32)).unwrap();
+            provider.context().set_str("foo", Arc::new(2i32)).unwrap();
             assert_eq!(
                 root.get_str("foo").unwrap().downcast_ref::<i32>().copied(),
                 Some(2),
                 "owning fiber must update the value"
             );
             assert!(
-                service_updates.borrow().contains(&"foo=2".to_string()),
+                service_updates
+                    .lock()
+                    .unwrap()
+                    .contains(&"foo=2".to_string()),
                 "set must notify through internal/service: {:?}",
-                service_updates.borrow()
+                service_updates.lock().unwrap()
             );
         })
         .await;
@@ -181,7 +185,7 @@ async fn reflect_get_three_states() {
     local
         .run_until(async {
             let root = Context::new();
-            drop(root.provide_str("foo", Rc::new(1i32)).unwrap());
+            drop(root.provide_str("foo", Arc::new(1i32)).unwrap());
 
             // Registered + ACTIVE.
             assert_eq!(
@@ -207,10 +211,10 @@ async fn reflect_get_three_states() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|_ctx: &Context, _config| {
+                    apply: Arc::new(|_ctx: &Context, _config| {
                         Effect::Disposer(cordis_core::async_disposer(move || async move {
                             tokio::task::yield_now().await;
-                            Ok::<(), Box<dyn std::error::Error>>(())
+                            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
                         }))
                     }),
                 },
@@ -228,7 +232,7 @@ async fn reflect_get_three_states() {
                 tokio::task::yield_now().await;
                 let strict = root.get_str("events");
                 let non_strict = root.get_str_non_strict("events");
-                if root.fiber().state.get() != FiberState::Active {
+                if root.fiber().state() != FiberState::Active {
                     saw_inactive = true;
                     assert!(
                         strict.is_none(),
@@ -239,7 +243,7 @@ async fn reflect_get_three_states() {
                         "non-strict get must keep resolving during unload"
                     );
                 }
-                if root.fiber().state.get() == FiberState::Active && strict.is_some() {
+                if root.fiber().state() == FiberState::Active && strict.is_some() {
                     break;
                 }
             }
@@ -258,11 +262,11 @@ fn reflect_has_sources() {
     let root = Context::new();
     assert!(!root.has_str("foo"), "no property yet");
 
-    drop(root.provide_str("foo", Rc::new(1i32)).unwrap());
+    drop(root.provide_str("foo", Arc::new(1i32)).unwrap());
     assert!(root.has_str("foo"), "registered service counts");
 
     drop(
-        root.accessor("bar", Rc::new(|_ctx| Some(Rc::new(2i32))), None)
+        root.accessor("bar", Arc::new(|_ctx| Some(Arc::new(2i32))), None)
             .unwrap(),
     );
     assert!(root.has_str("bar"), "registered accessor counts");
@@ -277,7 +281,7 @@ async fn reflect_accessor_effect_governance() {
     local
         .run_until(async {
             let root = Context::new();
-            let cell = Rc::new(Cell::new(10i32));
+            let cell = Arc::new(AtomicI32::new(10));
             let get_cell = cell.clone();
             let set_cell = cell.clone();
             let fiber = root.plugin(
@@ -285,15 +289,20 @@ async fn reflect_accessor_effect_governance() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(move |ctx: &Context, _config| {
+                    apply: Arc::new(move |ctx: &Context, _config| {
                         let get_cell = get_cell.clone();
                         let set_cell = set_cell.clone();
                         drop(
                             ctx.accessor(
                                 "secret",
-                                Rc::new(move |_ctx| Some(Rc::new(get_cell.get()))),
-                                Some(Rc::new(move |_ctx, value| {
-                                    set_cell.set(value.downcast_ref::<i32>().copied().unwrap_or(0));
+                                Arc::new(move |_ctx| {
+                                    Some(Arc::new(get_cell.load(Ordering::SeqCst)))
+                                }),
+                                Some(Arc::new(move |_ctx, value| {
+                                    set_cell.store(
+                                        value.downcast_ref::<i32>().copied().unwrap_or(0),
+                                        Ordering::SeqCst,
+                                    );
                                 })),
                             )
                             .unwrap(),
@@ -313,13 +322,13 @@ async fn reflect_accessor_effect_governance() {
                     .copied(),
                 Some(10)
             );
-            root.set_assoc("x", "secret", Rc::new(42i32)).unwrap();
-            assert_eq!(cell.get(), 42);
+            root.set_assoc("x", "secret", Arc::new(42i32)).unwrap();
+            assert_eq!(cell.load(Ordering::SeqCst), 42);
 
             // Registering an accessor over a same-name service is rejected.
-            drop(root.provide_str("taken", Rc::new(1i32)).unwrap());
+            drop(root.provide_str("taken", Arc::new(1i32)).unwrap());
             let error = root
-                .accessor("taken", Rc::new(|_ctx| None), None)
+                .accessor("taken", Arc::new(|_ctx| None), None)
                 .unwrap_err();
             assert!(error.contains("already declared"), "{error}");
 
@@ -340,7 +349,7 @@ fn reflect_service_facade() {
     let root = Context::new();
     let reflect = root.get::<ReflectService>().unwrap();
 
-    drop(root.provide_str("foo", Rc::new(1i32)).unwrap());
+    drop(root.provide_str("foo", Arc::new(1i32)).unwrap());
     assert_eq!(
         reflect
             .get(&root, "foo", true)
@@ -350,7 +359,7 @@ fn reflect_service_facade() {
         Some(1)
     );
     assert!(reflect.has(&root, "foo"));
-    reflect.set(&root, "foo", Rc::new(2i32)).unwrap();
+    reflect.set(&root, "foo", Arc::new(2i32)).unwrap();
     assert_eq!(
         reflect
             .get(&root, "foo", false)
@@ -363,7 +372,7 @@ fn reflect_service_facade() {
 
     drop(
         reflect
-            .accessor(&root, "bar", Rc::new(|_ctx| Some(Rc::new(3i32))), None)
+            .accessor(&root, "bar", Arc::new(|_ctx| Some(Arc::new(3i32))), None)
             .unwrap(),
     );
     assert!(reflect.has(&root, "bar"));

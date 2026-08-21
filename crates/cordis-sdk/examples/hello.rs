@@ -1,7 +1,7 @@
 //! A minimal example plugin.
 
 use std::any::Any;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cordis_sdk::{ApplyFn, Context, Effect, Plugin, service, sync_disposer};
 
@@ -10,12 +10,12 @@ struct HelloService;
 
 /// The plugin's apply callback: registers a service, resolves it through the
 /// macro-generated traced accessor, logs a greeting and registers an effect.
-pub fn apply(ctx: &Context, _config: &Rc<dyn Any>) -> Effect {
+pub fn apply(ctx: &Context, _config: &Arc<dyn Any + Send + Sync>) -> Effect {
     let ctx = ctx.clone();
     let ctx_for_dispose = ctx.clone();
     // `#[service]` generates a typed accessor that returns a traced handle;
     // the handle derefs to the service itself.
-    drop(ctx.provide::<HelloService>(Rc::new(HelloService)).unwrap());
+    drop(ctx.provide::<HelloService>(Arc::new(HelloService)).unwrap());
     assert!(ctx.hello_service().is_some());
     ctx.logger().named("hello").info("hello from cordis plugin");
     Effect::Disposer(sync_disposer(move || {
@@ -28,7 +28,7 @@ fn main() {
         is_group: false,
         name: Some("hello".to_string()),
         inject: Vec::new(),
-        apply: Rc::new(apply) as ApplyFn,
+        apply: Arc::new(apply) as ApplyFn,
     };
     println!("hello plugin ready: {:?}", plugin.name);
 }

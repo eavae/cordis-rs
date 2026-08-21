@@ -1,7 +1,8 @@
 //! Timer plugin.
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use cordis_core::{Context, Effect, Plugin};
@@ -26,12 +27,14 @@ async fn timeout_basic_and_once() {
     local
         .run_until(async {
             let root = Context::new();
-            let count = Rc::new(Cell::new(0u32));
+            let count = Arc::new(AtomicU32::new(0));
             TimerService::timeout(
                 &root,
                 {
                     let count = count.clone();
-                    Rc::new(move || count.set(count.get() + 1))
+                    Arc::new(move || {
+                        count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+                    })
                 },
                 TICK,
             )
@@ -40,11 +43,11 @@ async fn timeout_basic_and_once() {
             // clock before the first advance.
             tokio::task::yield_now().await;
             advance_and_run(Duration::from_millis(TICK / 2)).await;
-            assert_eq!(count.get(), 0);
+            assert_eq!(count.load(Ordering::SeqCst), 0);
             advance_and_run(Duration::from_millis(TICK)).await;
-            assert_eq!(count.get(), 1);
+            assert_eq!(count.load(Ordering::SeqCst), 1);
             advance_and_run(Duration::from_millis(TICK)).await;
-            assert_eq!(count.get(), 1);
+            assert_eq!(count.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -55,12 +58,14 @@ async fn timeout_dispose_cancels() {
     local
         .run_until(async {
             let root = Context::new();
-            let count = Rc::new(Cell::new(0u32));
+            let count = Arc::new(AtomicU32::new(0));
             let handle = TimerService::timeout(
                 &root,
                 {
                     let count = count.clone();
-                    Rc::new(move || count.set(count.get() + 1))
+                    Arc::new(move || {
+                        count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+                    })
                 },
                 TICK,
             )
@@ -68,7 +73,7 @@ async fn timeout_dispose_cancels() {
             tokio::task::yield_now().await;
             handle.dispose().await.unwrap();
             advance_and_run(Duration::from_millis(TICK * 2)).await;
-            assert_eq!(count.get(), 0);
+            assert_eq!(count.load(Ordering::SeqCst), 0);
         })
         .await;
 }
@@ -95,12 +100,14 @@ async fn interval_repeats_and_stops() {
     local
         .run_until(async {
             let root = Context::new();
-            let count = Rc::new(Cell::new(0u32));
+            let count = Arc::new(AtomicU32::new(0));
             let handle = TimerService::interval(
                 &root,
                 {
                     let count = count.clone();
-                    Rc::new(move || count.set(count.get() + 1))
+                    Arc::new(move || {
+                        count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+                    })
                 },
                 TICK,
             )
@@ -109,13 +116,13 @@ async fn interval_repeats_and_stops() {
             advance_and_run(Duration::from_millis(TICK)).await;
             advance_and_run(Duration::from_millis(TICK)).await;
             assert_eq!(
-                count.get(),
+                count.load(Ordering::SeqCst),
                 2,
                 "interval should tick twice after 2 intervals"
             );
             handle.dispose().await.unwrap();
             advance_and_run(Duration::from_millis(TICK * 2)).await;
-            assert_eq!(count.get(), 2);
+            assert_eq!(count.load(Ordering::SeqCst), 2);
         })
         .await;
 }
@@ -140,12 +147,12 @@ async fn throttle_first_immediate_then_delayed() {
     local
         .run_until(async {
             let root = Context::new();
-            let calls = Rc::new(RefCell::new(Vec::new()));
+            let calls = Arc::new(Mutex::new(Vec::new()));
             let throttled = TimerService::throttle(
                 &root,
                 {
                     let calls = calls.clone();
-                    Rc::new(move || calls.borrow_mut().push(tokio::time::Instant::now()))
+                    Arc::new(move || calls.lock().unwrap().push(tokio::time::Instant::now()))
                 },
                 TICK * 2,
                 false,
@@ -154,18 +161,20 @@ async fn throttle_first_immediate_then_delayed() {
             let start = tokio::time::Instant::now();
             throttled();
             tokio::task::yield_now().await;
-            assert_eq!(calls.borrow().len(), 1, "first call is immediate");
+            assert_eq!(calls.lock().unwrap().len(), 1, "first call is immediate");
             throttled();
             throttled();
             tokio::task::yield_now().await;
             assert_eq!(
-                calls.borrow().len(),
+                calls.lock().unwrap().len(),
                 1,
                 "calls within the window are delayed"
             );
             advance_and_run(Duration::from_millis(TICK * 3)).await;
-            assert_eq!(calls.borrow().len(), 2, "one trailing call runs");
-            assert!(calls.borrow()[1].duration_since(start) >= Duration::from_millis(TICK * 2));
+            assert_eq!(calls.lock().unwrap().len(), 2, "one trailing call runs");
+            assert!(
+                calls.lock().unwrap()[1].duration_since(start) >= Duration::from_millis(TICK * 2)
+            );
         })
         .await;
 }
@@ -176,12 +185,14 @@ async fn throttle_no_trailing_drops() {
     local
         .run_until(async {
             let root = Context::new();
-            let count = Rc::new(Cell::new(0u32));
+            let count = Arc::new(AtomicU32::new(0));
             let throttled = TimerService::throttle(
                 &root,
                 {
                     let count = count.clone();
-                    Rc::new(move || count.set(count.get() + 1))
+                    Arc::new(move || {
+                        count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+                    })
                 },
                 TICK * 2,
                 true,
@@ -191,7 +202,11 @@ async fn throttle_no_trailing_drops() {
             throttled();
             throttled();
             advance_and_run(Duration::from_millis(TICK * 3)).await;
-            assert_eq!(count.get(), 1, "no trailing call with no_trailing");
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "no trailing call with no_trailing"
+            );
         })
         .await;
 }
@@ -202,12 +217,14 @@ async fn debounce_resets_and_fires_after_quiet() {
     local
         .run_until(async {
             let root = Context::new();
-            let count = Rc::new(Cell::new(0u32));
+            let count = Arc::new(AtomicU32::new(0));
             let debounced = TimerService::debounce(
                 &root,
                 {
                     let count = count.clone();
-                    Rc::new(move || count.set(count.get() + 1))
+                    Arc::new(move || {
+                        count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+                    })
                 },
                 TICK,
             )
@@ -220,9 +237,17 @@ async fn debounce_resets_and_fires_after_quiet() {
             advance_and_run(Duration::from_millis(TICK / 2)).await;
             debounced();
             tokio::task::yield_now().await;
-            assert_eq!(count.get(), 0, "pending during rapid calls");
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                0,
+                "pending during rapid calls"
+            );
             advance_and_run(Duration::from_millis(TICK * 2)).await;
-            assert_eq!(count.get(), 1, "one call after the quiet period");
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "one call after the quiet period"
+            );
         })
         .await;
 }
@@ -238,17 +263,19 @@ async fn throttle_disposed_skips_trailing() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|_ctx: &Context, _config| Effect::None),
+                    apply: Arc::new(|_ctx: &Context, _config| Effect::None),
                 },
                 None,
             );
             fiber.wait().await.unwrap();
-            let count = Rc::new(Cell::new(0u32));
+            let count = Arc::new(AtomicU32::new(0));
             let throttled = TimerService::throttle(
                 &fiber.context(),
                 {
                     let count = count.clone();
-                    Rc::new(move || count.set(count.get() + 1))
+                    Arc::new(move || {
+                        count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+                    })
                 },
                 TICK,
                 false,
@@ -258,10 +285,18 @@ async fn throttle_disposed_skips_trailing() {
             fiber.dispose().await;
             // Immediate calls still fire after dispose; trailing ones do not.
             throttled();
-            assert_eq!(count.get(), 1, "immediate call fires after dispose");
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "immediate call fires after dispose"
+            );
             throttled();
             advance_and_run(Duration::from_millis(TICK * 2)).await;
-            assert_eq!(count.get(), 1, "no trailing call after dispose");
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "no trailing call after dispose"
+            );
         })
         .await;
 }
@@ -277,17 +312,19 @@ async fn debounce_disposed_ignores_calls() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|_ctx: &Context, _config| Effect::None),
+                    apply: Arc::new(|_ctx: &Context, _config| Effect::None),
                 },
                 None,
             );
             fiber.wait().await.unwrap();
-            let count = Rc::new(Cell::new(0u32));
+            let count = Arc::new(AtomicU32::new(0));
             let debounced = TimerService::debounce(
                 &fiber.context(),
                 {
                     let count = count.clone();
-                    Rc::new(move || count.set(count.get() + 1))
+                    Arc::new(move || {
+                        count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+                    })
                 },
                 TICK,
             )
@@ -297,7 +334,7 @@ async fn debounce_disposed_ignores_calls() {
             fiber.dispose().await;
             debounced();
             advance_and_run(Duration::from_millis(TICK * 2)).await;
-            assert_eq!(count.get(), 0, "no call after dispose");
+            assert_eq!(count.load(Ordering::SeqCst), 0, "no call after dispose");
         })
         .await;
 }

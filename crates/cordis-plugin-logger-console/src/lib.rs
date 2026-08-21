@@ -3,9 +3,9 @@
 //! Port of `@cordisjs/plugin-logger-console`: renders log messages in the
 //! console format.
 
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use cordis_core::{
     LogFormatter, LoggerExporter, LoggerLevel, LoggerService, LoggerType, Message, format_message,
@@ -86,21 +86,23 @@ pub struct ConsoleExporter {
     /// The exporter configuration.
     pub config: ConsoleConfig,
     /// Custom formatters (`%x`).
-    pub formatters: RefCell<HashMap<char, LogFormatter>>,
-    timestamp: Cell<u64>,
-    writer: Rc<dyn Fn(&str)>,
+    pub formatters: Mutex<HashMap<char, LogFormatter>>,
+    timestamp: AtomicU64,
+    writer: Arc<dyn Fn(&str) + Send + Sync>,
 }
 
 impl ConsoleExporter {
     /// Creates an exporter writing rendered lines to `writer`.
-    pub fn new(config: ConsoleConfig, writer: Rc<dyn Fn(&str)>) -> Rc<Self> {
-        let exporter = Rc::new(Self {
+    pub fn new(config: ConsoleConfig, writer: Arc<dyn Fn(&str) + Send + Sync>) -> Arc<Self> {
+        let exporter = Arc::new(Self {
             config,
-            formatters: RefCell::new(HashMap::new()),
-            timestamp: Cell::new(0),
+            formatters: Mutex::new(HashMap::new()),
+            timestamp: AtomicU64::new(0),
             writer,
         });
-        exporter.timestamp.set(Message::now_millis());
+        exporter
+            .timestamp
+            .store(Message::now_millis(), Ordering::Relaxed);
         exporter
     }
 
@@ -148,12 +150,14 @@ impl ConsoleExporter {
             }
         }
 
-        let formatters = self.formatters.borrow();
+        let formatters = self.formatters.lock().unwrap();
         let formatted = format_message(message, self, &formatters);
         output.push_str(&formatted.replace('\n', &format!("\n{}", " ".repeat(indent))));
 
-        if self.config.show_diff && self.timestamp.get() != 0 {
-            let diff = message.ts.saturating_sub(self.timestamp.get());
+        if self.config.show_diff && self.timestamp.load(Ordering::Relaxed) != 0 {
+            let diff = message
+                .ts
+                .saturating_sub(self.timestamp.load(Ordering::Relaxed));
             output.push_str(&LoggerService::color(
                 self.config.colors,
                 code,
@@ -161,13 +165,13 @@ impl ConsoleExporter {
                 "",
             ));
         }
-        self.timestamp.set(message.ts);
+        self.timestamp.store(message.ts, Ordering::Relaxed);
         output
     }
 
     /// Overrides the diff baseline timestamp (test helper).
     pub fn set_timestamp(&self, ts: u64) {
-        self.timestamp.set(ts);
+        self.timestamp.store(ts, Ordering::Relaxed);
     }
 }
 
@@ -180,15 +184,15 @@ impl LoggerExporter for ConsoleExporter {
         self.config.max_length
     }
 
-    fn levels(&self) -> Option<Rc<HashMap<String, LoggerLevel>>> {
+    fn levels(&self) -> Option<Arc<HashMap<String, LoggerLevel>>> {
         self.config
             .levels
             .as_ref()
-            .map(|levels| Rc::new(levels.clone()))
+            .map(|levels| Arc::new(levels.clone()))
     }
 
-    fn formatters(&self) -> Option<Rc<HashMap<char, LogFormatter>>> {
-        Some(Rc::new(self.formatters.borrow().clone()))
+    fn formatters(&self) -> Option<Arc<HashMap<char, LogFormatter>>> {
+        Some(Arc::new(self.formatters.lock().unwrap().clone()))
     }
 
     fn export(&self, message: &Message) {
@@ -235,8 +239,8 @@ fn format_duration(ms: u64) -> String {
 pub fn install(
     ctx: &cordis_core::Context,
     config: ConsoleConfig,
-) -> Result<Rc<ConsoleExporter>, String> {
-    let writer: Rc<dyn Fn(&str)> = Rc::new(|line| println!("{line}"));
+) -> Result<Arc<ConsoleExporter>, String> {
+    let writer: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(|line| println!("{line}"));
     let exporter = ConsoleExporter::new(config, writer);
     let logger = ctx.get::<LoggerService>().expect("logger");
     logger

@@ -2,8 +2,8 @@
 //! validation on registration/update, and entry location in apply errors.
 
 use std::any::Any;
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{
     ConfigValidator, Context, Effect, FiberState, LoggerService, Plugin, ValidationError,
@@ -16,19 +16,21 @@ struct Config {
 }
 
 fn value_must_be_positive() -> ConfigValidator {
-    Rc::new(|config: &Rc<dyn Any>| -> Result<(), ValidationError> {
-        let config = config.downcast_ref::<Config>().expect("config");
-        if config.value > 0 {
-            Ok(())
-        } else {
-            Err(ValidationError {
-                issues: vec![ValidationIssue {
-                    message: "value must be positive".to_string(),
-                    path: Some("value".to_string()),
-                }],
-            })
-        }
-    })
+    Arc::new(
+        |config: &Arc<dyn Any + Send + Sync>| -> Result<(), ValidationError> {
+            let config = config.downcast_ref::<Config>().expect("config");
+            if config.value > 0 {
+                Ok(())
+            } else {
+                Err(ValidationError {
+                    issues: vec![ValidationIssue {
+                        message: "value must be positive".to_string(),
+                        path: Some("value".to_string()),
+                    }],
+                })
+            }
+        },
+    )
 }
 
 #[test]
@@ -57,7 +59,7 @@ async fn config_validation_rejects_registration() {
     local
         .run_until(async {
             let root = Context::new();
-            let applied = Rc::new(Cell::new(0u32));
+            let applied = Arc::new(AtomicU32::new(0));
             let fiber = root.plugin_with_validator(
                 &Plugin {
                     is_group: false,
@@ -65,19 +67,25 @@ async fn config_validation_rejects_registration() {
                     inject: Vec::new(),
                     apply: {
                         let applied = applied.clone();
-                        Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
-                            applied.set(applied.get() + 1);
-                            Effect::None
-                        })
+                        Arc::new(
+                            move |_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                                applied.store(applied.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                                Effect::None
+                            },
+                        )
                     },
                 },
-                Some(Rc::new(Config { value: -1 })),
+                Some(Arc::new(Config { value: -1 })),
                 Some(value_must_be_positive()),
             );
             tokio::task::yield_now().await;
             assert!(fiber.wait().await.is_err());
-            assert_eq!(fiber.state.get(), FiberState::Failed);
-            assert_eq!(applied.get(), 0, "apply must not run for invalid config");
+            assert_eq!(fiber.state(), FiberState::Failed);
+            assert_eq!(
+                applied.load(Ordering::SeqCst),
+                0,
+                "apply must not run for invalid config"
+            );
             assert!(
                 root.get::<LoggerService>().unwrap().error_count() >= 1,
                 "validation error must be logged"
@@ -92,7 +100,7 @@ async fn config_validation_rejects_update() {
     local
         .run_until(async {
             let root = Context::new();
-            let applied = Rc::new(Cell::new(0u32));
+            let applied = Arc::new(AtomicU32::new(0));
             let fiber = root.plugin_with_validator(
                 &Plugin {
                     is_group: false,
@@ -100,24 +108,30 @@ async fn config_validation_rejects_update() {
                     inject: Vec::new(),
                     apply: {
                         let applied = applied.clone();
-                        Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
-                            applied.set(applied.get() + 1);
-                            Effect::None
-                        })
+                        Arc::new(
+                            move |_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                                applied.store(applied.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                                Effect::None
+                            },
+                        )
                     },
                 },
-                Some(Rc::new(Config { value: 1 })),
+                Some(Arc::new(Config { value: 1 })),
                 Some(value_must_be_positive()),
             );
             fiber.wait().await.unwrap();
-            assert_eq!(applied.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
 
             let error = fiber
-                .update(Some(Rc::new(Config { value: -5 })))
+                .update(Some(Arc::new(Config { value: -5 })))
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("invalid config"), "{error}");
-            assert_eq!(applied.get(), 1, "invalid update must not re-apply");
+            assert_eq!(
+                applied.load(Ordering::SeqCst),
+                1,
+                "invalid update must not re-apply"
+            );
         })
         .await;
 }
@@ -133,7 +147,7 @@ async fn apply_error_includes_entry_location() {
                     is_group: false,
                     name: Some("demo".to_string()),
                     inject: Vec::new(),
-                    apply: Rc::new(|_ctx: &Context, _config| {
+                    apply: Arc::new(|_ctx: &Context, _config| {
                         Effect::Error(Box::new(std::io::Error::other("boom")))
                     }),
                 },

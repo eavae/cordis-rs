@@ -1,9 +1,10 @@
 //! EntryGroup and the Group plugin.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{Context, Effect, sync_disposer};
 use cordis_loader::{EntryOptions, Loader, PartialEntryOptions};
@@ -43,17 +44,19 @@ async fn group_initialize_and_disable_chain() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let foo_count = Rc::new(Cell::new(0u32));
-            let dispose_count = Rc::new(Cell::new(0u32));
+            let foo_count = Arc::new(AtomicU32::new(0));
+            let dispose_count = Arc::new(AtomicU32::new(0));
             let foo_count_apply = foo_count.clone();
             let dispose_count_apply = dispose_count.clone();
             loader.mock(
                 "foo",
-                Rc::new(move |_ctx: &Context, _config| {
-                    foo_count_apply.set(foo_count_apply.get() + 1);
+                Arc::new(move |_ctx: &Context, _config| {
+                    foo_count_apply
+                        .store(foo_count_apply.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                     let dispose_count = dispose_count_apply.clone();
                     Effect::Disposer(sync_disposer(move || {
-                        dispose_count.set(dispose_count.get() + 1);
+                        dispose_count
+                            .store(dispose_count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                     }))
                 }),
             );
@@ -70,15 +73,16 @@ async fn group_initialize_and_disable_chain() {
                 "[test] outer subgroup len: {:?}",
                 outer
                     .subgroup
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .as_ref()
-                    .map(|sg| sg.entries.borrow().len())
+                    .map(|sg| sg.entries.lock().unwrap().len())
             );
             let inner = tree.create(group_opts("", vec![foo_opts()]), Some(&outer.id()), 0);
             tree.await_tree().await;
 
-            assert_eq!(foo_count.get(), 2);
-            assert_eq!(dispose_count.get(), 0);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 0);
             assert_eq!(tree.entries().len(), 4);
 
             // Disable the inner group: its subtree unloads.
@@ -90,8 +94,8 @@ async fn group_initialize_and_disable_chain() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(foo_count.get(), 2);
-            assert_eq!(dispose_count.get(), 1);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
             assert_eq!(tree.entries().len(), 4);
 
             // Disable the outer group: its subtree (inner's foo) unloads too,
@@ -104,7 +108,7 @@ async fn group_initialize_and_disable_chain() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(foo_count.get(), 2);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
             eprintln!(
                 "[test] after disable outer entries: {:?}",
                 tree.entries().iter().map(|e| e.id()).collect::<Vec<_>>()
@@ -112,11 +116,11 @@ async fn group_initialize_and_disable_chain() {
             let outer_entry = tree.resolve(&outer.id()).unwrap();
             eprintln!(
                 "[test] outer subgroup: {:?}",
-                outer_entry
-                    .subgroup
-                    .borrow()
-                    .as_ref()
-                    .map(|sg| sg.entries.borrow().len())
+                outer_entry.subgroup.lock().unwrap().as_ref().map(|sg| sg
+                    .entries
+                    .lock()
+                    .unwrap()
+                    .len())
             );
             assert_eq!(tree.entries().len(), 4);
 
@@ -129,7 +133,7 @@ async fn group_initialize_and_disable_chain() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(foo_count.get(), 2);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
 
             // Enable outer: both foo entries apply again.
             tree.update_entry(
@@ -143,7 +147,7 @@ async fn group_initialize_and_disable_chain() {
             // The outer re-read reconciles against its own config: the
             // dynamically-added inner group is dropped (mirrors TS
             // `group.update(config)` replacing `this.data`).
-            assert_eq!(foo_count.get(), 3);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 3);
             assert_eq!(tree.entries().len(), 2);
         })
         .await;
@@ -156,26 +160,27 @@ async fn group_stop_disposes_subtree() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let dispose_count = Rc::new(Cell::new(0u32));
+            let dispose_count = Arc::new(AtomicU32::new(0));
             let dispose_count_apply = dispose_count.clone();
             loader.mock(
                 "foo",
-                Rc::new(move |_ctx: &Context, _config| {
+                Arc::new(move |_ctx: &Context, _config| {
                     let dispose_count = dispose_count_apply.clone();
                     Effect::Disposer(sync_disposer(move || {
-                        dispose_count.set(dispose_count.get() + 1);
+                        dispose_count
+                            .store(dispose_count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                     }))
                 }),
             );
             let tree = loader.tree_handle();
             let outer = tree.create(group_opts("", vec![foo_opts()]), None, 0);
             tree.await_tree().await;
-            assert_eq!(dispose_count.get(), 0);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 0);
 
             // Disposing the group entry's fiber stops the whole subtree.
             loader.expect_fiber(&outer.id()).dispose().await;
             tree.await_tree().await;
-            assert_eq!(dispose_count.get(), 1);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -187,12 +192,12 @@ async fn group_plugin_selection_follows_entry_name() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(Cell::new(0u32));
+            let applied = Arc::new(AtomicU32::new(0));
             let applied_apply = applied.clone();
             loader.mock(
                 "not-a-group",
-                Rc::new(move |_ctx: &Context, _config| {
-                    applied_apply.set(applied_apply.get() + 1);
+                Arc::new(move |_ctx: &Context, _config| {
+                    applied_apply.store(applied_apply.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                     Effect::None
                 }),
             );
@@ -211,9 +216,9 @@ async fn group_plugin_selection_follows_entry_name() {
                 0,
             );
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
             assert!(
-                flagged.subgroup.borrow().is_none(),
+                flagged.subgroup.lock().unwrap().is_none(),
                 "the group builtin must not apply for a non-group name"
             );
 
@@ -230,9 +235,9 @@ async fn group_plugin_selection_follows_entry_name() {
                 0,
             );
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
             assert!(
-                named.subgroup.borrow().is_some(),
+                named.subgroup.lock().unwrap().is_some(),
                 "the group builtin must apply when selected by name"
             );
         })
@@ -246,12 +251,12 @@ async fn user_plugin_overrides_builtin_group_alias() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(Cell::new(0u32));
+            let applied = Arc::new(AtomicU32::new(0));
             let applied_apply = applied.clone();
             loader.mock(
                 "@cordisjs/plugin-group",
-                Rc::new(move |_ctx: &Context, _config| {
-                    applied_apply.set(applied_apply.get() + 1);
+                Arc::new(move |_ctx: &Context, _config| {
+                    applied_apply.store(applied_apply.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                     Effect::None
                 }),
             );
@@ -267,9 +272,9 @@ async fn user_plugin_overrides_builtin_group_alias() {
                 0,
             );
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
             assert!(
-                entry.subgroup.borrow().is_none(),
+                entry.subgroup.lock().unwrap().is_none(),
                 "a user-registered plugin must shadow the builtin group alias"
             );
         })
@@ -283,13 +288,13 @@ async fn group_config_stays_raw_and_children_evaluate() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let sink = Rc::new(RefCell::new(None));
+            let sink = Arc::new(Mutex::new(None));
             let sink_apply = sink.clone();
             loader.mock(
                 "foo",
-                Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
+                Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                     if let Some(value) = config.downcast_ref::<serde_yaml_ng::Value>() {
-                        *sink_apply.borrow_mut() = value.as_str().map(String::from);
+                        *sink_apply.lock().unwrap() = value.as_str().map(String::from);
                     }
                     Effect::None
                 }),
@@ -308,9 +313,9 @@ async fn group_config_stays_raw_and_children_evaluate() {
             // The group's own config is passed through raw (it is a list of
             // entry options), while each child entry evaluates `!expr` when it
             // applies.
-            assert_eq!(sink.borrow().as_deref(), Some("Hi"));
+            assert_eq!(sink.lock().unwrap().as_deref(), Some("Hi"));
             assert!(
-                outer.subgroup.borrow().is_some(),
+                outer.subgroup.lock().unwrap().is_some(),
                 "the group builtin must still apply"
             );
         })

@@ -4,11 +4,11 @@
 //! entry tree and applies patches.
 
 use std::any::Any;
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cordis_core::{Context, Effect, Plugin, sync_disposer};
 use cordis_loader::{
@@ -132,7 +132,7 @@ pub fn include_plugin() -> Plugin {
         name: Some("include".to_string()),
         inject: vec![("loader".to_string(), None)],
         is_group: false,
-        apply: Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
+        apply: Arc::new(|ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
             let loader = ctx.get::<Loader>().expect("loader");
             let config = config
                 .downcast_ref::<serde_yaml_ng::Value>()
@@ -145,23 +145,24 @@ pub fn include_plugin() -> Plugin {
                 .find(|entry| {
                     entry
                         .fiber
-                        .borrow()
+                        .lock()
+                        .unwrap()
                         .as_ref()
-                        .is_some_and(|candidate| Rc::ptr_eq(candidate, &fiber))
+                        .is_some_and(|candidate| Arc::ptr_eq(candidate, &fiber))
                 })
                 .expect("include entry");
             let subgroup = {
-                let existing = entry.subgroup.borrow().clone();
+                let existing = entry.subgroup.lock().unwrap().clone();
                 if let Some(subgroup) = existing {
                     subgroup
                 } else {
                     let subgroup = EntryGroup::new(
                         loader.tree_handle(),
-                        entry.ctx.borrow().clone(),
-                        Some(entry.parent.borrow().clone()),
+                        entry.ctx.lock().unwrap().clone(),
+                        Some(entry.parent.lock().unwrap().clone()),
                     );
-                    *subgroup.entry.borrow_mut() = Some(entry.clone());
-                    *entry.subgroup.borrow_mut() = Some(subgroup.clone());
+                    *subgroup.entry.lock().unwrap() = Some(entry.clone());
+                    *entry.subgroup.lock().unwrap() = Some(subgroup.clone());
                     subgroup
                 }
             };
@@ -176,7 +177,7 @@ pub fn include_plugin() -> Plugin {
 
 async fn mount_include(
     loader: &Loader,
-    subgroup: &Rc<EntryGroup>,
+    subgroup: &Arc<EntryGroup>,
     config: &IncludeConfig,
     entry: &cordis_loader::Entry,
 ) {
@@ -192,7 +193,8 @@ async fn mount_include(
             } else {
                 entry
                     .ctx
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .logger()
                     .error(format!("config file not found: {}", filename.display()));
                 Vec::new()
@@ -202,28 +204,30 @@ async fn mount_include(
     let patched = apply_patches(
         data,
         config.patches.as_deref().unwrap_or_default(),
-        &entry.ctx.borrow(),
+        &entry.ctx.lock().unwrap(),
     );
     loader.read_group(subgroup, patched).await;
 
     // Tree writes are debounced to a single atomic file write per
     // event-loop turn, and `loader/config-update` fires on every write.
-    let state = Rc::new(IncludeWriteState {
+    let state = Arc::new(IncludeWriteState {
         filename,
-        readonly: Cell::new(false),
-        pending: Cell::new(false),
+        readonly: AtomicBool::new(false),
+        pending: AtomicBool::new(false),
     });
-    state.readonly.set(!check_writable(&state.filename));
+    state
+        .readonly
+        .store(!check_writable(&state.filename), Ordering::Release);
     let loader_ctx = loader.ctx.clone();
     let tree = loader.tree_handle();
     let state_for_write = state;
     let subgroup_for_write = subgroup.clone();
-    *tree.write_callback.borrow_mut() = Some(Rc::new(move || {
+    *tree.write_callback.lock().unwrap() = Some(Arc::new(move || {
         loader_ctx.emit("loader/config-update", &[]);
-        if state_for_write.pending.get() {
+        if state_for_write.pending.load(Ordering::Acquire) {
             return;
         }
-        state_for_write.pending.set(true);
+        state_for_write.pending.store(true, Ordering::Release);
         let state = state_for_write.clone();
         let subgroup = subgroup_for_write.clone();
         tokio::task::spawn_local(async move {
@@ -231,7 +235,7 @@ async fn mount_include(
             // writes issued in the same turn coalesce into one disk write.
             tokio::task::yield_now().await;
             let _ = state.write_once(&subgroup);
-            state.pending.set(false);
+            state.pending.store(false, Ordering::Release);
         });
     }));
 }
@@ -244,7 +248,7 @@ pub async fn refresh_include_file(loader: &Loader, filename: &Path) -> bool {
         Err(_) => filename.to_path_buf(),
     };
     for entry in loader.tree_handle().entries() {
-        let Some(config) = entry.options.borrow().config.clone() else {
+        let Some(config) = entry.options.lock().unwrap().config.clone() else {
             continue;
         };
         let Ok(config) = serde_yaml_ng::from_value::<IncludeConfig>(config) else {
@@ -255,7 +259,7 @@ pub async fn refresh_include_file(loader: &Loader, filename: &Path) -> bool {
         if candidate != canonical {
             continue;
         }
-        let Some(subgroup) = entry.subgroup.borrow().clone() else {
+        let Some(subgroup) = entry.subgroup.lock().unwrap().clone() else {
             continue;
         };
         if fs::read_to_string(&canonical).is_err() {
@@ -265,9 +269,11 @@ pub async fn refresh_include_file(loader: &Loader, filename: &Path) -> bool {
         let patched = apply_patches(
             data,
             config.patches.as_deref().unwrap_or_default(),
-            &entry.ctx.borrow(),
+            &entry.ctx.lock().unwrap(),
         );
+
         loader.read_group(&subgroup, patched).await;
+
         return true;
     }
     false
@@ -276,20 +282,21 @@ pub async fn refresh_include_file(loader: &Loader, filename: &Path) -> bool {
 /// Shared per-instance state for the debounced write-back path.
 struct IncludeWriteState {
     filename: PathBuf,
-    readonly: Cell<bool>,
-    pending: Cell<bool>,
+    readonly: AtomicBool,
+    pending: AtomicBool,
 }
 
 impl IncludeWriteState {
-    fn write_once(&self, subgroup: &Rc<EntryGroup>) -> Result<(), String> {
-        if self.readonly.get() {
+    fn write_once(&self, subgroup: &Arc<EntryGroup>) -> Result<(), String> {
+        if self.readonly.load(Ordering::Acquire) {
             return Err("cannot overwrite readonly config".to_string());
         }
         let entries: Vec<EntryOptions> = subgroup
             .entries
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
-            .map(|entry| entry.options.borrow().clone())
+            .map(|entry| entry.options.lock().unwrap().clone())
             .collect();
         let serialized = serialize_config(&entries)?;
         atomic_write(&self.filename, &serialized)

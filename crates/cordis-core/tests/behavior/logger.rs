@@ -1,9 +1,9 @@
 //! Ported cases from `packages/core/tests/logger.spec.ts` plus the
 //! formatting/color behaviors of `logger.ts`.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use cordis_core::{
     COLOR_16, COLOR_256, Context, Effect, LogValue, LoggerIntercept, LoggerLevel, LoggerService,
@@ -11,23 +11,23 @@ use cordis_core::{
     format_message, service,
 };
 
-fn setup() -> (Context, Rc<RefCell<Vec<Message>>>) {
+fn setup() -> (Context, Arc<Mutex<Vec<Message>>>) {
     let ctx = Context::new();
-    let captured = Rc::new(RefCell::new(Vec::new()));
+    let captured = Arc::new(Mutex::new(Vec::new()));
     let exporter = SimpleExporter {
         colors: 0,
         max_length: 10240,
-        levels: Some(Rc::new(HashMap::from([(
+        levels: Some(Arc::new(HashMap::from([(
             "default".to_string(),
             LoggerLevel::Debug,
         )]))),
         formatters: None,
         handler: {
             let captured = captured.clone();
-            Rc::new(move |message| captured.borrow_mut().push(message.clone()))
+            Arc::new(move |message| captured.lock().unwrap().push(message.clone()))
         },
     };
-    ctx.logger().exporter(Rc::new(exporter)).unwrap();
+    ctx.logger().exporter(Arc::new(exporter)).unwrap();
     (ctx, captured)
 }
 
@@ -38,12 +38,12 @@ fn arg0(message: &Message) -> String {
 /// A plugin that registers `value` as a service under `name` (the JS
 /// counterpart of `root.plugin(FooService)` where the class name flows into
 /// the plugin name).
-fn named_plugin<S: Service>(name: &str, value: Rc<S>) -> Plugin {
+fn named_plugin<S: Service>(name: &str, value: Arc<S>) -> Plugin {
     Plugin {
         is_group: false,
         name: Some(name.to_string()),
         inject: Vec::new(),
-        apply: Rc::new(move |ctx: &Context, _config| {
+        apply: Arc::new(move |ctx: &Context, _config| {
             drop(ctx.provide::<S>(value.clone()).unwrap());
             Effect::None
         }),
@@ -110,8 +110,8 @@ async fn keeps_bounded_buffer_in_place_and_chronological() {
 async fn disposes_the_exporter_that_registered_the_disposer() {
     let ctx = Context::new();
     let logger = ctx.logger();
-    let first = Rc::new(RefCell::new(Vec::new()));
-    let second = Rc::new(RefCell::new(Vec::new()));
+    let first = Arc::new(Mutex::new(Vec::new()));
+    let second = Arc::new(Mutex::new(Vec::new()));
     let dispose_first = logger
         .exporter(SimpleExporter::capturing(first.clone()))
         .unwrap();
@@ -121,12 +121,12 @@ async fn disposes_the_exporter_that_registered_the_disposer() {
 
     dispose_first.dispose().await.unwrap();
     logger.info("test");
-    assert_eq!(first.borrow().len(), 0);
-    assert_eq!(second.borrow().len(), 1);
+    assert_eq!(first.lock().unwrap().len(), 0);
+    assert_eq!(second.lock().unwrap().len(), 1);
 
     dispose_second.dispose().await.unwrap();
     logger.info("test");
-    assert_eq!(second.borrow().len(), 1);
+    assert_eq!(second.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -135,7 +135,8 @@ async fn uses_fiber_name_when_called_outside_any_service() {
     ctx.logger().debug("hello");
     assert_eq!(
         captured
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .map(|message| message.name.clone())
             .collect::<Vec<_>>(),
@@ -149,7 +150,8 @@ async fn honours_explicit_name_argument() {
     ctx.logger().named("custom").debug("hello");
     assert_eq!(
         captured
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .map(|message| message.name.clone())
             .collect::<Vec<_>>(),
@@ -170,7 +172,8 @@ async fn honours_intercept_name() {
     intercepted.logger().debug("hello");
     assert_eq!(
         captured
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .map(|message| message.name.clone())
             .collect::<Vec<_>>(),
@@ -184,7 +187,7 @@ async fn uses_service_name_inside_service_method() {
     local
         .run_until(async {
             let (ctx, captured) = setup();
-            let fiber = ctx.plugin(&named_plugin("foo:driver", Rc::new(FooService)), None);
+            let fiber = ctx.plugin(&named_plugin("foo:driver", Arc::new(FooService)), None);
             fiber.wait().await.unwrap();
 
             // The traced handle's context carries the service's shadow, so
@@ -192,7 +195,8 @@ async fn uses_service_name_inside_service_method() {
             // own fiber name (JS: `symbols.caller` → fiber name).
             ctx.foo_service().expect("foo").action();
             let names: Vec<String> = captured
-                .borrow()
+                .lock()
+                .unwrap()
                 .iter()
                 .map(|message| message.name.clone())
                 .collect();
@@ -208,7 +212,7 @@ async fn lets_outer_caller_intercept_override_service_name() {
     local
         .run_until(async {
             let (ctx, captured) = setup();
-            let fiber = ctx.plugin(&named_plugin("foo:driver", Rc::new(FooService)), None);
+            let fiber = ctx.plugin(&named_plugin("foo:driver", Arc::new(FooService)), None);
             fiber.wait().await.unwrap();
 
             // The intercept chain comes from the caller's context, not the
@@ -222,7 +226,8 @@ async fn lets_outer_caller_intercept_override_service_name() {
             );
             intercepted.foo_service().expect("foo").action();
             let names: Vec<String> = captured
-                .borrow()
+                .lock()
+                .unwrap()
                 .iter()
                 .map(|message| message.name.clone())
                 .collect();
@@ -238,9 +243,12 @@ async fn uses_innermost_service_name_and_restores_outer() {
     local
         .run_until(async {
             let (ctx, captured) = setup();
-            let bar = ctx.plugin(&named_plugin("bar:driver", Rc::new(BarService)), None);
+            let bar = ctx.plugin(&named_plugin("bar:driver", Arc::new(BarService)), None);
             bar.wait().await.unwrap();
-            let foo = ctx.plugin(&named_plugin("foo:driver", Rc::new(NestedFooService)), None);
+            let foo = ctx.plugin(
+                &named_plugin("foo:driver", Arc::new(NestedFooService)),
+                None,
+            );
             foo.wait().await.unwrap();
 
             // No stack is involved: each method's traced context resolves
@@ -249,7 +257,8 @@ async fn uses_innermost_service_name_and_restores_outer() {
             // re-derivation).
             ctx.nested_foo_service().expect("foo").action();
             let pairs: Vec<(String, String)> = captured
-                .borrow()
+                .lock()
+                .unwrap()
                 .iter()
                 .map(|message| (message.name.clone(), arg0(message)))
                 .collect();
@@ -274,12 +283,12 @@ async fn uses_service_name_in_apply() {
                 is_group: false,
                 name: Some("foo:driver".to_string()),
                 inject: Vec::new(),
-                apply: Rc::new(|ctx: &Context, _config| {
+                apply: Arc::new(|ctx: &Context, _config| {
                     // The apply callback is the Rust counterpart of
                     // `Service.init`: the fiber already carries the plugin
                     // name.
                     ctx.logger().debug("from init");
-                    drop(ctx.provide::<FooService>(Rc::new(FooService)).unwrap());
+                    drop(ctx.provide::<FooService>(Arc::new(FooService)).unwrap());
                     Effect::None
                 }),
             };
@@ -287,7 +296,8 @@ async fn uses_service_name_in_apply() {
             fiber.wait().await.unwrap();
 
             let names: Vec<String> = captured
-                .borrow()
+                .lock()
+                .unwrap()
                 .iter()
                 .map(|message| message.name.clone())
                 .collect();
@@ -310,7 +320,8 @@ async fn intercept_overrides_explicit_name() {
     intercepted.logger().named("explicit").debug("hello");
     assert_eq!(
         captured
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .map(|message| message.name.clone())
             .collect::<Vec<_>>(),
@@ -337,7 +348,7 @@ async fn formats_specifiers() {
             LogValue::Str("z".to_string()),
         ],
     );
-    let message = captured.borrow().last().unwrap().clone();
+    let message = captured.lock().unwrap().last().unwrap().clone();
     let rendered = format_message(&message, &message_exporter(), &HashMap::new());
     assert_eq!(
         rendered,
@@ -351,7 +362,7 @@ fn message_exporter() -> SimpleExporter {
         max_length: 10240,
         levels: None,
         formatters: None,
-        handler: Rc::new(|_| {}),
+        handler: Arc::new(|_| {}),
     }
 }
 
@@ -364,7 +375,7 @@ async fn formats_error_first_argument_as_stack() {
         "oops",
         vec![LogValue::Error("Error: boom\n    at test".to_string())],
     );
-    let message = captured.borrow().last().unwrap().clone();
+    let message = captured.lock().unwrap().last().unwrap().clone();
     let rendered = format_message(&message, &message_exporter(), &HashMap::new());
     assert!(rendered.contains("Error: boom"), "{rendered}");
 }
@@ -374,7 +385,7 @@ async fn formats_non_string_first_argument_as_object() {
     let (ctx, captured) = setup();
     let logger = ctx.logger();
     logger.log_args(LoggerType::Info, "", vec![LogValue::Num(1.0)]);
-    let message = captured.borrow().last().unwrap().clone();
+    let message = captured.lock().unwrap().last().unwrap().clone();
     let rendered = format_message(&message, &message_exporter(), &HashMap::new());
     assert!(rendered.contains("1"), "{rendered}");
 }
@@ -405,28 +416,28 @@ async fn color_ansi_rendering() {
 #[tokio::test]
 async fn level_filtering() {
     let ctx = Context::new();
-    let captured = Rc::new(RefCell::new(Vec::new()));
+    let captured = Arc::new(Mutex::new(Vec::new()));
     let exporter = SimpleExporter {
         colors: 0,
         max_length: 10240,
-        levels: Some(Rc::new(HashMap::from([(
+        levels: Some(Arc::new(HashMap::from([(
             "default".to_string(),
             LoggerLevel::Info,
         )]))),
         formatters: None,
         handler: {
             let captured = captured.clone();
-            Rc::new(move |message| captured.borrow_mut().push(message.clone()))
+            Arc::new(move |message| captured.lock().unwrap().push(message.clone()))
         },
     };
-    ctx.logger().exporter(Rc::new(exporter)).unwrap();
+    ctx.logger().exporter(Arc::new(exporter)).unwrap();
 
     ctx.logger().debug("hidden");
     ctx.logger().info("shown");
     ctx.logger().error("oops");
-    assert_eq!(captured.borrow().len(), 2);
-    assert_eq!(arg0(&captured.borrow()[0]), "shown");
-    assert_eq!(arg0(&captured.borrow()[1]), "oops");
+    assert_eq!(captured.lock().unwrap().len(), 2);
+    assert_eq!(arg0(&captured.lock().unwrap()[0]), "shown");
+    assert_eq!(arg0(&captured.lock().unwrap()[1]), "oops");
 }
 
 #[tokio::test]

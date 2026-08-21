@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use cordis_core::{Context, Effect, FiberState};
@@ -83,10 +83,10 @@ async fn meta_config_apply_and_validation() {
                 0,
             );
             tree.await_tree().await;
-            let fiber = entry.fiber.borrow().clone().expect("fiber created");
-            assert_eq!(fiber.state.get(), FiberState::Active);
+            let fiber = entry.fiber.lock().unwrap().clone().expect("fiber created");
+            assert_eq!(fiber.state(), FiberState::Active);
             assert!(
-                fiber.inject.borrow().contains_key("logger"),
+                fiber.inject.lock().unwrap().contains_key("logger"),
                 "metadata inject must flow into the fiber"
             );
             assert!(
@@ -142,8 +142,13 @@ async fn meta_config_apply_and_validation() {
             .expect("evaluable");
             let expr_entry = tree.create(opts("cordis-meta", evaluated), None, 0);
             tree.await_tree().await;
-            let expr_fiber = expr_entry.fiber.borrow().clone().expect("fiber created");
-            assert_eq!(expr_fiber.state.get(), FiberState::Active);
+            let expr_fiber = expr_entry
+                .fiber
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("fiber created");
+            assert_eq!(expr_fiber.state(), FiberState::Active);
             assert!(
                 LOGGED
                     .lock()
@@ -165,8 +170,8 @@ async fn meta_config_apply_and_validation() {
                 0,
             );
             tree.await_tree().await;
-            let bad_fiber = bad.fiber.borrow().clone().expect("fiber created");
-            assert_eq!(bad_fiber.state.get(), FiberState::Failed);
+            let bad_fiber = bad.fiber.lock().unwrap().clone().expect("fiber created");
+            assert_eq!(bad_fiber.state(), FiberState::Failed);
             assert!(
                 !LOGGED
                     .lock()
@@ -216,12 +221,12 @@ async fn same_plugin_two_entries_independent() {
             );
             tree.await_tree().await;
 
-            let f1 = first.fiber.borrow().clone().expect("fiber");
-            let f2 = second.fiber.borrow().clone().expect("fiber");
-            assert_eq!(f1.state.get(), FiberState::Active);
-            assert_eq!(f2.state.get(), FiberState::Active);
+            let f1 = first.fiber.lock().unwrap().clone().expect("fiber");
+            let f2 = second.fiber.lock().unwrap().clone().expect("fiber");
+            assert_eq!(f1.state(), FiberState::Active);
+            assert_eq!(f2.state(), FiberState::Active);
             assert!(
-                !Rc::ptr_eq(&f1, &f2),
+                !Arc::ptr_eq(&f1, &f2),
                 "two entries must have independent fibers"
             );
             let logged = LOGGED.lock().unwrap().clone();

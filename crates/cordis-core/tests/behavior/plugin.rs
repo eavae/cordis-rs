@@ -1,8 +1,9 @@
 //! Ported cases from `packages/core/tests/plugin.spec.ts`.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{
     Context, Effect, EventOptions, Plugin, RegistryService, event_listener, sync_disposer,
@@ -24,12 +25,12 @@ async fn apply_functional_plugin() {
     local
         .run_until(async {
             let root = Context::new();
-            let calls = Rc::new(RefCell::new(Vec::new()));
+            let calls = Arc::new(Mutex::new(Vec::new()));
             let apply = {
                 let calls = calls.clone();
-                Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
+                Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                     let options = config.downcast_ref::<Options>().expect("config").foo;
-                    calls.borrow_mut().push(options);
+                    calls.lock().unwrap().push(options);
                     Effect::None
                 })
             };
@@ -40,10 +41,10 @@ async fn apply_functional_plugin() {
                     inject: Vec::new(),
                     apply: apply.clone(),
                 },
-                Some(Rc::new(Options { foo: "bar" })),
+                Some(Arc::new(Options { foo: "bar" })),
             );
             fiber.wait().await.unwrap();
-            assert_eq!(calls.borrow().as_slice(), &["bar"]);
+            assert_eq!(calls.lock().unwrap().as_slice(), &["bar"]);
         })
         .await;
 }
@@ -54,7 +55,7 @@ async fn apply_object_plugin() {
     local
         .run_until(async {
             let root = Context::new();
-            let calls = Rc::new(RefCell::new(Vec::new()));
+            let calls = Arc::new(Mutex::new(Vec::new()));
             // The `Plugin` struct is the Rust equivalent of the TS object
             // plugin form `{ apply, name, inject }`.
             let plugin = Plugin {
@@ -63,16 +64,16 @@ async fn apply_object_plugin() {
                 inject: Vec::new(),
                 apply: {
                     let calls = calls.clone();
-                    Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
+                    Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                         let bar = config.downcast_ref::<BarOptions>().expect("config").bar;
-                        calls.borrow_mut().push(bar);
+                        calls.lock().unwrap().push(bar);
                         Effect::None
                     })
                 },
             };
-            let fiber = root.plugin(&plugin, Some(Rc::new(BarOptions { bar: "foo" })));
+            let fiber = root.plugin(&plugin, Some(Arc::new(BarOptions { bar: "foo" })));
             fiber.wait().await.unwrap();
-            assert_eq!(calls.borrow().as_slice(), &["foo"]);
+            assert_eq!(calls.lock().unwrap().as_slice(), &["foo"]);
         })
         .await;
 }
@@ -83,17 +84,20 @@ async fn inactive_context() {
     local
         .run_until(async {
             let root = Context::new();
-            let other_calls = Rc::new(Cell::new(0u32));
+            let other_calls = Arc::new(AtomicU32::new(0));
             let other = Plugin {
                 is_group: false,
                 name: None,
                 inject: Vec::new(),
                 apply: {
                     let other_calls = other_calls.clone();
-                    Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
-                        other_calls.set(other_calls.get() + 1);
-                        Effect::None
-                    })
+                    Arc::new(
+                        move |_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                            other_calls
+                                .store(other_calls.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                            Effect::None
+                        },
+                    )
                 },
             };
             let other_for_disposer = other.apply.clone();
@@ -102,7 +106,7 @@ async fn inactive_context() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(move |ctx: &Context, _config: &Rc<dyn Any>| {
+                    apply: Arc::new(move |ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
                         let ctx = ctx.clone();
                         let other = Plugin {
                             is_group: false,
@@ -136,7 +140,7 @@ async fn inactive_context() {
             );
             fiber.wait().await.unwrap();
             fiber.dispose().await;
-            assert_eq!(other_calls.get(), 0);
+            assert_eq!(other_calls.load(Ordering::SeqCst), 0);
         })
         .await;
 }
@@ -154,7 +158,7 @@ async fn context_inspect() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, _config| {
+                    apply: Arc::new(|ctx: &Context, _config| {
                         assert_eq!(format!("{ctx:?}"), "Context <root>");
                         Effect::None
                     }),
@@ -168,7 +172,7 @@ async fn context_inspect() {
                     is_group: false,
                     name: Some("foo".to_string()),
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, _config| {
+                    apply: Arc::new(|ctx: &Context, _config| {
                         assert_eq!(format!("{ctx:?}"), "Context <foo>");
                         Effect::None
                     }),
@@ -182,7 +186,7 @@ async fn context_inspect() {
                     is_group: false,
                     name: Some("bar".to_string()),
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, _config| {
+                    apply: Arc::new(|ctx: &Context, _config| {
                         assert_eq!(format!("{ctx:?}"), "Context <bar>");
                         Effect::None
                     }),
@@ -209,7 +213,7 @@ async fn ctx_registry_queries() {
                 is_group: false,
                 name: None,
                 inject: Vec::new(),
-                apply: Rc::new(|_ctx, _config| Effect::None),
+                apply: Arc::new(|_ctx, _config| Effect::None),
             };
             let fiber = root.plugin(&plugin, None);
             fiber.wait().await.unwrap();
@@ -227,11 +231,11 @@ async fn nested_plugins() {
     local
         .run_until(async {
             let root = Context::new();
-            let callback_hit = Rc::new(Cell::new(0u32));
+            let callback_hit = Arc::new(AtomicU32::new(0));
             let listener = {
                 let callback_hit = callback_hit.clone();
-                move |_args: &[Rc<dyn Any>]| {
-                    callback_hit.set(callback_hit.get() + 1);
+                move |_args: &[Arc<dyn Any + Send + Sync>]| {
+                    callback_hit.store(callback_hit.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                 }
             };
             drop(
@@ -250,13 +254,16 @@ async fn nested_plugins() {
                 is_group: false,
                 name: None,
                 inject: Vec::new(),
-                apply: Rc::new(move |ctx: &Context, _config| {
+                apply: Arc::new(move |ctx: &Context, _config| {
                     let callback_hit = callback_hit4.clone();
                     drop(
                         ctx.on(
                             "custom-event",
                             event_listener(move |_| {
-                                callback_hit.set(callback_hit.get() + 1);
+                                callback_hit.store(
+                                    callback_hit.load(Ordering::SeqCst) + 1,
+                                    Ordering::SeqCst,
+                                );
                             }),
                             EventOptions::default(),
                         )
@@ -269,13 +276,16 @@ async fn nested_plugins() {
                 is_group: false,
                 name: None,
                 inject: Vec::new(),
-                apply: Rc::new(move |ctx: &Context, _config| {
+                apply: Arc::new(move |ctx: &Context, _config| {
                     let callback_hit = callback_hit3.clone();
                     drop(
                         ctx.on(
                             "custom-event",
                             event_listener(move |_| {
-                                callback_hit.set(callback_hit.get() + 1);
+                                callback_hit.store(
+                                    callback_hit.load(Ordering::SeqCst) + 1,
+                                    Ordering::SeqCst,
+                                );
                             }),
                             EventOptions::default(),
                         )
@@ -289,13 +299,16 @@ async fn nested_plugins() {
                 is_group: false,
                 name: None,
                 inject: Vec::new(),
-                apply: Rc::new(move |ctx: &Context, _config| {
+                apply: Arc::new(move |ctx: &Context, _config| {
                     let callback_hit = callback_hit2.clone();
                     drop(
                         ctx.on(
                             "custom-event",
                             event_listener(move |_| {
-                                callback_hit.set(callback_hit.get() + 1);
+                                callback_hit.store(
+                                    callback_hit.load(Ordering::SeqCst) + 1,
+                                    Ordering::SeqCst,
+                                );
                             }),
                             EventOptions::default(),
                         )
@@ -310,23 +323,23 @@ async fn nested_plugins() {
             fiber.wait().await.unwrap();
             let registry = root.get::<RegistryService>().unwrap();
             assert_eq!(registry.size(), 3);
-            assert_eq!(callback_hit.get(), 0);
+            assert_eq!(callback_hit.load(Ordering::SeqCst), 0);
             root.emit("custom-event", &[]);
-            assert_eq!(callback_hit.get(), 4);
+            assert_eq!(callback_hit.load(Ordering::SeqCst), 4);
 
-            callback_hit.set(0);
+            callback_hit.store(0, Ordering::SeqCst);
             fiber.dispose().await;
             tokio::task::yield_now().await;
             assert_eq!(registry.size(), 0);
             root.emit("custom-event", &[]);
-            assert_eq!(callback_hit.get(), 1);
+            assert_eq!(callback_hit.load(Ordering::SeqCst), 1);
 
             // Subsequent disposal is a no-op.
-            callback_hit.set(0);
+            callback_hit.store(0, Ordering::SeqCst);
             fiber.dispose().await;
             assert_eq!(registry.size(), 0);
             root.emit("custom-event", &[]);
-            assert_eq!(callback_hit.get(), 1);
+            assert_eq!(callback_hit.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -337,13 +350,16 @@ async fn compare_snapshot_after_registry_delete() {
     local
         .run_until(async {
             let root = Context::new();
-            let callback_hit = Rc::new(Cell::new(0u32));
+            let callback_hit = Arc::new(AtomicU32::new(0));
             drop(
                 root.on(
                     "custom-event",
                     event_listener({
                         let callback_hit = callback_hit.clone();
-                        move |_| callback_hit.set(callback_hit.get() + 1)
+                        move |_| {
+                            callback_hit
+                                .store(callback_hit.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+                        }
                     }),
                     EventOptions::default(),
                 )
@@ -355,13 +371,16 @@ async fn compare_snapshot_after_registry_delete() {
                 inject: Vec::new(),
                 apply: {
                     let callback_hit = callback_hit.clone();
-                    Rc::new(move |ctx: &Context, _config| {
+                    Arc::new(move |ctx: &Context, _config| {
                         let callback_hit = callback_hit.clone();
                         drop(
                             ctx.on(
                                 "custom-event",
                                 event_listener(move |_| {
-                                    callback_hit.set(callback_hit.get() + 1);
+                                    callback_hit.store(
+                                        callback_hit.load(Ordering::SeqCst) + 1,
+                                        Ordering::SeqCst,
+                                    );
                                 }),
                                 EventOptions::default(),
                             )
@@ -372,25 +391,33 @@ async fn compare_snapshot_after_registry_delete() {
                 },
             };
 
-            let before = callback_hit.get();
+            let before = callback_hit.load(Ordering::SeqCst);
             let fiber = root.plugin(&plugin, None);
             fiber.wait().await.unwrap();
             root.emit("custom-event", &[]);
-            assert_eq!(callback_hit.get(), before + 2, "root + plugin listener");
+            assert_eq!(
+                callback_hit.load(Ordering::SeqCst),
+                before + 2,
+                "root + plugin listener"
+            );
 
             let registry = root.get::<RegistryService>().unwrap();
             registry.delete(&plugin);
             tokio::task::yield_now().await;
             tokio::task::yield_now().await;
-            callback_hit.set(0);
+            callback_hit.store(0, Ordering::SeqCst);
             root.emit("custom-event", &[]);
-            assert_eq!(callback_hit.get(), 1, "only the root listener remains");
+            assert_eq!(
+                callback_hit.load(Ordering::SeqCst),
+                1,
+                "only the root listener remains"
+            );
 
             let fiber = root.plugin(&plugin, None);
             fiber.wait().await.unwrap();
-            callback_hit.set(0);
+            callback_hit.store(0, Ordering::SeqCst);
             root.emit("custom-event", &[]);
-            assert_eq!(callback_hit.get(), 2);
+            assert_eq!(callback_hit.load(Ordering::SeqCst), 2);
         })
         .await;
 }
@@ -401,7 +428,7 @@ async fn root_dispose() {
     local
         .run_until(async {
             let root = Context::new();
-            let dispose_called = Rc::new(Cell::new(0u32));
+            let dispose_called = Arc::new(AtomicU32::new(0));
             let fiber = root.plugin(
                 &Plugin {
                     is_group: false,
@@ -409,10 +436,13 @@ async fn root_dispose() {
                     inject: Vec::new(),
                     apply: {
                         let dispose_called = dispose_called.clone();
-                        Rc::new(move |_ctx: &Context, _config| {
+                        Arc::new(move |_ctx: &Context, _config| {
                             let dispose_called = dispose_called.clone();
                             Effect::Disposer(sync_disposer(move || {
-                                dispose_called.set(dispose_called.get() + 1);
+                                dispose_called.store(
+                                    dispose_called.load(Ordering::SeqCst) + 1,
+                                    Ordering::SeqCst,
+                                );
                             }))
                         })
                     },
@@ -420,22 +450,22 @@ async fn root_dispose() {
                 None,
             );
             fiber.wait().await.unwrap();
-            assert_eq!(root.fiber().uid.get(), Some(0));
-            assert_eq!(fiber.uid.get(), Some(1));
-            assert_eq!(dispose_called.get(), 0);
+            assert_eq!(root.fiber().uid(), Some(0));
+            assert_eq!(fiber.uid(), Some(1));
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 0);
             assert_eq!(root.fiber().effect_count(), 1);
 
             root.fiber().dispose().await;
             tokio::task::yield_now().await;
-            assert_eq!(root.fiber().uid.get(), Some(0));
-            assert_eq!(fiber.uid.get(), None);
-            assert_eq!(dispose_called.get(), 1);
+            assert_eq!(root.fiber().uid(), Some(0));
+            assert_eq!(fiber.uid(), None);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 1);
             assert_eq!(root.fiber().effect_count(), 0);
 
             root.fiber().dispose().await;
-            assert_eq!(root.fiber().uid.get(), Some(0));
-            assert_eq!(fiber.uid.get(), None);
-            assert_eq!(dispose_called.get(), 1);
+            assert_eq!(root.fiber().uid(), Some(0));
+            assert_eq!(fiber.uid(), None);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 1);
             assert_eq!(root.fiber().effect_count(), 0);
         })
         .await;
@@ -449,8 +479,8 @@ async fn service_init_equivalent() {
             // TS `Service.init` (constructor plugins returning a stop
             // disposer) maps to the apply callback returning a disposer.
             let root = Context::new();
-            let start = Rc::new(Cell::new(0u32));
-            let stop = Rc::new(Cell::new(0u32));
+            let start = Arc::new(AtomicU32::new(0));
+            let stop = Arc::new(AtomicU32::new(0));
             let fiber = root.plugin(
                 &Plugin {
                     is_group: false,
@@ -459,11 +489,11 @@ async fn service_init_equivalent() {
                     apply: {
                         let start = start.clone();
                         let stop = stop.clone();
-                        Rc::new(move |_ctx: &Context, _config| {
-                            start.set(start.get() + 1);
+                        Arc::new(move |_ctx: &Context, _config| {
+                            start.store(start.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                             let stop = stop.clone();
                             Effect::Disposer(sync_disposer(move || {
-                                stop.set(stop.get() + 1);
+                                stop.store(stop.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                             }))
                         })
                     },
@@ -471,12 +501,12 @@ async fn service_init_equivalent() {
                 None,
             );
             fiber.wait().await.unwrap();
-            assert_eq!(start.get(), 1);
-            assert_eq!(stop.get(), 0);
+            assert_eq!(start.load(Ordering::SeqCst), 1);
+            assert_eq!(stop.load(Ordering::SeqCst), 0);
 
             fiber.dispose().await;
-            assert_eq!(start.get(), 1);
-            assert_eq!(stop.get(), 1);
+            assert_eq!(start.load(Ordering::SeqCst), 1);
+            assert_eq!(stop.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -487,7 +517,8 @@ async fn shared_runtime_multiple_fibers() {
     local
         .run_until(async {
             let root = Context::new();
-            let apply = Rc::new(|_ctx: &Context, _config: &Rc<dyn Any>| Effect::None);
+            let apply =
+                Arc::new(|_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| Effect::None);
             let plugin = Plugin {
                 is_group: false,
                 name: Some("shared".to_string()),

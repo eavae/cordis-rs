@@ -1,8 +1,8 @@
 //! Ported cases from `packages/core/tests/isolate.spec.ts`.
 
 use std::any::Any;
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{
     Context, Effect, EventFilter, EventOptions, Plugin, Service, event_listener, sync_disposer,
@@ -17,18 +17,20 @@ impl Service for Foo {
     const NAME: &'static str = "foo";
 }
 
-fn plugin_with_inject(callback: Rc<Cell<u32>>, dispose_count: Rc<Cell<u32>>) -> Plugin {
+fn plugin_with_inject(callback: Arc<AtomicU32>, dispose_count: Arc<AtomicU32>) -> Plugin {
     Plugin {
         is_group: false,
         name: None,
         inject: vec![("foo".to_string(), None)],
-        apply: Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
-            callback.set(callback.get() + 1);
-            let dispose_count = dispose_count.clone();
-            Effect::Disposer(sync_disposer(move || {
-                dispose_count.set(dispose_count.get() + 1);
-            }))
-        }),
+        apply: Arc::new(
+            move |_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                callback.store(callback.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                let dispose_count = dispose_count.clone();
+                Effect::Disposer(sync_disposer(move || {
+                    dispose_count.store(dispose_count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                }))
+            },
+        ),
     }
 }
 
@@ -38,47 +40,51 @@ async fn isolation_isolated_context() {
     local
         .run_until(async {
             let root = Context::new();
-            let callback = Rc::new(Cell::new(0u32));
-            let dispose_count = Rc::new(Cell::new(0u32));
+            let callback = Arc::new(AtomicU32::new(0));
+            let dispose_count = Arc::new(AtomicU32::new(0));
             let plugin = plugin_with_inject(callback.clone(), dispose_count.clone());
 
             let root_fiber = root.plugin(&plugin, None);
-            let ctx1 = root.isolate("foo", Rc::from("symbol-1"));
+            let ctx1 = root.isolate("foo", Arc::from("symbol-1"));
             let ctx1_fiber = ctx1.plugin(&plugin, None);
-            let ctx2 = root.isolate("foo", Rc::from("symbol-2"));
+            let ctx2 = root.isolate("foo", Arc::from("symbol-2"));
             let ctx2_fiber = ctx2.plugin(&plugin, None);
 
-            let dispose0 = root.provide::<Foo>(Rc::new(Foo { bar: 100 })).unwrap();
+            let dispose0 = root.provide::<Foo>(Arc::new(Foo { bar: 100 })).unwrap();
             root_fiber.wait().await.unwrap();
             assert_eq!(root.get::<Foo>().unwrap().bar, 100);
             assert!(ctx1.get::<Foo>().is_none());
             assert!(ctx2.get::<Foo>().is_none());
-            assert_eq!(callback.get(), 1, "only the root fiber applies");
-            assert_eq!(dispose_count.get(), 0);
+            assert_eq!(
+                callback.load(Ordering::SeqCst),
+                1,
+                "only the root fiber applies"
+            );
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 0);
 
-            let dispose1 = ctx1.provide::<Foo>(Rc::new(Foo { bar: 200 })).unwrap();
+            let dispose1 = ctx1.provide::<Foo>(Arc::new(Foo { bar: 200 })).unwrap();
             ctx1_fiber.wait().await.unwrap();
             assert_eq!(root.get::<Foo>().unwrap().bar, 100);
             assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
             assert!(ctx2.get::<Foo>().is_none());
-            assert_eq!(callback.get(), 2);
-            assert_eq!(dispose_count.get(), 0);
+            assert_eq!(callback.load(Ordering::SeqCst), 2);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 0);
 
             dispose0.dispose().await.unwrap();
             root_fiber.wait().await.unwrap();
             assert!(root.get::<Foo>().is_none());
             assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
             assert!(ctx2.get::<Foo>().is_none());
-            assert_eq!(callback.get(), 2);
-            assert_eq!(dispose_count.get(), 1);
+            assert_eq!(callback.load(Ordering::SeqCst), 2);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
 
-            let dispose2 = ctx2.provide::<Foo>(Rc::new(Foo { bar: 300 })).unwrap();
+            let dispose2 = ctx2.provide::<Foo>(Arc::new(Foo { bar: 300 })).unwrap();
             ctx2_fiber.wait().await.unwrap();
             assert!(root.get::<Foo>().is_none());
             assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
             assert_eq!(ctx2.get::<Foo>().unwrap().bar, 300);
-            assert_eq!(callback.get(), 3);
-            assert_eq!(dispose_count.get(), 1);
+            assert_eq!(callback.load(Ordering::SeqCst), 3);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
 
             dispose1.dispose().await.unwrap();
             dispose2.dispose().await.unwrap();
@@ -92,35 +98,39 @@ async fn isolation_shared_label() {
     local
         .run_until(async {
             let root = Context::new();
-            let callback = Rc::new(Cell::new(0u32));
-            let dispose_count = Rc::new(Cell::new(0u32));
+            let callback = Arc::new(AtomicU32::new(0));
+            let dispose_count = Arc::new(AtomicU32::new(0));
             let plugin = plugin_with_inject(callback.clone(), dispose_count.clone());
 
-            let label = Rc::<str>::from("test");
+            let label = Arc::<str>::from("test");
             let root_fiber = root.plugin(&plugin, None);
             let ctx1 = root.isolate("foo", label.clone());
             let ctx1_fiber = ctx1.plugin(&plugin, None);
             let ctx2 = root.isolate("foo", label.clone());
             let ctx2_fiber = ctx2.plugin(&plugin, None);
             tokio::task::yield_now().await;
-            assert_eq!(callback.get(), 0);
+            assert_eq!(callback.load(Ordering::SeqCst), 0);
 
-            let dispose0 = root.provide::<Foo>(Rc::new(Foo { bar: 100 })).unwrap();
+            let dispose0 = root.provide::<Foo>(Arc::new(Foo { bar: 100 })).unwrap();
             root_fiber.wait().await.unwrap();
             assert_eq!(root.get::<Foo>().unwrap().bar, 100);
             assert!(ctx1.get::<Foo>().is_none());
             assert!(ctx2.get::<Foo>().is_none());
-            assert_eq!(callback.get(), 1);
-            assert_eq!(dispose_count.get(), 0);
+            assert_eq!(callback.load(Ordering::SeqCst), 1);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 0);
 
-            let dispose12 = ctx1.provide::<Foo>(Rc::new(Foo { bar: 200 })).unwrap();
+            let dispose12 = ctx1.provide::<Foo>(Arc::new(Foo { bar: 200 })).unwrap();
             ctx1_fiber.wait().await.unwrap();
             ctx2_fiber.wait().await.unwrap();
             assert_eq!(root.get::<Foo>().unwrap().bar, 100);
             assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
             assert_eq!(ctx2.get::<Foo>().unwrap().bar, 200);
-            assert_eq!(callback.get(), 3, "both isolated fibers share the label");
-            assert_eq!(dispose_count.get(), 0);
+            assert_eq!(
+                callback.load(Ordering::SeqCst),
+                3,
+                "both isolated fibers share the label"
+            );
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 0);
 
             dispose12.dispose().await.unwrap();
             ctx1_fiber.wait().await.unwrap();
@@ -128,8 +138,8 @@ async fn isolation_shared_label() {
             assert_eq!(root.get::<Foo>().unwrap().bar, 100);
             assert!(ctx1.get::<Foo>().is_none());
             assert!(ctx2.get::<Foo>().is_none());
-            assert_eq!(callback.get(), 3);
-            assert_eq!(dispose_count.get(), 2);
+            assert_eq!(callback.load(Ordering::SeqCst), 3);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 2);
 
             dispose0.dispose().await.unwrap();
         })
@@ -158,15 +168,15 @@ async fn isolation_isolated_event() {
     local
         .run_until(async {
             let root = Context::new();
-            let ctx = root.isolate("foo", Rc::from("symbol-1"));
-            let outer = Rc::new(Cell::new(0u32));
-            let inner = Rc::new(Cell::new(0u32));
+            let ctx = root.isolate("foo", Arc::from("symbol-1"));
+            let outer = Arc::new(AtomicU32::new(0));
+            let inner = Arc::new(AtomicU32::new(0));
             drop(
                 root.on(
                     "custom-event",
                     event_listener({
                         let outer = outer.clone();
-                        move |_| outer.set(outer.get() + 1)
+                        move |_| outer.store(outer.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
                     }),
                     EventOptions::default(),
                 )
@@ -177,7 +187,7 @@ async fn isolation_isolated_event() {
                     "custom-event",
                     event_listener({
                         let inner = inner.clone();
-                        move |_| inner.set(inner.get() + 1)
+                        move |_| inner.store(inner.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
                     }),
                     EventOptions::default(),
                 )
@@ -189,8 +199,8 @@ async fn isolation_isolated_event() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, _config: &Rc<dyn Any>| {
-                        drop(ctx.provide::<Foo>(Rc::new(Foo { bar: 1 })).unwrap());
+                    apply: Arc::new(|ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                        drop(ctx.provide::<Foo>(Arc::new(Foo { bar: 1 })).unwrap());
                         // `ctx.emit(this, event)` with the service as thisArg.
                         let filter = ServiceEventFilter {
                             provider_ctx: ctx.clone(),
@@ -203,8 +213,8 @@ async fn isolation_isolated_event() {
             );
             fiber.wait().await.unwrap();
 
-            assert_eq!(outer.get(), 0);
-            assert_eq!(inner.get(), 1);
+            assert_eq!(outer.load(Ordering::SeqCst), 0);
+            assert_eq!(inner.load(Ordering::SeqCst), 1);
         })
         .await;
 }

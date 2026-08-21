@@ -1,9 +1,10 @@
 //! Ported cases from `packages/core/tests/dispose.spec.ts`.
 
-use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context as TaskContext, Poll};
 
 use cordis_core::{
@@ -15,22 +16,22 @@ use super::Timers;
 
 #[derive(Clone)]
 struct Seq {
-    values: Rc<RefCell<Vec<i32>>>,
+    values: Arc<Mutex<Vec<i32>>>,
 }
 
 impl Seq {
     fn new() -> Self {
         Self {
-            values: Rc::new(RefCell::new(Vec::new())),
+            values: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn push(&self, value: i32) {
-        self.values.borrow_mut().push(value);
+        self.values.lock().unwrap().push(value);
     }
 
     fn get(&self) -> Vec<i32> {
-        self.values.borrow().clone()
+        self.values.lock().unwrap().clone()
     }
 }
 
@@ -41,14 +42,14 @@ struct YieldStream {
     timers: Timers,
     seq: Seq,
     step: usize,
-    pending: Option<Pin<Box<dyn Future<Output = ()>>>>,
+    pending: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
 impl AsyncDisposerStream for YieldStream {
     fn poll_next(
         mut self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
-    ) -> Poll<Option<Result<cordis_core::Disposer, Box<dyn std::error::Error>>>> {
+    ) -> Poll<Option<Result<cordis_core::Disposer, Box<dyn std::error::Error + Send + Sync>>>> {
         match self.step {
             0..=2 => {
                 if self.pending.is_none() {
@@ -89,19 +90,22 @@ async fn effects_dispose_by_plugin() {
     local
         .run_until(async {
             let root = Context::new();
-            let dispose_called = Rc::new(Cell::new(0u32));
+            let dispose_called = Arc::new(AtomicU32::new(0));
             let dispose_called_apply = dispose_called.clone();
             let fiber = root.plugin(
                 &Plugin {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(move |ctx: &Context, _config| {
+                    apply: Arc::new(move |ctx: &Context, _config| {
                         let dispose_called = dispose_called_apply.clone();
                         ctx.effect(
                             || {
                                 Effect::Disposer(sync_disposer(move || {
-                                    dispose_called.set(dispose_called.get() + 1);
+                                    dispose_called.store(
+                                        dispose_called.load(Ordering::SeqCst) + 1,
+                                        Ordering::SeqCst,
+                                    );
                                 }))
                             },
                             "test",
@@ -120,15 +124,15 @@ async fn effects_dispose_by_plugin() {
                     children: Vec::new(),
                 }]
             );
-            assert_eq!(dispose_called.get(), 0);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 0);
 
             fiber.dispose().await;
             tokio::task::yield_now().await;
-            assert_eq!(dispose_called.get(), 1);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 1);
 
             fiber.dispose().await;
             tokio::task::yield_now().await;
-            assert_eq!(dispose_called.get(), 1);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -139,13 +143,14 @@ async fn effects_dispose_manually() {
     local
         .run_until(async {
             let root = Context::new();
-            let dispose_called = Rc::new(Cell::new(0u32));
+            let dispose_called = Arc::new(AtomicU32::new(0));
             let handle = {
                 let dispose_called = dispose_called.clone();
                 root.effect(
                     || {
                         Effect::Disposer(sync_disposer(move || {
-                            dispose_called.set(dispose_called.get() + 1);
+                            dispose_called
+                                .store(dispose_called.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                         }))
                     },
                     "anonymous",
@@ -159,12 +164,12 @@ async fn effects_dispose_manually() {
                     children: Vec::new(),
                 }]
             );
-            assert_eq!(dispose_called.get(), 0);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 0);
 
             handle.dispose().await.unwrap();
-            assert_eq!(dispose_called.get(), 1);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 1);
             handle.dispose().await.unwrap();
-            assert_eq!(dispose_called.get(), 1);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -535,9 +540,9 @@ async fn effects_async_return_with_error() {
                     move || {
                         Effect::Async(Box::pin(async move {
                             timers.sleep(100).await;
-                            Err::<cordis_core::Disposer, Box<dyn std::error::Error>>(Box::new(
-                                std::io::Error::other("test"),
-                            ))
+                            Err::<cordis_core::Disposer, Box<dyn std::error::Error + Send + Sync>>(
+                                Box::new(std::io::Error::other("test")),
+                            )
                         }))
                     },
                     "anonymous",
@@ -594,14 +599,14 @@ struct ErrorStream {
     timers: Timers,
     seq: Seq,
     step: usize,
-    pending: Option<Pin<Box<dyn Future<Output = ()>>>>,
+    pending: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
 }
 
 impl AsyncDisposerStream for ErrorStream {
     fn poll_next(
         mut self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
-    ) -> Poll<Option<Result<cordis_core::Disposer, Box<dyn std::error::Error>>>> {
+    ) -> Poll<Option<Result<cordis_core::Disposer, Box<dyn std::error::Error + Send + Sync>>>> {
         match self.step {
             0 => {
                 if self.pending.is_none() {

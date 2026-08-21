@@ -85,14 +85,14 @@ fn expand_struct(input: DeriveInput) -> TokenStream2 {
         /// escape hatch for callers that bypass the traced path.
         #vis struct #handle {
             /// The underlying service instance.
-            pub service: std::rc::Rc<#name>,
+            pub service: std::sync::Arc<#name>,
             /// The traced context captured at the access point.
             pub ctx: #shadow,
         }
 
         impl #handle {
             /// The underlying service instance.
-            pub fn service(&self) -> &std::rc::Rc<#name> {
+            pub fn service(&self) -> &std::sync::Arc<#name> {
                 &self.service
             }
 

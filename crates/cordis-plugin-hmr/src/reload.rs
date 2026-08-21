@@ -4,7 +4,7 @@
 //! handles atomically: the new artifact is registered first and each affected
 //! entry re-applies; on failure the old artifact is restored.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cordis_core::Context;
 use cordis_loader::{Loader, SoPlugin};
@@ -43,11 +43,11 @@ pub async fn execute_reloads(
             next,
             previous,
         } = request;
-        let entries: Vec<Rc<cordis_loader::Entry>> = loader
+        let entries: Vec<Arc<cordis_loader::Entry>> = loader
             .tree_handle()
             .entries()
             .into_iter()
-            .filter(|entry| entry.options.borrow().name == name)
+            .filter(|entry| entry.options.lock().unwrap().name == name)
             .collect();
         if entries.is_empty() {
             // Not mounted: register the new artifact so future reads use it.

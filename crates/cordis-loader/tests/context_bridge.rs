@@ -7,7 +7,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use cordis_core::{Context, FiberState};
@@ -112,13 +112,14 @@ async fn provide_get_event_and_disposers() {
             let tree = loader.tree_handle();
             let entry = tree.create(opts("hi"), None, 0);
             tree.await_tree().await;
-            let fiber = entry.fiber.borrow().clone().expect("fiber created");
-            assert_eq!(fiber.state.get(), FiberState::Active);
+            let fiber = entry.fiber.lock().unwrap().clone().expect("fiber created");
+            assert_eq!(fiber.state(), FiberState::Active);
 
             // Host reads the service the plugin provided in apply.
             let greeting = entry
                 .ctx
-                .borrow()
+                .lock()
+                .unwrap()
                 .get_str("greeting")
                 .expect("plugin must provide greeting")
                 .downcast_ref::<serde_yaml_ng::Value>()
@@ -136,8 +137,9 @@ async fn provide_get_event_and_disposers() {
             // Host emits an event; the plugin listener responds and writes
             // back through the vtable logger, including a `get` round-trip
             // (the fiber is ACTIVE during dispatch).
-            let args: Rc<dyn Any> = Rc::new(serde_yaml_ng::Value::String("world".to_string()));
-            entry.ctx.borrow().emit("demo/event", &[args]);
+            let args: Arc<dyn Any + Send + Sync> =
+                Arc::new(serde_yaml_ng::Value::String("world".to_string()));
+            entry.ctx.lock().unwrap().emit("demo/event", &[args]);
             let logged = LOGGED.lock().unwrap().clone();
             assert!(
                 logged
@@ -220,7 +222,8 @@ async fn isolate_scopes_provide_get() {
             // The isolated realm sees only its own greeting.
             let isolated_greeting = isolated_entry
                 .ctx
-                .borrow()
+                .lock()
+                .unwrap()
                 .get_str("greeting")
                 .expect("isolated entry must see its own greeting")
                 .downcast_ref::<serde_yaml_ng::Value>()
@@ -231,7 +234,8 @@ async fn isolate_scopes_provide_get() {
             // The shared realm sees the shared greeting, not the isolated one.
             let shared_greeting = shared_entry
                 .ctx
-                .borrow()
+                .lock()
+                .unwrap()
                 .get_str("greeting")
                 .expect("shared entry must see the shared greeting")
                 .downcast_ref::<serde_yaml_ng::Value>()
@@ -251,8 +255,8 @@ async fn isolate_scopes_provide_get() {
             // The isolated entry's fiber resolves the same label as its
             // entry context (the .so plugin provided under the isolated
             // label, not the root one).
-            let isolated_fiber = isolated_entry.fiber.borrow().clone().unwrap();
-            let isolated_label = isolated_entry.ctx.borrow().isolate_label("greeting");
+            let isolated_fiber = isolated_entry.fiber.lock().unwrap().clone().unwrap();
+            let isolated_label = isolated_entry.ctx.lock().unwrap().isolate_label("greeting");
             let fiber_label = isolated_fiber.context().isolate_label("greeting");
             assert_eq!(isolated_label, fiber_label);
             assert_ne!(
@@ -342,12 +346,12 @@ async fn disposed_plugin_event_callback_is_skipped() {
             // Drop the plugin instance while the fiber (and its listener)
             // are still alive; the host must skip the deferred callback.
             drop(plugin);
-            entry.ctx.borrow().emit("demo/event", &[]);
+            entry.ctx.lock().unwrap().emit("demo/event", &[]);
             assert_eq!(fixture_helpers().1, 0, "callback must be skipped");
 
             // Disposing the fiber runs the disposers, which are skipped the
             // same way (the handle is no longer live).
-            let fiber = entry.fiber.borrow().clone().unwrap();
+            let fiber = entry.fiber.lock().unwrap().clone().unwrap();
             let _ = tokio::task::spawn_local(fiber.dispose()).await;
             let (_, _, first_order, second_order) = fixture_helpers();
             assert_eq!(first_order, -1, "disposer must be skipped");

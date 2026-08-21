@@ -15,10 +15,32 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cordis_core::{Context, Effect, EventCallback, EventOptions, sync_disposer};
 use cordis_sdk::{PluginDisposer, PluginEventCallback, PluginHandle};
+
+/// A plugin handle pointer that is `Send + Sync` under the plugin pinning
+/// contract. The pointer is only dereferenced through the vtable while the
+/// owning `SoPlugin` is alive, and all callbacks touching it are confined to
+/// the plugin's own thread (phase 1: the host thread; phase 3: per-plugin
+/// pinned threads).
+#[derive(Clone, Copy)]
+pub struct PluginHandlePtr(pub *mut PluginHandle);
+
+// SAFETY: see the type-level contract above; the raw pointer is never
+// dereferenced from a thread other than the plugin's own.
+unsafe impl Send for PluginHandlePtr {}
+unsafe impl Sync for PluginHandlePtr {}
+
+impl PluginHandlePtr {
+    /// Extracts the raw pointer. Use this method inside closures: a field
+    /// access (`ptr.0`) would capture the `!Send` raw pointer directly
+    /// instead of the `Send + Sync` wrapper (RFC 2229 disjoint captures).
+    pub fn get(self) -> *mut PluginHandle {
+        self.0
+    }
+}
 
 /// One host→plugin call frame: the plugin handle plus the fiber context the
 /// current call belongs to.
@@ -128,7 +150,7 @@ unsafe fn cstr<'a>(ptr: *const c_char) -> Option<&'a str> {
 
 /// Serializes a store value to JSON when it is data (serde values, strings,
 /// numbers); `None` for non-serializable object services.
-fn value_to_json(value: &Rc<dyn Any>) -> Option<String> {
+fn value_to_json(value: &Arc<dyn Any + Send + Sync>) -> Option<String> {
     if let Some(value) = value.downcast_ref::<serde_yaml_ng::Value>() {
         return serde_json::to_string(value).ok();
     }
@@ -158,7 +180,7 @@ fn value_to_json(value: &Rc<dyn Any>) -> Option<String> {
 
 /// Serializes event arguments to a JSON array; non-serializable arguments
 /// become `null`.
-fn args_to_json(args: &[Rc<dyn Any>]) -> String {
+fn args_to_json(args: &[Arc<dyn Any + Send + Sync>]) -> String {
     let items: Vec<serde_json::Value> = args
         .iter()
         .map(|arg| {
@@ -198,7 +220,7 @@ pub unsafe extern "C" fn host_provide(
         return 1;
     };
     let value = payload_to_value(payload);
-    match ctx.provide_str(name, Rc::new(value)) {
+    match ctx.provide_str(name, Arc::new(value)) {
         Ok(_) => 0,
         Err(message) => {
             ctx.logger()
@@ -254,14 +276,15 @@ pub unsafe extern "C" fn host_on(
     let Some(ctx) = session_ctx(handle) else {
         return std::ptr::null_mut();
     };
-    let handle_for_callback = handle;
+    let handle_for_callback = PluginHandlePtr(handle);
     let ctx_for_callback = ctx.clone();
-    let callback: EventCallback = Rc::new(move |args: &[Rc<dyn Any>]| {
+    let callback: EventCallback = Arc::new(move |args: &[Arc<dyn Any + Send + Sync>]| {
         let handle = handle_for_callback;
         let ctx = ctx_for_callback.clone();
         let plugin_callback = callback;
         let args = args.to_vec();
         Box::pin(async move {
+            let handle = handle.get();
             if !is_handle_live(handle) {
                 ctx.logger().error(format!(
                     "skipping event callback for disposed plugin {:#x}",
@@ -280,7 +303,7 @@ pub unsafe extern "C" fn host_on(
         })
     });
     match ctx.on(event, callback, EventOptions::default()) {
-        Ok(listener) => Rc::as_ptr(&listener).cast_mut().cast::<std::ffi::c_void>(),
+        Ok(listener) => Arc::as_ptr(&listener).cast_mut().cast::<std::ffi::c_void>(),
         Err(error) => {
             ctx.logger()
                 .error(format!("ctx.on({event:?}) failed: {error}"));
@@ -309,12 +332,12 @@ pub unsafe extern "C" fn host_emit(
         return;
     };
     let value = payload_to_value(payload);
-    let args: Vec<Rc<dyn Any>> = match value {
+    let args: Vec<Arc<dyn Any + Send + Sync>> = match value {
         serde_yaml_ng::Value::Sequence(items) => items
             .into_iter()
-            .map(|item| Rc::new(item) as Rc<dyn Any>)
+            .map(|item| Arc::new(item) as Arc<dyn Any + Send + Sync>)
             .collect(),
-        other => vec![Rc::new(other) as Rc<dyn Any>],
+        other => vec![Arc::new(other) as Arc<dyn Any + Send + Sync>],
     };
     ctx.emit(event, &args);
 }
@@ -333,7 +356,9 @@ pub unsafe extern "C" fn host_effect_disposer(handle: *mut PluginHandle, dispose
     };
     let ctx_for_dispose = ctx.clone();
     let disposer_fn = disposer;
+    let handle = PluginHandlePtr(handle);
     let disposer_outer = sync_disposer(move || {
+        let handle = handle.get();
         if !is_handle_live(handle) {
             ctx_for_dispose.logger().error(format!(
                 "skipping disposer for disposed plugin {:#x}",

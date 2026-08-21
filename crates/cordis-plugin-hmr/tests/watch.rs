@@ -1,11 +1,11 @@
 //! File watching, debounce, ignored globs and include refresh.
 
 use std::any::Any;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use cordis_core::{Context, Effect, EventOptions, event_callback};
 use cordis_loader::{EntryOptions, Loader};
@@ -63,7 +63,7 @@ async fn change_event_and_ignored() {
             let dir = temp_dir("event");
             let root = Context::new();
             let loader = Loader::new(&root);
-            let changes = Rc::new(RefCell::new(Vec::new()));
+            let changes = Arc::new(Mutex::new(Vec::new()));
             drop(
                 root.on(
                     "hmr/change",
@@ -71,7 +71,7 @@ async fn change_event_and_ignored() {
                         let changes = changes.clone();
                         move |args| {
                             if let Some(path) = args[0].downcast_ref::<String>() {
-                                changes.borrow_mut().push(path.clone());
+                                changes.lock().unwrap().push(path.clone());
                             }
                             Ok(None)
                         }
@@ -96,17 +96,25 @@ async fn change_event_and_ignored() {
             fs::write(dir.join("node_modules/pkg.js"), "x").unwrap();
             fs::write(dir.join("src.js"), "hello").unwrap();
 
-            wait_for(|| !changes.borrow().is_empty()).await;
+            wait_for(|| !changes.lock().unwrap().is_empty()).await;
             watcher.stop();
             assert!(
-                changes.borrow().iter().any(|p| p.ends_with("src.js")),
+                changes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.ends_with("src.js")),
                 "src.js change must emit hmr/change: {:?}",
-                changes.borrow()
+                changes.lock().unwrap()
             );
             assert!(
-                !changes.borrow().iter().any(|p| p.contains("node_modules")),
+                !changes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.contains("node_modules")),
                 "ignored files must not emit: {:?}",
-                changes.borrow()
+                changes.lock().unwrap()
             );
             fs::remove_dir_all(&dir).unwrap();
         })
@@ -129,31 +137,33 @@ async fn include_config_refresh() {
             .unwrap();
             let root = Context::new();
             let loader = Loader::new(&root);
-            loader
-                .builtins
-                .borrow_mut()
-                .insert("@cordisjs/plugin-include".to_string(), include_plugin());
+            {
+                let _guard = loader.tree.write_lock.lock().unwrap();
+                let mut builtins = (*loader.builtins.load_full()).clone();
+                builtins.insert("@cordisjs/plugin-include".to_string(), include_plugin());
+                loader.builtins.store(Arc::new(builtins));
+            }
             loader.mock(
                 "greeter",
-                Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
+                Arc::new(|ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                     let value = config
                         .downcast_ref::<serde_yaml_ng::Value>()
                         .and_then(|value| value.get("value"))
                         .and_then(|value| value.as_str())
                         .unwrap_or("default")
                         .to_string();
-                    drop(ctx.provide_str("greeting", Rc::new(value)).unwrap());
+                    drop(ctx.provide_str("greeting", Arc::new(value)).unwrap());
                     Effect::None
                 }),
             );
-            let changes = Rc::new(RefCell::new(0u32));
+            let changes = Arc::new(Mutex::new(0u32));
             drop(
                 root.on(
                     "hmr/change",
                     event_callback({
                         let changes = changes.clone();
                         move |_args| {
-                            *changes.borrow_mut() += 1;
+                            *changes.lock().unwrap() += 1;
                             Ok(None)
                         }
                     }),
@@ -229,7 +239,7 @@ async fn include_config_refresh() {
                 "include config change must refresh the tree"
             );
             assert_eq!(
-                *changes.borrow(),
+                *changes.lock().unwrap(),
                 0,
                 "config file changes must not emit hmr/change"
             );

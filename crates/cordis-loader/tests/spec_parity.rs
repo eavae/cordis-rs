@@ -2,9 +2,10 @@
 //! covered 1:1 (corresponding to `packages/loader/tests/{group,index,isolate}.spec.ts`).
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{Context, Effect, FiberState, sync_disposer};
 use cordis_loader::{EntryOptions, IsolateValue, Loader, LoaderIntercept, PartialEntryOptions};
@@ -51,7 +52,7 @@ fn bar_value_config(value: &str) -> serde_yaml_ng::Value {
 }
 
 fn bar_plugin() -> cordis_core::ApplyFn {
-    Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
+    Arc::new(|ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
         let value = config
             .downcast_ref::<serde_yaml_ng::Value>()
             .and_then(|value| value.get("value"))
@@ -59,19 +60,22 @@ fn bar_plugin() -> cordis_core::ApplyFn {
             .unwrap_or("default")
             .to_string();
         drop(
-            ctx.provide_str("bar", Rc::new(BarValue { value }) as Rc<dyn Any>)
-                .unwrap(),
+            ctx.provide_str(
+                "bar",
+                Arc::new(BarValue { value }) as Arc<dyn Any + Send + Sync>,
+            )
+            .unwrap(),
         );
         Effect::None
     })
 }
 
-fn foo_plugin(applied: Rc<Cell<u32>>, disposed: Rc<Cell<u32>>) -> cordis_core::ApplyFn {
-    Rc::new(move |_ctx: &Context, _config| {
-        applied.set(applied.get() + 1);
+fn foo_plugin(applied: Arc<AtomicU32>, disposed: Arc<AtomicU32>) -> cordis_core::ApplyFn {
+    Arc::new(move |_ctx: &Context, _config| {
+        applied.store(applied.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
         let disposed = disposed.clone();
         Effect::Disposer(sync_disposer(move || {
-            disposed.set(disposed.get() + 1);
+            disposed.store(disposed.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
         }))
     })
 }
@@ -93,7 +97,7 @@ async fn wait_until(mut check: impl FnMut() -> bool) {
     panic!("condition not met");
 }
 
-fn get_bar(fiber: &Rc<cordis_core::Fiber>) -> Option<String> {
+fn get_bar(fiber: &Arc<cordis_core::Fiber>) -> Option<String> {
     fiber
         .context()
         .get_str("bar")
@@ -110,8 +114,8 @@ async fn group_transfer_between_groups() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(Cell::new(0u32));
-            let disposed = Rc::new(Cell::new(0u32));
+            let applied = Arc::new(AtomicU32::new(0));
+            let disposed = Arc::new(AtomicU32::new(0));
             loader.mock("foo", foo_plugin(applied.clone(), disposed.clone()));
             let tree = loader.tree_handle();
 
@@ -129,33 +133,33 @@ async fn group_transfer_between_groups() {
             tree.await_tree().await;
             let gamma = tree.create(group_opts("", vec![]), Some(&beta.id()), 0);
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
-            assert_eq!(disposed.get(), 0);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
+            assert_eq!(disposed.load(Ordering::SeqCst), 0);
             assert_eq!(tree.entries().len(), 4);
 
             // enabled -> enabled: no restart.
             tree.move_entry(&id.id(), Some(&alpha.id()));
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
-            assert_eq!(disposed.get(), 0);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
+            assert_eq!(disposed.load(Ordering::SeqCst), 0);
 
             // enabled -> disabled: unload.
             tree.move_entry(&id.id(), Some(&beta.id()));
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
-            assert_eq!(disposed.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
+            assert_eq!(disposed.load(Ordering::SeqCst), 1);
 
             // disabled -> disabled: no change.
             tree.move_entry(&id.id(), Some(&gamma.id()));
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
-            assert_eq!(disposed.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
+            assert_eq!(disposed.load(Ordering::SeqCst), 1);
 
             // disabled -> enabled: re-apply.
             tree.move_entry(&id.id(), None);
             tree.await_tree().await;
-            assert_eq!(applied.get(), 2);
-            assert_eq!(disposed.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 2);
+            assert_eq!(disposed.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -169,11 +173,11 @@ async fn group_intercept_chain() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let captured = Rc::new(RefCell::new(Vec::<serde_yaml_ng::Value>::new()));
+            let captured = Arc::new(Mutex::new(Vec::<serde_yaml_ng::Value>::new()));
             let captured_apply = captured.clone();
             loader.mock(
                 "foo",
-                Rc::new(move |ctx: &Context, _config| {
+                Arc::new(move |ctx: &Context, _config| {
                     let chain = ctx.intercept_chain("foo");
                     let values: Vec<serde_yaml_ng::Value> = chain
                         .iter()
@@ -184,7 +188,7 @@ async fn group_intercept_chain() {
                                 .unwrap()
                         })
                         .collect();
-                    *captured_apply.borrow_mut() = values;
+                    *captured_apply.lock().unwrap() = values;
                     Effect::None
                 }),
             );
@@ -219,7 +223,7 @@ async fn group_intercept_chain() {
             );
             tree.await_tree().await;
 
-            let chain = captured.borrow();
+            let chain = captured.lock().unwrap();
             assert_eq!(chain.len(), 3, "intercept chain must have 3 layers");
             assert_eq!(
                 chain[0].get("c").and_then(serde_yaml_ng::Value::as_i64),
@@ -247,21 +251,21 @@ async fn loader_intercept_await_fiber_states() {
             let root = Context::new();
             let loader = Loader::new(&root);
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-            let rx_cell: Rc<RefCell<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>> =
-                Rc::new(RefCell::new(Some(rx)));
+            let rx_cell: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>> =
+                Arc::new(Mutex::new(Some(rx)));
             loader.mock(
                 "foo",
-                Rc::new(move |_ctx: &Context, _config| {
-                    let mut rx = rx_cell.borrow_mut().take().expect("foo applied once");
+                Arc::new(move |_ctx: &Context, _config| {
+                    let mut rx = rx_cell.lock().unwrap().take().expect("foo applied once");
                     Effect::Async(Box::pin(async move {
                         let _ = rx.recv().await;
                         Ok(sync_disposer(|| {}))
                     }))
                 }),
             );
-            loader.mock("bar", Rc::new(|_ctx, _config| Effect::None));
-            loader.mock("qux", Rc::new(|_ctx, _config| Effect::None));
-            root.set_intercept("loader", Rc::new(LoaderIntercept::awaiting()));
+            loader.mock("bar", Arc::new(|_ctx, _config| Effect::None));
+            loader.mock("qux", Arc::new(|_ctx, _config| Effect::None));
+            root.set_intercept("loader", Arc::new(LoaderIntercept::awaiting()));
 
             let tree = loader.tree_handle();
             tree.create(
@@ -302,26 +306,26 @@ async fn loader_intercept_await_fiber_states() {
                     .tree_handle()
                     .entries()
                     .iter()
-                    .find(|entry| entry.options.borrow().id == "1")
-                    .and_then(|entry| entry.fiber.borrow().clone())
-                    .is_some_and(|fiber| fiber.state.get() == FiberState::Loading)
+                    .find(|entry| entry.options.lock().unwrap().id == "1")
+                    .and_then(|entry| entry.fiber.lock().unwrap().clone())
+                    .is_some_and(|fiber| fiber.state() == FiberState::Loading)
             })
             .await;
             assert_eq!(
-                loader.expect_fiber("2").state.get(),
+                loader.expect_fiber("2").state(),
                 FiberState::Pending,
                 "inject 'never' stays pending"
             );
             assert_eq!(
-                loader.expect_fiber("3").state.get(),
+                loader.expect_fiber("3").state(),
                 FiberState::Pending,
                 "loader await gates qux while foo is loading"
             );
 
             let _ = tx.send(());
-            wait_until(|| loader.expect_fiber("1").state.get() == FiberState::Active).await;
-            wait_until(|| loader.expect_fiber("3").state.get() == FiberState::Active).await;
-            assert_eq!(loader.expect_fiber("2").state.get(), FiberState::Pending);
+            wait_until(|| loader.expect_fiber("1").state() == FiberState::Active).await;
+            wait_until(|| loader.expect_fiber("3").state() == FiberState::Active).await;
+            assert_eq!(loader.expect_fiber("2").state(), FiberState::Pending);
         })
         .await;
 }
@@ -335,8 +339,8 @@ async fn isolate_provider_irrelevant_add_remove() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(Cell::new(0u32));
-            let disposed = Rc::new(Cell::new(0u32));
+            let applied = Arc::new(AtomicU32::new(0));
+            let disposed = Arc::new(AtomicU32::new(0));
             loader.mock("bar", bar_plugin());
             loader.mock_with_inject(
                 "foo",
@@ -345,7 +349,7 @@ async fn isolate_provider_irrelevant_add_remove() {
             );
             let tree = loader.tree_handle();
             loader.read(vec![opts("1", "bar"), opts("2", "foo")]).await;
-            assert_eq!(applied.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
 
             // Add isolate on provider (relevant: bar).
             tree.update_entry(
@@ -356,7 +360,7 @@ async fn isolate_provider_irrelevant_add_remove() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(disposed.get(), 1);
+            assert_eq!(disposed.load(Ordering::SeqCst), 1);
 
             // Add isolate (irrelevant: qux).
             tree.update_entry(
@@ -370,7 +374,7 @@ async fn isolate_provider_irrelevant_add_remove() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(disposed.get(), 1);
+            assert_eq!(disposed.load(Ordering::SeqCst), 1);
 
             // Remove isolate (relevant: bar gone → provider visible again).
             tree.update_entry(
@@ -381,8 +385,8 @@ async fn isolate_provider_irrelevant_add_remove() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(applied.get(), 2);
-            assert_eq!(disposed.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 2);
+            assert_eq!(disposed.load(Ordering::SeqCst), 1);
 
             // Remove isolate (irrelevant: qux only).
             tree.update_entry(
@@ -393,8 +397,8 @@ async fn isolate_provider_irrelevant_add_remove() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(applied.get(), 2);
-            assert_eq!(disposed.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 2);
+            assert_eq!(disposed.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -408,8 +412,8 @@ async fn isolate_realm_local_and_update_no_change() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(Cell::new(0u32));
-            let disposed = Rc::new(Cell::new(0u32));
+            let applied = Arc::new(AtomicU32::new(0));
+            let disposed = Arc::new(AtomicU32::new(0));
             loader.mock("bar", bar_plugin());
             loader.mock_with_inject(
                 "foo",
@@ -464,7 +468,11 @@ async fn isolate_realm_local_and_update_no_change() {
                 0,
             );
             tree.await_tree().await;
-            assert_eq!(applied.get(), 2, "alpha and beta injectors apply");
+            assert_eq!(
+                applied.load(Ordering::SeqCst),
+                2,
+                "alpha and beta injectors apply"
+            );
             assert_eq!(
                 get_bar(&loader.expect_fiber(&foo_alpha.id())).as_deref(),
                 Some("alpha")
@@ -474,7 +482,7 @@ async fn isolate_realm_local_and_update_no_change() {
                 Some("beta")
             );
             assert_eq!(
-                loader.expect_fiber(&foo_local.id()).state.get(),
+                loader.expect_fiber(&foo_local.id()).state(),
                 FiberState::Pending
             );
             assert!(get_bar(&loader.expect_fiber(&foo_local.id())).is_none());
@@ -488,8 +496,8 @@ async fn isolate_realm_local_and_update_no_change() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(applied.get(), 2);
-            assert_eq!(disposed.get(), 0);
+            assert_eq!(applied.load(Ordering::SeqCst), 2);
+            assert_eq!(disposed.load(Ordering::SeqCst), 0);
         })
         .await;
 }
@@ -503,8 +511,8 @@ async fn isolate_change_provider_restarts_dependents() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(Cell::new(0u32));
-            let disposed = Rc::new(Cell::new(0u32));
+            let applied = Arc::new(AtomicU32::new(0));
+            let disposed = Arc::new(AtomicU32::new(0));
             loader.mock("bar", bar_plugin());
             loader.mock_with_inject(
                 "foo",
@@ -547,8 +555,8 @@ async fn isolate_change_provider_restarts_dependents() {
             tree.await_tree().await;
             let id = tree.create(opts("", "foo"), Some(&group.id()), 0);
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
-            assert_eq!(disposed.get(), 0);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
+            assert_eq!(disposed.load(Ordering::SeqCst), 0);
             assert_eq!(
                 get_bar(&loader.expect_fiber(&id.id())).as_deref(),
                 Some("alpha")
@@ -562,8 +570,8 @@ async fn isolate_change_provider_restarts_dependents() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(applied.get(), 2, "dependent must restart");
-            assert_eq!(disposed.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 2, "dependent must restart");
+            assert_eq!(disposed.load(Ordering::SeqCst), 1);
             assert_eq!(
                 get_bar(&loader.expect_fiber(&id.id())).as_deref(),
                 Some("beta")
@@ -581,8 +589,8 @@ async fn isolate_change_injector_switches_dependents() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(Cell::new(0u32));
-            let disposed = Rc::new(Cell::new(0u32));
+            let applied = Arc::new(AtomicU32::new(0));
+            let disposed = Arc::new(AtomicU32::new(0));
             loader.mock("bar", bar_plugin());
             loader.mock_with_inject(
                 "foo",
@@ -628,12 +636,13 @@ async fn isolate_change_injector_switches_dependents() {
                 0,
             );
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1, "only the alpha injector sees bar");
-            assert!(get_bar(&loader.expect_fiber(&alpha.id())).is_some());
             assert_eq!(
-                loader.expect_fiber(&beta.id()).state.get(),
-                FiberState::Pending
+                applied.load(Ordering::SeqCst),
+                1,
+                "only the alpha injector sees bar"
             );
+            assert!(get_bar(&loader.expect_fiber(&alpha.id())).is_some());
+            assert_eq!(loader.expect_fiber(&beta.id()).state(), FiberState::Pending);
 
             tree.update_entry(
                 &group.id(),
@@ -643,15 +652,15 @@ async fn isolate_change_injector_switches_dependents() {
                 },
             );
             tree.await_tree().await;
-            wait_until(|| applied.get() == 2 && disposed.get() == 1).await;
+            wait_until(|| {
+                applied.load(Ordering::SeqCst) == 2 && disposed.load(Ordering::SeqCst) == 1
+            })
+            .await;
             assert_eq!(
-                loader.expect_fiber(&alpha.id()).state.get(),
+                loader.expect_fiber(&alpha.id()).state(),
                 FiberState::Pending
             );
-            assert_eq!(
-                loader.expect_fiber(&beta.id()).state.get(),
-                FiberState::Active
-            );
+            assert_eq!(loader.expect_fiber(&beta.id()).state(), FiberState::Active);
             assert!(get_bar(&loader.expect_fiber(&beta.id())).is_some());
         })
         .await;
@@ -666,8 +675,8 @@ async fn isolate_nested_realms_no_change() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(Cell::new(0u32));
-            let disposed = Rc::new(Cell::new(0u32));
+            let applied = Arc::new(AtomicU32::new(0));
+            let disposed = Arc::new(AtomicU32::new(0));
             loader.mock("bar", bar_plugin());
             loader.mock_with_inject(
                 "foo",
@@ -725,7 +734,7 @@ async fn isolate_nested_realms_no_change() {
             );
             let beta = tree.create(opts("", "foo"), Some(&inner.id()), 0);
             tree.await_tree().await;
-            assert_eq!(applied.get(), 2);
+            assert_eq!(applied.load(Ordering::SeqCst), 2);
             assert_eq!(
                 get_bar(&loader.expect_fiber(&alpha.id())).as_deref(),
                 Some("custom")
@@ -755,8 +764,8 @@ async fn isolate_nested_realms_no_change() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(applied.get(), 2);
-            assert_eq!(disposed.get(), 0);
+            assert_eq!(applied.load(Ordering::SeqCst), 2);
+            assert_eq!(disposed.load(Ordering::SeqCst), 0);
         })
         .await;
 }
@@ -770,8 +779,8 @@ async fn isolate_transfer_between_realms() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let applied = Rc::new(Cell::new(0u32));
-            let disposed = Rc::new(Cell::new(0u32));
+            let applied = Arc::new(AtomicU32::new(0));
+            let disposed = Arc::new(AtomicU32::new(0));
             loader.mock("bar", bar_plugin());
             loader.mock_with_inject(
                 "foo",
@@ -791,31 +800,31 @@ async fn isolate_transfer_between_realms() {
             let provider = tree.create(opts("", "bar"), None, 0);
             let injector = tree.create(opts("", "foo"), None, 0);
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
-            assert_eq!(disposed.get(), 0);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
+            assert_eq!(disposed.load(Ordering::SeqCst), 0);
 
             // Transfer injector into the isolated group: bar disappears.
             tree.move_entry(&injector.id(), Some(&group.id()));
             tree.await_tree().await;
-            assert_eq!(applied.get(), 1);
-            assert_eq!(disposed.get(), 1);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
+            assert_eq!(disposed.load(Ordering::SeqCst), 1);
 
             // Transfer provider into the group: bar is visible again.
             tree.move_entry(&provider.id(), Some(&group.id()));
-            wait_until(|| applied.get() == 2).await;
-            assert_eq!(disposed.get(), 1);
+            wait_until(|| applied.load(Ordering::SeqCst) == 2).await;
+            assert_eq!(disposed.load(Ordering::SeqCst), 1);
 
             // Transfer injector out: bar (now inside the group) is invisible
             // from the root realm.
             tree.move_entry(&injector.id(), None);
             tree.await_tree().await;
-            assert_eq!(applied.get(), 2);
-            assert_eq!(disposed.get(), 2);
+            assert_eq!(applied.load(Ordering::SeqCst), 2);
+            assert_eq!(disposed.load(Ordering::SeqCst), 2);
 
             // Transfer provider out: bar returns to the root realm.
             tree.move_entry(&provider.id(), None);
-            wait_until(|| applied.get() == 3).await;
-            assert_eq!(disposed.get(), 2);
+            wait_until(|| applied.load(Ordering::SeqCst) == 3).await;
+            assert_eq!(disposed.load(Ordering::SeqCst), 2);
         })
         .await;
 }

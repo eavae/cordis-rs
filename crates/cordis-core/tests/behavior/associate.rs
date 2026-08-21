@@ -1,7 +1,7 @@
 //! Ported cases from `packages/core/tests/associate.spec.ts`.
 
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use cordis_core::{Context, Effect, MixinAccessor, Plugin, Service, ShadowContext, service};
 
@@ -32,8 +32,8 @@ async fn association_service_injection() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, _config| {
-                        drop(ctx.provide::<Foo>(Rc::new(Foo { qux: 1 })).unwrap());
+                    apply: Arc::new(|ctx: &Context, _config| {
+                        drop(ctx.provide::<Foo>(Arc::new(Foo { qux: 1 })).unwrap());
                         Effect::None
                     }),
                 },
@@ -45,8 +45,8 @@ async fn association_service_injection() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, _config| {
-                        drop(ctx.provide::<FooBar>(Rc::new(FooBar)).unwrap());
+                    apply: Arc::new(|ctx: &Context, _config| {
+                        drop(ctx.provide::<FooBar>(Arc::new(FooBar)).unwrap());
                         Effect::None
                     }),
                 },
@@ -75,9 +75,9 @@ async fn association_property_injection() {
     local
         .run_until(async {
             let root = Context::new();
-            drop(root.provide_str("foo.bar", Rc::new(3i32)).unwrap());
+            drop(root.provide_str("foo.bar", Arc::new(3i32)).unwrap());
             drop(
-                root.provide_str("foo.baz", Rc::new("baz-value".to_string()))
+                root.provide_str("foo.baz", Arc::new("baz-value".to_string()))
                     .unwrap(),
             );
             let foo_fiber = root.plugin(
@@ -85,8 +85,8 @@ async fn association_property_injection() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, _config| {
-                        drop(ctx.provide::<Foo>(Rc::new(Foo { qux: 0 })).unwrap());
+                    apply: Arc::new(|ctx: &Context, _config| {
+                        drop(ctx.provide::<Foo>(Arc::new(Foo { qux: 0 })).unwrap());
                         Effect::None
                     }),
                 },
@@ -120,7 +120,7 @@ async fn association_duplicate_declaration_errors() {
     local
         .run_until(async {
             let root = Context::new();
-            drop(root.provide_str("foo.bar", Rc::new(1i32)).unwrap());
+            drop(root.provide_str("foo.bar", Arc::new(1i32)).unwrap());
             root.mixin("foo", &[("bar", "foo.bar")]).unwrap();
             let error = root.mixin("foo", &[("bar", "foo.bar")]).unwrap_err();
             assert!(error.contains("already declared"), "{error}");
@@ -135,7 +135,7 @@ async fn association_mixin_get_set_forwards() {
         .run_until(async {
             let root = Context::new();
             // A service whose `secret` field is exposed through the mixin.
-            let secret = Rc::new(Cell::new(0i32));
+            let secret = Arc::new(AtomicI32::new(0));
             let foo_fiber = root.plugin(
                 &Plugin {
                     is_group: false,
@@ -143,10 +143,12 @@ async fn association_mixin_get_set_forwards() {
                     inject: Vec::new(),
                     apply: {
                         let secret = secret.clone();
-                        Rc::new(move |ctx: &Context, _config| {
+                        Arc::new(move |ctx: &Context, _config| {
                             drop(
-                                ctx.provide::<Foo>(Rc::new(Foo { qux: secret.get() }))
-                                    .unwrap(),
+                                ctx.provide::<Foo>(Arc::new(Foo {
+                                    qux: secret.load(Ordering::SeqCst),
+                                }))
+                                .unwrap(),
                             );
                             Effect::None
                         })
@@ -163,9 +165,14 @@ async fn association_mixin_get_set_forwards() {
                 &[(
                     "secret",
                     MixinAccessor {
-                        get: Rc::new(move |_ctx| Some(Rc::new(secret_get.get()))),
-                        set: Some(Rc::new(move |_ctx, value| {
-                            secret_set.set(value.downcast_ref::<i32>().copied().unwrap_or(0));
+                        get: Arc::new(move |_ctx| {
+                            Some(Arc::new(secret_get.load(Ordering::SeqCst)))
+                        }),
+                        set: Some(Arc::new(move |_ctx, value| {
+                            secret_set.store(
+                                value.downcast_ref::<i32>().copied().unwrap_or(0),
+                                Ordering::SeqCst,
+                            );
                         })),
                     },
                 )],
@@ -179,8 +186,8 @@ async fn association_mixin_get_set_forwards() {
                     .copied(),
                 Some(0)
             );
-            root.set_assoc("foo", "secret", Rc::new(42i32)).unwrap();
-            assert_eq!(secret.get(), 42);
+            root.set_assoc("foo", "secret", Arc::new(42i32)).unwrap();
+            assert_eq!(secret.load(Ordering::SeqCst), 42);
             assert_eq!(
                 root.resolve_assoc("foo", "secret")
                     .unwrap()
@@ -198,7 +205,9 @@ async fn association_get_set_requires_accessor() {
     local
         .run_until(async {
             let root = Context::new();
-            let error = root.set_assoc("foo", "missing", Rc::new(1i32)).unwrap_err();
+            let error = root
+                .set_assoc("foo", "missing", Arc::new(1i32))
+                .unwrap_err();
             assert!(
                 error.contains("cannot set property \"foo.missing\" without provide"),
                 "{error}"
@@ -239,7 +248,7 @@ async fn inspect_preserves_type_identity() {
             use crate::behavior::associate::InspectorServiceExt;
 
             let root = Context::new();
-            drop(root.provide::<Inspector>(Rc::new(Inspector)).unwrap());
+            drop(root.provide::<Inspector>(Arc::new(Inspector)).unwrap());
 
             let debug = root.inspector().expect("inspector").bar(&Widget);
             assert_eq!(debug, "Widget");

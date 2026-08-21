@@ -5,9 +5,9 @@
 //! table) instead of `tokio::time`, so that it works both for plain spawned
 //! tasks and for `LocalSet`-scheduled fiber tasks.
 
-use std::cell::RefCell;
 use std::future::{Future, poll_fn};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::task::{Poll, Waker};
 
 pub mod associate;
@@ -45,7 +45,7 @@ struct Waiter {
 /// is live the clock is frozen and only moves when explicitly advanced.
 #[derive(Clone)]
 pub struct Timers {
-    state: Rc<RefCell<ClockState>>,
+    state: Arc<Mutex<ClockState>>,
 }
 
 impl Timers {
@@ -57,7 +57,7 @@ impl Timers {
         let mut remaining = ms;
         loop {
             let due_wakers = {
-                let mut state = self.state.borrow_mut();
+                let mut state = self.state.lock().unwrap();
                 let target = state.now_ms + remaining;
                 let earliest = state
                     .waiters
@@ -107,10 +107,10 @@ impl Timers {
     /// advanced far enough.
     pub fn sleep(&self, ms: u64) -> impl Future<Output = ()> {
         let state = self.state.clone();
-        let deadline = state.borrow().now_ms + ms;
+        let deadline = state.lock().unwrap().now_ms + ms;
         let mut id: Option<u64> = None;
         poll_fn(move |cx| {
-            let mut state = state.borrow_mut();
+            let mut state = state.lock().unwrap();
             if state.now_ms >= deadline {
                 return Poll::Ready(());
             }
@@ -138,7 +138,7 @@ impl Timers {
 
     /// The current fake-clock value in milliseconds since the clock started.
     pub fn now(&self) -> u64 {
-        self.state.borrow().now_ms
+        self.state.lock().unwrap().now_ms
     }
 }
 
@@ -150,7 +150,7 @@ where
     Fut: Future,
 {
     body(Timers {
-        state: Rc::new(RefCell::new(ClockState::default())),
+        state: Arc::new(Mutex::new(ClockState::default())),
     })
     .await
 }

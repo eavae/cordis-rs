@@ -5,8 +5,9 @@
 //! these tests run inside one and observe the same state transitions.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{
     Context, Effect, EventOptions, FiberState, LoggerService, Plugin, Service, async_disposer,
@@ -55,11 +56,11 @@ async fn fiber_inertia_lock_1() {
     local
         .run_until(super::with_timers(|timers| async move {
             let root = Context::new();
-            let dispose = root.provide_str("foo", Rc::new(1i32)).unwrap();
+            let dispose = root.provide_str("foo", Arc::new(1i32)).unwrap();
             let timers_for_cb = timers.clone();
             let fiber = root.inject(
                 &["foo"],
-                Rc::new(move |_ctx, _config| {
+                Arc::new(move |_ctx, _config| {
                     let timers = timers_for_cb.clone();
                     Effect::Async(Box::pin(async move {
                         timers.sleep(1000).await;
@@ -75,22 +76,22 @@ async fn fiber_inertia_lock_1() {
             tokio::task::yield_now().await;
             tokio::task::yield_now().await;
             timers.advance(400).await;
-            assert_eq!(fiber.state.get(), FiberState::Loading);
+            assert_eq!(fiber.state(), FiberState::Loading);
 
             dispose.dispose().await.unwrap();
             timers.advance(400).await;
-            assert_eq!(fiber.state.get(), FiberState::Loading);
+            assert_eq!(fiber.state(), FiberState::Loading);
 
             timers.advance(400).await;
-            assert_eq!(fiber.state.get(), FiberState::Unloading);
+            assert_eq!(fiber.state(), FiberState::Unloading);
 
-            drop(root.provide_str("foo", Rc::new(1i32)).unwrap());
+            drop(root.provide_str("foo", Arc::new(1i32)).unwrap());
             tokio::task::yield_now().await;
             timers.advance(1000).await;
-            assert_eq!(fiber.state.get(), FiberState::Loading);
+            assert_eq!(fiber.state(), FiberState::Loading);
 
             timers.advance(1000).await;
-            assert_eq!(fiber.state.get(), FiberState::Active);
+            assert_eq!(fiber.state(), FiberState::Active);
         }))
         .await;
 }
@@ -101,11 +102,11 @@ async fn fiber_inertia_lock_2() {
     local
         .run_until(super::with_timers(|timers| async move {
             let root = Context::new();
-            let dispose = root.provide_str("foo", Rc::new(1i32)).unwrap();
+            let dispose = root.provide_str("foo", Arc::new(1i32)).unwrap();
             let timers_for_cb = timers.clone();
             let fiber = root.inject(
                 &["foo"],
-                Rc::new(move |_ctx, _config| {
+                Arc::new(move |_ctx, _config| {
                     let timers = timers_for_cb.clone();
                     Effect::Async(Box::pin(async move {
                         timers.sleep(1000).await;
@@ -120,15 +121,15 @@ async fn fiber_inertia_lock_2() {
             tokio::task::yield_now().await;
             tokio::task::yield_now().await;
             timers.advance(400).await;
-            assert_eq!(fiber.state.get(), FiberState::Loading);
+            assert_eq!(fiber.state(), FiberState::Loading);
 
             dispose.dispose().await.unwrap();
             timers.advance(400).await;
-            assert_eq!(fiber.state.get(), FiberState::Loading);
+            assert_eq!(fiber.state(), FiberState::Loading);
 
-            drop(root.provide_str("foo", Rc::new(2i32)).unwrap());
+            drop(root.provide_str("foo", Arc::new(2i32)).unwrap());
             timers.advance(400).await;
-            assert_eq!(fiber.state.get(), FiberState::Active);
+            assert_eq!(fiber.state(), FiberState::Active);
         }))
         .await;
 }
@@ -144,8 +145,8 @@ async fn fiber_inertia_lock_3() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx, _config| {
-                        drop(ctx.provide::<Foo>(Rc::new(Foo)).unwrap());
+                    apply: Arc::new(|ctx, _config| {
+                        drop(ctx.provide::<Foo>(Arc::new(Foo)).unwrap());
                         Effect::None
                     }),
                 },
@@ -156,7 +157,7 @@ async fn fiber_inertia_lock_3() {
             let timers_for_cb = timers.clone();
             let fiber = root.inject(
                 &["foo"],
-                Rc::new(move |_ctx, _config| {
+                Arc::new(move |_ctx, _config| {
                     let timers = timers_for_cb.clone();
                     Effect::Async(Box::pin(async move {
                         timers.sleep(1000).await;
@@ -171,15 +172,15 @@ async fn fiber_inertia_lock_3() {
             tokio::task::yield_now().await;
             tokio::task::yield_now().await;
             timers.advance(400).await;
-            assert_eq!(fiber.state.get(), FiberState::Loading);
+            assert_eq!(fiber.state(), FiberState::Loading);
 
             timers.advance(1000).await;
-            assert_eq!(fiber.state.get(), FiberState::Active);
+            assert_eq!(fiber.state(), FiberState::Active);
 
             provider.dispose().await;
             tokio::task::yield_now().await;
             timers.advance(2000).await;
-            assert_eq!(fiber.state.get(), FiberState::Pending);
+            assert_eq!(fiber.state(), FiberState::Pending);
         }))
         .await;
 }
@@ -190,16 +191,19 @@ async fn fiber_plugin_error() {
     local
         .run_until(async {
             let root = Context::new();
-            let callback_hit = Rc::new(Cell::new(0u32));
+            let callback_hit = Arc::new(AtomicU32::new(0));
             let apply = {
                 let callback_hit = callback_hit.clone();
-                Rc::new(move |ctx: &Context, config: &Rc<dyn Any>| {
+                Arc::new(move |ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                     let callback_hit = callback_hit.clone();
                     drop(
                         ctx.on(
                             "custom",
                             event_listener(move |_| {
-                                callback_hit.set(callback_hit.get() + 1);
+                                callback_hit.store(
+                                    callback_hit.load(Ordering::SeqCst) + 1,
+                                    Ordering::SeqCst,
+                                );
                             }),
                             EventOptions::default(),
                         )
@@ -221,7 +225,7 @@ async fn fiber_plugin_error() {
                     inject: Vec::new(),
                     apply: apply.clone(),
                 },
-                Some(Rc::new(PluginConfig { foo: false })),
+                Some(Arc::new(PluginConfig { foo: false })),
             );
             let fiber2 = root.plugin(
                 &Plugin {
@@ -230,14 +234,14 @@ async fn fiber_plugin_error() {
                     inject: Vec::new(),
                     apply: apply.clone(),
                 },
-                Some(Rc::new(PluginConfig { foo: true })),
+                Some(Arc::new(PluginConfig { foo: true })),
             );
 
             tokio::task::yield_now().await;
             assert!(fiber1.wait().await.is_err());
-            assert_eq!(fiber1.state.get(), FiberState::Failed);
+            assert_eq!(fiber1.state(), FiberState::Failed);
             fiber2.wait().await.unwrap();
-            assert_eq!(fiber2.state.get(), FiberState::Active);
+            assert_eq!(fiber2.state(), FiberState::Active);
             let logger = root.get::<LoggerService>().unwrap();
             assert_eq!(
                 logger.error_count(),
@@ -246,7 +250,7 @@ async fn fiber_plugin_error() {
             );
 
             root.emit("custom", &[]);
-            assert_eq!(callback_hit.get(), 1);
+            assert_eq!(callback_hit.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -257,18 +261,21 @@ async fn fiber_dispose_error() {
     local
         .run_until(async {
             let root = Context::new();
-            let dispose_called = Rc::new(Cell::new(0u32));
+            let dispose_called = Arc::new(AtomicU32::new(0));
             let apply = {
                 let dispose_called = dispose_called.clone();
-                Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
-                    let dispose_called = dispose_called.clone();
-                    Effect::Disposer(async_disposer(move || async move {
-                        dispose_called.set(dispose_called.get() + 1);
-                        Err::<(), Box<dyn std::error::Error>>(Box::new(std::io::Error::other(
-                            "test",
-                        )))
-                    }))
-                })
+                Arc::new(
+                    move |_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                        let dispose_called = dispose_called.clone();
+                        Effect::Disposer(async_disposer(move || async move {
+                            dispose_called
+                                .store(dispose_called.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                            Err::<(), Box<dyn std::error::Error + Send + Sync>>(Box::new(
+                                std::io::Error::other("test"),
+                            ))
+                        }))
+                    },
+                )
             };
             let fiber = root.plugin(
                 &Plugin {
@@ -280,11 +287,11 @@ async fn fiber_dispose_error() {
                 None,
             );
             fiber.wait().await.unwrap();
-            assert_eq!(dispose_called.get(), 0);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 0);
 
             fiber.dispose().await;
             tokio::task::yield_now().await;
-            assert_eq!(dispose_called.get(), 1);
+            assert_eq!(dispose_called.load(Ordering::SeqCst), 1);
             assert_eq!(root.get::<LoggerService>().unwrap().error_count(), 1);
         })
         .await;
@@ -296,12 +303,12 @@ async fn fiber_update_config_on_wrapped_fiber() {
     local
         .run_until(async {
             let root = Context::new();
-            let calls = Rc::new(RefCell::new(Vec::new()));
+            let calls = Arc::new(Mutex::new(Vec::new()));
             let apply = {
                 let calls = calls.clone();
-                Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
+                Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                     let msg = config.downcast_ref::<Msg>().expect("config").msg;
-                    calls.borrow_mut().push(msg);
+                    calls.lock().unwrap().push(msg);
                     Effect::None
                 })
             };
@@ -312,25 +319,25 @@ async fn fiber_update_config_on_wrapped_fiber() {
                     inject: Vec::new(),
                     apply: apply.clone(),
                 },
-                Some(Rc::new(Msg { msg: "hello" })),
+                Some(Arc::new(Msg { msg: "hello" })),
             );
             fiber.wait().await.unwrap();
-            assert_eq!(calls.borrow().len(), 1);
-            assert_eq!(calls.borrow()[0], "hello");
+            assert_eq!(calls.lock().unwrap().len(), 1);
+            assert_eq!(calls.lock().unwrap()[0], "hello");
 
             fiber
-                .update(Some(Rc::new(Msg { msg: "world" })))
+                .update(Some(Arc::new(Msg { msg: "world" })))
                 .await
                 .unwrap();
-            assert_eq!(calls.borrow().len(), 2);
-            assert_eq!(calls.borrow()[1], "world");
+            assert_eq!(calls.lock().unwrap().len(), 2);
+            assert_eq!(calls.lock().unwrap()[1], "world");
 
             fiber
-                .update(Some(Rc::new(Msg { msg: "!!!" })))
+                .update(Some(Arc::new(Msg { msg: "!!!" })))
                 .await
                 .unwrap();
-            assert_eq!(calls.borrow().len(), 3);
-            assert_eq!(calls.borrow()[2], "!!!");
+            assert_eq!(calls.lock().unwrap().len(), 3);
+            assert_eq!(calls.lock().unwrap()[2], "!!!");
         })
         .await;
 }
@@ -341,13 +348,15 @@ async fn fiber_restart_wrapped_fiber() {
     local
         .run_until(async {
             let root = Context::new();
-            let calls = Rc::new(Cell::new(0u32));
+            let calls = Arc::new(AtomicU32::new(0));
             let apply = {
                 let calls = calls.clone();
-                Rc::new(move |_ctx: &Context, _config: &Rc<dyn Any>| {
-                    calls.set(calls.get() + 1);
-                    Effect::None
-                })
+                Arc::new(
+                    move |_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                        calls.store(calls.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        Effect::None
+                    },
+                )
             };
             let fiber = root.plugin(
                 &Plugin {
@@ -359,11 +368,11 @@ async fn fiber_restart_wrapped_fiber() {
                 None,
             );
             fiber.wait().await.unwrap();
-            assert_eq!(calls.get(), 1);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
 
             fiber.restart().await.unwrap();
-            assert_eq!(calls.get(), 2);
-            assert_eq!(fiber.state.get(), FiberState::Active);
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(fiber.state(), FiberState::Active);
         })
         .await;
 }
@@ -415,7 +424,7 @@ async fn wait_survives_panicking_apply_callback() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|_ctx: &Context, _config| panic!("boom")),
+                    apply: Arc::new(|_ctx: &Context, _config| panic!("boom")),
                 },
                 None,
             );
@@ -445,7 +454,7 @@ async fn wait_survives_panicking_async_apply() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|_ctx: &Context, _config| {
+                    apply: Arc::new(|_ctx: &Context, _config| {
                         Effect::Async(Box::pin(async {
                             panic!("boom");
                         }))
@@ -473,15 +482,15 @@ async fn fiber_update_config_while_injected_service_reloads() {
     local
         .run_until(async {
             let root = Context::new();
-            let applied = Rc::new(RefCell::new(Vec::new()));
+            let applied = Arc::new(Mutex::new(Vec::new()));
 
-            let provider_apply = Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
+            let provider_apply = Arc::new(|ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                 let value = config
                     .downcast_ref::<ProviderConfig>()
                     .expect("config")
                     .value;
                 drop(
-                    ctx.provide::<Provider>(Rc::new(Provider { value }))
+                    ctx.provide::<Provider>(Arc::new(Provider { value }))
                         .unwrap(),
                 );
                 Effect::None
@@ -493,19 +502,19 @@ async fn fiber_update_config_while_injected_service_reloads() {
                     inject: Vec::new(),
                     apply: provider_apply,
                 },
-                Some(Rc::new(ProviderConfig { value: 1 })),
+                Some(Arc::new(ProviderConfig { value: 1 })),
             );
             provider.wait().await.unwrap();
 
             let consumer_apply = {
                 let applied = applied.clone();
-                Rc::new(move |ctx: &Context, config: &Rc<dyn Any>| {
+                Arc::new(move |ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                     let mode = config
                         .downcast_ref::<ConsumerConfig>()
                         .expect("config")
                         .mode;
                     let value = ctx.get::<Provider>().expect("provider").value;
-                    applied.borrow_mut().push((value, mode));
+                    applied.lock().unwrap().push((value, mode));
                     Effect::None
                 })
             };
@@ -516,19 +525,22 @@ async fn fiber_update_config_while_injected_service_reloads() {
                     inject: vec![("provider".to_string(), None)],
                     apply: consumer_apply,
                 },
-                Some(Rc::new(ConsumerConfig { mode: "old" })),
+                Some(Arc::new(ConsumerConfig { mode: "old" })),
             );
             consumer.wait().await.unwrap();
-            assert_eq!(applied.borrow().as_slice(), &[(1, "old")]);
+            assert_eq!(applied.lock().unwrap().as_slice(), &[(1, "old")]);
 
-            let provider_update = provider.update(Some(Rc::new(ProviderConfig { value: 2 })));
-            let consumer_update = consumer.update(Some(Rc::new(ConsumerConfig { mode: "new" })));
+            let provider_update = provider.update(Some(Arc::new(ProviderConfig { value: 2 })));
+            let consumer_update = consumer.update(Some(Arc::new(ConsumerConfig { mode: "new" })));
             let (provider_result, consumer_result) = tokio::join!(provider_update, consumer_update);
             provider_result.unwrap();
             consumer_result.unwrap();
 
-            assert_eq!(applied.borrow().as_slice(), &[(1, "old"), (2, "new")]);
-            assert_eq!(consumer.state.get(), FiberState::Active);
+            assert_eq!(
+                applied.lock().unwrap().as_slice(),
+                &[(1, "old"), (2, "new")]
+            );
+            assert_eq!(consumer.state(), FiberState::Active);
         })
         .await;
 }

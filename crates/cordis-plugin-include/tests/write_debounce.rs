@@ -1,9 +1,9 @@
 //! Include write debounce and the `loader/config-update` event.
 
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{Context, Effect, EventOptions, event_callback};
 use cordis_loader::{EntryOptions, Loader};
@@ -24,11 +24,13 @@ fn include_opts(config: IncludeConfig) -> EntryOptions {
 }
 
 fn setup_loader(loader: &Loader) {
-    loader
-        .builtins
-        .borrow_mut()
-        .insert("@cordisjs/plugin-include".to_string(), include_plugin());
-    loader.mock("greeter", Rc::new(|_ctx: &Context, _config| Effect::None));
+    {
+        let _guard = loader.tree.write_lock.lock().unwrap();
+        let mut builtins = (*loader.builtins.load_full()).clone();
+        builtins.insert("@cordisjs/plugin-include".to_string(), include_plugin());
+        loader.builtins.store(Arc::new(builtins));
+    }
+    loader.mock("greeter", Arc::new(|_ctx: &Context, _config| Effect::None));
 }
 
 fn fixture_yaml(dir: &std::path::Path, value: i64) -> String {
@@ -74,14 +76,14 @@ async fn same_turn_writes_coalesce_but_events_fire() {
                 .join(format!("cordis-include-debounce-a-{}", std::process::id()));
             let path = fixture_yaml(&dir, 1);
             let root = Context::new();
-            let updates = Rc::new(Cell::new(0u32));
+            let updates = Arc::new(AtomicU32::new(0));
             drop(
                 root.on(
                     "loader/config-update",
                     event_callback({
                         let updates = updates.clone();
                         move |_args| {
-                            updates.set(updates.get() + 1);
+                            updates.store(updates.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                             Ok(None)
                         }
                     }),
@@ -103,15 +105,15 @@ async fn same_turn_writes_coalesce_but_events_fire() {
                 0,
             );
             tree.await_tree().await;
-            updates.set(0);
+            updates.store(0, Ordering::SeqCst);
 
             // Change the entry config, then write twice in the same turn.
             let greeter = tree
                 .entries()
                 .into_iter()
-                .find(|entry| entry.options.borrow().name == "greeter")
+                .find(|entry| entry.options.lock().unwrap().name == "greeter")
                 .expect("greeter entry");
-            greeter.options.borrow_mut().config = Some(config_value(3));
+            greeter.options.lock().unwrap().config = Some(config_value(3));
             tree.write();
             tree.write();
 
@@ -121,7 +123,7 @@ async fn same_turn_writes_coalesce_but_events_fire() {
                 "write must be debounced (not yet flushed)"
             );
             assert_eq!(
-                updates.get(),
+                updates.load(Ordering::SeqCst),
                 2,
                 "loader/config-update fires on every write() call"
             );
@@ -171,9 +173,9 @@ async fn cross_turn_writes_flush_separately() {
             let greeter = tree
                 .entries()
                 .into_iter()
-                .find(|entry| entry.options.borrow().name == "greeter")
+                .find(|entry| entry.options.lock().unwrap().name == "greeter")
                 .expect("greeter entry");
-            greeter.options.borrow_mut().config = Some(config_value(2));
+            greeter.options.lock().unwrap().config = Some(config_value(2));
             tree.write();
             wait_until(|| {
                 fs::read_to_string(dir.join("base.yml"))
@@ -182,7 +184,7 @@ async fn cross_turn_writes_flush_separately() {
             .await;
 
             // A later turn triggers its own write.
-            greeter.options.borrow_mut().config = Some(config_value(4));
+            greeter.options.lock().unwrap().config = Some(config_value(4));
             tree.write();
             wait_until(|| {
                 fs::read_to_string(dir.join("base.yml"))
@@ -227,9 +229,9 @@ async fn readonly_config_is_not_overwritten() {
             let greeter = tree
                 .entries()
                 .into_iter()
-                .find(|entry| entry.options.borrow().name == "greeter")
+                .find(|entry| entry.options.lock().unwrap().name == "greeter")
                 .expect("greeter entry");
-            greeter.options.borrow_mut().config = Some(config_value(9));
+            greeter.options.lock().unwrap().config = Some(config_value(9));
             tree.write();
             tokio::task::yield_now().await;
             tokio::task::yield_now().await;

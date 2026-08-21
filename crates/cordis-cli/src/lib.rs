@@ -1,6 +1,7 @@
 //! cordis-cli startup path.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use cordis_core::Context;
 use cordis_loader::{Loader, SoPlugin, parse_config};
@@ -219,14 +220,19 @@ pub async fn run(options: &CliOptions) -> anyhow::Result<()> {
     .expect("console exporter");
 
     // Builtins (mirrors the TS loader's builtin table).
-    loader.builtins.borrow_mut().insert(
-        "@cordisjs/plugin-include".to_string(),
-        cordis_plugin_include::include_plugin(),
-    );
-    loader.builtins.borrow_mut().insert(
-        "@cordisjs/plugin-hmr".to_string(),
-        cordis_plugin_hmr::hmr_plugin(),
-    );
+    {
+        let _guard = loader.tree.write_lock.lock().unwrap();
+        let mut builtins = (*loader.builtins.load_full()).clone();
+        builtins.insert(
+            "@cordisjs/plugin-include".to_string(),
+            cordis_plugin_include::include_plugin(),
+        );
+        builtins.insert(
+            "@cordisjs/plugin-hmr".to_string(),
+            cordis_plugin_hmr::hmr_plugin(),
+        );
+        loader.builtins.store(Arc::new(builtins));
+    }
 
     // Load `.so` plugins from the plugins directory.
     // Keep the loaded libraries alive for the whole run: their plugin
@@ -242,13 +248,13 @@ pub async fn run(options: &CliOptions) -> anyhow::Result<()> {
         .entries()
         .into_iter()
         .filter_map(|entry| {
-            let fiber = entry.fiber.borrow().clone()?;
-            if fiber.state.get() == cordis_core::FiberState::Failed {
+            let fiber = entry.fiber.lock().unwrap().clone()?;
+            if fiber.state() == cordis_core::FiberState::Failed {
                 Some(format!(
                     "    at {base}#{id} (plugin {name})",
                     base = "cordis",
                     id = entry.id(),
-                    name = entry.options.borrow().name,
+                    name = entry.options.lock().unwrap().name,
                 ))
             } else {
                 None

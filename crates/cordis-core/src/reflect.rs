@@ -4,7 +4,7 @@
 //! which completes `get`/`set`/`has`/`accessor`.
 
 use std::any::Any;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::context::{Context, MixinGet, MixinSet};
 use crate::fiber::EffectHandle;
@@ -27,7 +27,12 @@ impl ReflectService {
     /// `strict` requires the provider fiber to be `ACTIVE`; non-strict reads
     /// return the value of any registered entry, even while the provider is
     /// unloading or failed.
-    pub fn get(&self, ctx: &Context, name: &str, strict: bool) -> Option<Rc<dyn Any>> {
+    pub fn get(
+        &self,
+        ctx: &Context,
+        name: &str,
+        strict: bool,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
         if strict {
             ctx.get_str(name)
         } else {
@@ -39,7 +44,12 @@ impl ReflectService {
     ///
     /// Enforces ownership: only the providing fiber may set the value, and
     /// injectors are notified after the update.
-    pub fn set(&self, ctx: &Context, name: &str, value: Rc<dyn Any>) -> Result<(), String> {
+    pub fn set(
+        &self,
+        ctx: &Context,
+        name: &str,
+        value: Arc<dyn Any + Send + Sync>,
+    ) -> Result<(), String> {
         ctx.set_str(name, value)
     }
 
@@ -58,7 +68,7 @@ impl ReflectService {
         name: &str,
         get: MixinGet,
         set: Option<MixinSet>,
-    ) -> Result<Rc<EffectHandle>, String> {
+    ) -> Result<Arc<EffectHandle>, String> {
         ctx.accessor(name, get, set)
     }
 }

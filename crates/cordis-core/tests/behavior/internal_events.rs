@@ -6,8 +6,9 @@
 //! `fiber.ts` `_updateState`).
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use cordis_core::{
     AnyNext, Context, Effect, EventCallback, EventOptions, FiberState, Plugin, event_callback,
@@ -15,12 +16,14 @@ use cordis_core::{
 };
 
 /// Records `(mode, name, arg_count)` for `internal/dispatch` payloads.
-fn dispatch_recorder(records: Rc<RefCell<Vec<(String, String, usize)>>>) -> EventCallback {
-    event_callback(move |args: &[Rc<dyn Any>]| {
+fn dispatch_recorder(records: Arc<Mutex<Vec<(String, String, usize)>>>) -> EventCallback {
+    event_callback(move |args: &[Arc<dyn Any + Send + Sync>]| {
         let mode = args[0].downcast_ref::<String>().unwrap().clone();
         let name = args[1].downcast_ref::<String>().unwrap().clone();
-        let payload = args[2].downcast_ref::<Vec<Rc<dyn Any>>>().unwrap();
-        records.borrow_mut().push((mode, name, payload.len()));
+        let payload = args[2]
+            .downcast_ref::<Vec<Arc<dyn Any + Send + Sync>>>()
+            .unwrap();
+        records.lock().unwrap().push((mode, name, payload.len()));
         Ok(None)
     })
 }
@@ -30,7 +33,7 @@ fn dispatch_recorder(records: Rc<RefCell<Vec<(String, String, usize)>>>) -> Even
 #[test]
 fn internal_dispatch_hook_fires_for_external_events_only() {
     let root = Context::new();
-    let records = Rc::new(RefCell::new(Vec::new()));
+    let records = Arc::new(Mutex::new(Vec::new()));
     drop(
         root.on(
             "internal/dispatch",
@@ -40,12 +43,12 @@ fn internal_dispatch_hook_fires_for_external_events_only() {
         .unwrap(),
     );
 
-    root.emit("demo", &[Rc::new(1u32), Rc::new("x".to_string())]);
-    let _ = root.bail("demo2", &[Rc::new(2u32)], None);
+    root.emit("demo", &[Arc::new(1u32), Arc::new("x".to_string())]);
+    let _ = root.bail("demo2", &[Arc::new(2u32)], None);
     // Internal events must not re-enter the dispatch hook.
-    root.emit("internal/update", &[Rc::new(())]);
+    root.emit("internal/update", &[Arc::new(())]);
 
-    let records = records.borrow();
+    let records = records.lock().unwrap();
     assert_eq!(
         records.as_slice(),
         &[
@@ -68,11 +71,11 @@ fn internal_get_hook_overrides_dynamic_access() {
         let next = args[3].downcast_ref::<AnyNext>().unwrap().0.clone();
         match name.as_str() {
             "loader" => {
-                let value: Rc<dyn Any> = Rc::new("mock loader".to_string());
+                let value: Arc<dyn Any + Send + Sync> = Arc::new("mock loader".to_string());
                 Ok(Some(value))
             }
             "foo" => {
-                let value: Rc<dyn Any> = Rc::new("overridden".to_string());
+                let value: Arc<dyn Any + Send + Sync> = Arc::new("overridden".to_string());
                 Ok(Some(value))
             }
             _ => next().await,
@@ -92,7 +95,7 @@ fn internal_get_hook_overrides_dynamic_access() {
     );
 
     // Hook overrides a real service value.
-    drop(root.provide_str("foo", Rc::new(1u32)).unwrap());
+    drop(root.provide_str("foo", Arc::new(1u32)).unwrap());
     let foo = root.get_str("foo").expect("foo is provided");
     assert_eq!(
         foo.downcast_ref::<String>().unwrap(),
@@ -113,9 +116,9 @@ fn internal_get_hook_overrides_dynamic_access() {
 #[test]
 fn internal_set_hook_intercepts_write() {
     let root = Context::new();
-    drop(root.provide_str("foo", Rc::new(1u32)).unwrap());
+    drop(root.provide_str("foo", Arc::new(1u32)).unwrap());
 
-    let intercept = Rc::new(Cell::new(false));
+    let intercept = Arc::new(AtomicBool::new(false));
     let hook_intercept = intercept.clone();
     let set_hook: EventCallback = event_listener_async(move |args| {
         let intercept = hook_intercept.clone();
@@ -123,12 +126,12 @@ fn internal_set_hook_intercepts_write() {
             let name = args[1].downcast_ref::<String>().unwrap().clone();
             let next = args[4].downcast_ref::<AnyNext>().unwrap().0.clone();
             match name.as_str() {
-                "foo" if intercept.get() => {
-                    let value: Rc<dyn Any> = Rc::new(true);
+                "foo" if intercept.load(Ordering::SeqCst) => {
+                    let value: Arc<dyn Any + Send + Sync> = Arc::new(true);
                     Ok(Some(value))
                 }
                 "bar" => {
-                    let value: Rc<dyn Any> = Rc::new(false);
+                    let value: Arc<dyn Any + Send + Sync> = Arc::new(false);
                     Ok(Some(value))
                 }
                 _ => next().await,
@@ -141,8 +144,8 @@ fn internal_set_hook_intercepts_write() {
     );
 
     // Hook accepts the write without calling next(): the store is untouched.
-    intercept.set(true);
-    root.set_str("foo", Rc::new(2u32))
+    intercept.store(true, Ordering::SeqCst);
+    root.set_str("foo", Arc::new(2u32))
         .expect("intercepted write");
     let foo = root.get_str("foo").unwrap();
     assert_eq!(
@@ -152,15 +155,15 @@ fn internal_set_hook_intercepts_write() {
     );
 
     // Falling through with next() updates the store.
-    intercept.set(false);
-    root.set_str("foo", Rc::new(2u32))
+    intercept.store(false, Ordering::SeqCst);
+    root.set_str("foo", Arc::new(2u32))
         .expect("fallthrough write");
     let foo = root.get_str("foo").unwrap();
     assert_eq!(foo.downcast_ref::<u32>().copied(), Some(2));
 
     // A hook rejecting the write makes set_str fail.
     assert!(
-        root.set_str("bar", Rc::new(3u32)).is_err(),
+        root.set_str("bar", Arc::new(3u32)).is_err(),
         "rejected write must fail"
     );
 }
@@ -174,10 +177,10 @@ async fn internal_service_broadcasts_to_same_realm() {
     local
         .run_until(async {
             let root = Context::new();
-            let ctx = root.isolate("foo", Rc::from("shared-label"));
+            let ctx = root.isolate("foo", Arc::from("shared-label"));
 
-            let root_seen = Rc::new(RefCell::new(Vec::new()));
-            let ctx_seen = Rc::new(RefCell::new(Vec::new()));
+            let root_seen = Arc::new(Mutex::new(Vec::new()));
+            let ctx_seen = Arc::new(Mutex::new(Vec::new()));
             drop(
                 root.on(
                     "internal/service",
@@ -197,22 +200,28 @@ async fn internal_service_broadcasts_to_same_realm() {
 
             // Provided on the root realm: only the root listener sees it.
             let root_provide = root
-                .provide_str("foo", Rc::new("root foo".to_string()))
+                .provide_str("foo", Arc::new("root foo".to_string()))
                 .unwrap();
-            assert_eq!(root_seen.borrow().as_slice(), &["root foo".to_string()]);
+            assert_eq!(
+                root_seen.lock().unwrap().as_slice(),
+                &["root foo".to_string()]
+            );
             assert!(
-                ctx_seen.borrow().is_empty(),
+                ctx_seen.lock().unwrap().is_empty(),
                 "different realm must not see it"
             );
 
             // Provided on the isolated realm: only the same-realm listener
             // sees it.
             let ctx_provide = ctx
-                .provide_str("foo", Rc::new("isolated foo".to_string()))
+                .provide_str("foo", Arc::new("isolated foo".to_string()))
                 .unwrap();
-            assert_eq!(ctx_seen.borrow().as_slice(), &["isolated foo".to_string()]);
             assert_eq!(
-                root_seen.borrow().as_slice(),
+                ctx_seen.lock().unwrap().as_slice(),
+                &["isolated foo".to_string()]
+            );
+            assert_eq!(
+                root_seen.lock().unwrap().as_slice(),
                 &["root foo".to_string()],
                 "root listener must not receive the isolated provide"
             );
@@ -223,13 +232,13 @@ async fn internal_service_broadcasts_to_same_realm() {
         .await;
 }
 
-fn service_recorder(records: Rc<RefCell<Vec<String>>>) -> EventCallback {
-    event_callback(move |args: &[Rc<dyn Any>]| {
+fn service_recorder(records: Arc<Mutex<Vec<String>>>) -> EventCallback {
+    event_callback(move |args: &[Arc<dyn Any + Send + Sync>]| {
         let name = args[0].downcast_ref::<String>().unwrap();
         if name == "foo"
             && let Some(value) = args[1].downcast_ref::<String>()
         {
-            records.borrow_mut().push(value.clone());
+            records.lock().unwrap().push(value.clone());
         }
         Ok(None)
     })
@@ -243,18 +252,20 @@ async fn internal_status_broadcasts_transitions() {
     local
         .run_until(async {
             let root = Context::new();
-            let records = Rc::new(RefCell::new(Vec::new()));
+            let records = Arc::new(Mutex::new(Vec::new()));
             let records_for_hook = records.clone();
-            let status_hook: EventCallback = event_callback(move |args: &[Rc<dyn Any>]| {
-                // `Rc<dyn Any>` erases the inner type, so the fiber arrives
-                // as `&Fiber` (mirrors the loader's internal/plugin hooks).
-                let fiber = args[0].downcast_ref::<cordis_core::Fiber>().unwrap();
-                let old = args[1].downcast_ref::<FiberState>().copied().unwrap();
-                records_for_hook
-                    .borrow_mut()
-                    .push((fiber as *const cordis_core::Fiber as usize, old));
-                Ok(None)
-            });
+            let status_hook: EventCallback =
+                event_callback(move |args: &[Arc<dyn Any + Send + Sync>]| {
+                    // `Arc<dyn Any + Send + Sync>` erases the inner type, so the fiber arrives
+                    // as `&Fiber` (mirrors the loader's internal/plugin hooks).
+                    let fiber = args[0].downcast_ref::<cordis_core::Fiber>().unwrap();
+                    let old = args[1].downcast_ref::<FiberState>().copied().unwrap();
+                    records_for_hook
+                        .lock()
+                        .unwrap()
+                        .push((fiber as *const cordis_core::Fiber as usize, old));
+                    Ok(None)
+                });
             drop(
                 root.on("internal/status", status_hook, EventOptions::default())
                     .unwrap(),
@@ -264,37 +275,39 @@ async fn internal_status_broadcasts_transitions() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|_ctx: &Context, _config: &Rc<dyn Any>| Effect::None),
+                    apply: Arc::new(|_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                        Effect::None
+                    }),
                 },
                 None,
             );
             fiber.wait().await.unwrap();
 
-            let seen = records.borrow().clone();
+            let seen = records.lock().unwrap().clone();
             assert!(
                 seen.iter().any(|(ptr, old)| {
-                    *ptr == Rc::as_ptr(&fiber) as usize && *old == FiberState::Pending
+                    *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Pending
                 }),
                 "must broadcast Pending → Loading with the fiber: {seen:?}"
             );
             assert!(
                 seen.iter().any(|(ptr, old)| {
-                    *ptr == Rc::as_ptr(&fiber) as usize && *old == FiberState::Loading
+                    *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Loading
                 }),
                 "must broadcast Loading → Active: {seen:?}"
             );
 
             let _ = tokio::task::spawn_local(fiber.dispose()).await;
-            let seen = records.borrow().clone();
+            let seen = records.lock().unwrap().clone();
             assert!(
                 seen.iter().any(|(ptr, old)| {
-                    *ptr == Rc::as_ptr(&fiber) as usize && *old == FiberState::Active
+                    *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Active
                 }),
                 "must broadcast Active → Unloading on dispose: {seen:?}"
             );
             assert!(
                 seen.iter().any(|(ptr, old)| {
-                    *ptr == Rc::as_ptr(&fiber) as usize && *old == FiberState::Unloading
+                    *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Unloading
                 }),
                 "must broadcast Unloading → Disposed: {seen:?}"
             );

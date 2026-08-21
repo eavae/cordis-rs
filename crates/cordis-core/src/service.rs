@@ -4,24 +4,27 @@ use std::any::Any;
 use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
 use crate::fiber::EffectHandle;
 
 /// A boxed future returned by async APIs.
-pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// A boxed error that can travel between threads.
+pub type BoxError = Box<dyn Error + Send + Sync>;
 
 /// A disposer returned by side-effect registration APIs.
 ///
 /// Calling it removes the registered side effect. Idempotence, ordering and
 /// async cleanup are handled by the effect executor ([`Fiber::effect`](crate::Fiber::effect)).
-pub type Disposer = Box<dyn FnOnce() -> BoxFuture<'static, Result<(), Box<dyn Error>>>>;
+pub type Disposer = Box<dyn FnOnce() -> BoxFuture<'static, Result<(), BoxError>> + Send>;
 
 /// Wraps a plain synchronous closure into a [`Disposer`].
 pub fn sync_disposer<F>(f: F) -> Disposer
 where
-    F: FnOnce() + 'static,
+    F: FnOnce() + Send + 'static,
 {
     Box::new(move || {
         Box::pin(async move {
@@ -34,8 +37,8 @@ where
 /// Wraps an asynchronous closure into a [`Disposer`].
 pub fn async_disposer<F, Fut>(f: F) -> Disposer
 where
-    F: FnOnce() -> Fut + 'static,
-    Fut: Future<Output = Result<(), Box<dyn Error>>> + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
 {
     Box::new(move || Box::pin(f()))
 }
@@ -51,16 +54,16 @@ pub enum Effect {
     /// A synchronous disposer.
     Disposer(Disposer),
     /// A nested effect (yielded or returned as a whole).
-    Nested(Rc<EffectHandle>),
+    Nested(Arc<EffectHandle>),
     /// A promise resolving to a disposer (or failing).
-    Async(BoxFuture<'static, Result<Disposer, Box<dyn Error>>>),
+    Async(BoxFuture<'static, Result<Disposer, BoxError>>),
     /// A collection of effect items (iterable); an `Err` item aborts the
     /// collection and propagates the error (mirrors a generator that throws).
-    Iterable(Vec<Result<EffectItem, Box<dyn Error>>>),
+    Iterable(Vec<Result<EffectItem, BoxError>>),
     /// An asynchronous stream of disposers (async iterable).
-    AsyncIterable(Pin<Box<dyn AsyncDisposerStream>>),
+    AsyncIterable(Pin<Box<dyn AsyncDisposerStream + Send>>),
     /// The callback threw an error (mirrors a throwing apply/effect).
-    Error(Box<dyn Error>),
+    Error(BoxError),
 }
 
 /// One item yielded by an iterable effect.
@@ -68,7 +71,7 @@ pub enum EffectItem {
     /// A plain disposer.
     Disposer(Disposer),
     /// A nested effect handle.
-    Nested(Rc<EffectHandle>),
+    Nested(Arc<EffectHandle>),
 }
 
 /// An asynchronous iterator over disposers.
@@ -77,11 +80,12 @@ pub trait AsyncDisposerStream {
     fn poll_next(
         self: Pin<&mut Self>,
         cx: &mut TaskContext<'_>,
-    ) -> Poll<Option<Result<Disposer, Box<dyn Error>>>>;
+    ) -> Poll<Option<Result<Disposer, BoxError>>>;
 }
 
 /// The apply callback of a plugin (or inject callback).
-pub type ApplyFn = Rc<dyn Fn(&crate::Context, &Rc<dyn Any>) -> Effect>;
+pub type ApplyFn =
+    Arc<dyn Fn(&crate::Context, &Arc<dyn Any + Send + Sync>) -> Effect + Send + Sync>;
 
 /// A Cordis service.
 ///
@@ -91,7 +95,7 @@ pub type ApplyFn = Rc<dyn Fn(&crate::Context, &Rc<dyn Any>) -> Effect>;
 ///
 /// The full service contract (config, check, resolve_config) extends this;
 /// the minimal form only carries the stable service name.
-pub trait Service: Any {
+pub trait Service: Any + Send + Sync {
     /// Stable service name used for dynamic access (`ctx.get_str(name)`).
     const NAME: &'static str;
 
@@ -115,8 +119,8 @@ pub trait Service: Any {
     fn invoke(
         &self,
         _ctx: &crate::ShadowContext,
-        _init: Option<&Rc<dyn Any>>,
-    ) -> Option<Rc<dyn Any>> {
+        _init: Option<&Arc<dyn Any + Send + Sync>>,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
         None
     }
 }

@@ -5,9 +5,9 @@
 //! forms, registry queries).
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::context::{Context, ContextInner, InterceptLayer};
 use crate::error::ConfigValidator;
@@ -40,7 +40,7 @@ pub struct Plugin {
     /// Optional plugin name used for fiber naming.
     pub name: Option<String>,
     /// Declared inject dependencies: name → optional per-inject config.
-    pub inject: Vec<(String, Option<Rc<dyn Any>>)>,
+    pub inject: Vec<(String, Option<Arc<dyn Any + Send + Sync>>)>,
     /// The apply callback.
     pub apply: ApplyFn,
     /// Whether this plugin is a group container (mirrors the `EntryGroup.key`
@@ -59,22 +59,22 @@ impl Plugin {
 pub struct Runtime {
     pub(crate) name: Option<String>,
     pub(crate) callback: ApplyFn,
-    pub(crate) fibers: RefCell<Vec<Rc<Fiber>>>,
-    pub(crate) registry: RefCell<Option<Weak<RegistryService>>>,
+    pub(crate) fibers: Mutex<Vec<Arc<Fiber>>>,
+    pub(crate) registry: Mutex<Option<Weak<RegistryService>>>,
 }
 
 impl Runtime {
     /// Number of live fibers of this runtime.
     pub fn fiber_count(&self) -> usize {
-        self.fibers.borrow().len()
+        self.fibers.lock().unwrap().len()
     }
 }
 
 /// Registry service, available on every context as `ctx.registry`.
 #[derive(Default)]
 pub struct RegistryService {
-    counter: Cell<u64>,
-    runtimes: RefCell<HashMap<usize, Rc<Runtime>>>,
+    counter: AtomicU64,
+    runtimes: Mutex<HashMap<usize, Arc<Runtime>>>,
 }
 
 impl Service for RegistryService {
@@ -84,7 +84,7 @@ impl Service for RegistryService {
 impl std::fmt::Debug for RegistryService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistryService")
-            .field("size", &self.runtimes.borrow().len())
+            .field("size", &self.runtimes.lock().unwrap().len())
             .finish()
     }
 }
@@ -92,9 +92,7 @@ impl std::fmt::Debug for RegistryService {
 impl RegistryService {
     /// Allocates the next fiber id.
     pub(crate) fn next_counter(&self) -> u64 {
-        let next = self.counter.get() + 1;
-        self.counter.set(next);
-        next
+        self.counter.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Registers a plugin on `parent` and returns its fiber.
@@ -106,8 +104,8 @@ impl RegistryService {
         &self,
         parent: &Context,
         plugin: &Plugin,
-        config: Option<Rc<dyn Any>>,
-    ) -> Rc<Fiber> {
+        config: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Arc<Fiber> {
         self.plugin_with_validator(parent, plugin, config, None)
     }
 
@@ -116,26 +114,26 @@ impl RegistryService {
         &self,
         parent: &Context,
         plugin: &Plugin,
-        config: Option<Rc<dyn Any>>,
+        config: Option<Arc<dyn Any + Send + Sync>>,
         validator: Option<ConfigValidator>,
-    ) -> Rc<Fiber> {
+    ) -> Arc<Fiber> {
         parent
             .fiber()
             .assert_active()
             .expect("cannot create effect on inactive context");
 
         let callback = plugin.apply.clone();
-        let key = Rc::as_ptr(&callback) as *const () as usize;
+        let key = Arc::as_ptr(&callback) as *const () as usize;
         let registry_rc = parent.get::<Self>().expect("registry service");
-        let mut runtimes = self.runtimes.borrow_mut();
+        let mut runtimes = self.runtimes.lock().unwrap();
         let runtime = runtimes
             .entry(key)
             .or_insert_with(|| {
-                Rc::new(Runtime {
+                Arc::new(Runtime {
                     name: plugin.name.clone(),
                     callback: callback.clone(),
-                    fibers: RefCell::new(Vec::new()),
-                    registry: RefCell::new(Some(Rc::downgrade(&registry_rc))),
+                    fibers: Mutex::new(Vec::new()),
+                    registry: Mutex::new(Some(Arc::downgrade(&registry_rc))),
                 })
             })
             .clone();
@@ -146,29 +144,29 @@ impl RegistryService {
         let validation_error = validator
             .as_ref()
             .and_then(|validate| config.as_ref().and_then(|config| validate(config).err()));
-        let fiber = Rc::new(Fiber {
-            uid: Cell::new(Some(uid)),
+        let fiber = Arc::new(Fiber {
+            uid: AtomicU64::new(uid),
             ctx: child_inner,
             parent: Some(parent.clone()),
-            config: RefCell::new(config),
-            state: Cell::new(FiberState::Pending),
-            inject: RefCell::new(
+            config: Mutex::new(config),
+            state: AtomicU8::new(FiberState::Pending as u8),
+            inject: Mutex::new(
                 plugin
                     .inject
                     .iter()
                     .map(|(name, config)| (name.clone(), config.clone()))
                     .collect(),
             ),
-            runtime: RefCell::new(Some(runtime.clone())),
-            error: RefCell::new(None),
-            epoch: RefCell::new(Epoch::Inactive),
-            resolved: RefCell::new(HashMap::new()),
-            disposables: RefCell::new(Vec::new()),
-            inertia: RefCell::new(crate::fiber::Inertia::default()),
-            inertia_notify: Rc::new(tokio::sync::Notify::new()),
-            dispose: RefCell::new(None),
-            _hooks: RefCell::new(HashMap::new()),
-            validator: RefCell::new(validator),
+            runtime: Mutex::new(Some(runtime.clone())),
+            error: Mutex::new(None),
+            epoch: Mutex::new(Epoch::Inactive),
+            resolved: Mutex::new(HashMap::new()),
+            disposables: Mutex::new(Vec::new()),
+            inertia: Mutex::new(crate::fiber::Inertia::default()),
+            inertia_notify: Arc::new(tokio::sync::Notify::new()),
+            dispose: Mutex::new(None),
+            _hooks: Mutex::new(HashMap::new()),
+            validator: Mutex::new(validator),
         });
 
         // Mirror `parent.fiber.effect(...)` in fiber.ts: the registration
@@ -178,14 +176,18 @@ impl RegistryService {
             .fiber()
             .effect(
                 move || {
-                    runtime.fibers.borrow_mut().push(fiber_for_effect.clone());
+                    runtime
+                        .fibers
+                        .lock()
+                        .unwrap()
+                        .push(fiber_for_effect.clone());
                     let _ = parent_events_emit(parent, &fiber_for_effect);
                     if let Some(error) = validation_error.clone() {
                         fiber_for_effect
                             .log_error(&format!("{error} at <{}>", fiber_for_effect.name()));
-                        *fiber_for_effect.error.borrow_mut() =
+                        *fiber_for_effect.error.lock().unwrap() =
                             Some(Box::new(crate::fiber::FiberError::new(error.to_string())));
-                        *fiber_for_effect.epoch.borrow_mut() = Epoch::Inactive;
+                        *fiber_for_effect.epoch.lock().unwrap() = Epoch::Inactive;
                         fiber_for_effect.update_state(Some(FiberState::Failed));
                         let fiber = fiber_for_effect;
                         return Effect::Disposer(Box::new(move || {
@@ -196,7 +198,7 @@ impl RegistryService {
                             })
                         }));
                     }
-                    for name in fiber_for_effect.inject.borrow().keys() {
+                    for name in fiber_for_effect.inject.lock().unwrap().keys() {
                         fiber_for_effect.check_impl(name);
                     }
                     fiber_for_effect.refresh();
@@ -212,49 +214,50 @@ impl RegistryService {
                 "ctx.plugin()",
             )
             .expect("parent fiber must be active");
-        *fiber.dispose.borrow_mut() = Some(handle);
+        *fiber.dispose.lock().unwrap() = Some(handle);
         let _ = parent_events_emit(parent, &fiber);
         fiber
     }
 
     /// Resolves the runtime key of a plugin callback.
     fn runtime_key(callback: &ApplyFn) -> usize {
-        Rc::as_ptr(callback) as *const () as usize
+        Arc::as_ptr(callback) as *const () as usize
     }
 
     /// Whether a plugin is registered.
     pub fn has(&self, plugin: &Plugin) -> bool {
         self.runtimes
-            .borrow()
+            .lock()
+            .unwrap()
             .contains_key(&Self::runtime_key(&plugin.apply))
     }
 
     /// Number of registered runtimes.
     pub fn size(&self) -> usize {
-        self.runtimes.borrow().len()
+        self.runtimes.lock().unwrap().len()
     }
 
     /// The keys (callback addresses) of registered runtimes.
     pub fn keys(&self) -> Vec<usize> {
-        self.runtimes.borrow().keys().copied().collect()
+        self.runtimes.lock().unwrap().keys().copied().collect()
     }
 
     /// The registered runtimes.
-    pub fn values(&self) -> Vec<Rc<Runtime>> {
-        self.runtimes.borrow().values().cloned().collect()
+    pub fn values(&self) -> Vec<Arc<Runtime>> {
+        self.runtimes.lock().unwrap().values().cloned().collect()
     }
 
     /// Deletes a plugin runtime, disposing all of its fibers (mirrors
     /// `registry.delete`).
     pub fn delete(&self, plugin: &Plugin) {
         let runtime = {
-            let runtimes = self.runtimes.borrow();
+            let runtimes = self.runtimes.lock().unwrap();
             runtimes.get(&Self::runtime_key(&plugin.apply)).cloned()
         };
         let Some(runtime) = runtime else {
             return;
         };
-        let fibers = runtime.fibers.borrow().clone();
+        let fibers = runtime.fibers.lock().unwrap().clone();
         for fiber in fibers {
             tokio::task::spawn_local(fiber.dispose());
         }
@@ -262,13 +265,13 @@ impl RegistryService {
 
     /// Re-checks every fiber that injects `name` and applies the same-label
     /// filter (mirrors `ReflectService.notify`).
-    pub(crate) fn notify(&self, name: &str, provider: &Context) -> Vec<Rc<Fiber>> {
+    pub(crate) fn notify(&self, name: &str, provider: &Context) -> Vec<Arc<Fiber>> {
         let provider_label = provider.inner.isolate_label(name);
-        let runtimes = self.runtimes.borrow();
+        let runtimes = self.runtimes.lock().unwrap();
         let mut affected = Vec::new();
         for runtime in runtimes.values() {
-            for fiber in runtime.fibers.borrow().iter() {
-                if !fiber.inject.borrow().contains_key(name) {
+            for fiber in runtime.fibers.lock().unwrap().iter() {
+                if !fiber.inject.lock().unwrap().contains_key(name) {
                     continue;
                 }
                 if provider_label != fiber.ctx.isolate_label(name) {
@@ -283,13 +286,16 @@ impl RegistryService {
         // `internal/service`: filter-directed broadcast on provide/remove
         // (mirrors `ReflectService.notify`). The payload is the current value
         // (or `()` when the service was just removed).
-        let value: Rc<dyn Any> = provider
+        let value: Arc<dyn Any + Send + Sync> = provider
             .inner
             .store
-            .borrow()
+            .load_full()
             .by_label
             .get(&provider_label.clone().unwrap_or_default())
-            .map_or_else(|| Rc::new(()) as Rc<dyn Any>, |entry| entry.value.clone());
+            .map_or_else(
+                || Arc::new(()) as Arc<dyn Any + Send + Sync>,
+                |entry| entry.value.clone(),
+            );
         if let Some(events) = provider
             .inner
             .get_service_non_strict::<crate::EventsService>("events")
@@ -298,19 +304,23 @@ impl RegistryService {
                 name: name.to_string(),
                 provider_label,
             };
-            let args: Vec<Rc<dyn Any>> = vec![Rc::new(name.to_string()), value];
+            let args: Vec<Arc<dyn Any + Send + Sync>> = vec![Arc::new(name.to_string()), value];
             events.emit_with(provider, "internal/service", &args, Some(&filter));
         }
         affected
     }
 
     /// Notifies fibers whose isolate label for `name` matches `labels`.
-    pub(crate) fn notify_with_labels(&self, name: &str, labels: &[crate::Label]) -> Vec<Rc<Fiber>> {
-        let runtimes = self.runtimes.borrow();
+    pub(crate) fn notify_with_labels(
+        &self,
+        name: &str,
+        labels: &[crate::Label],
+    ) -> Vec<Arc<Fiber>> {
+        let runtimes = self.runtimes.lock().unwrap();
         let mut affected = Vec::new();
         for runtime in runtimes.values() {
-            for fiber in runtime.fibers.borrow().iter() {
-                if !fiber.inject.borrow().contains_key(name) {
+            for fiber in runtime.fibers.lock().unwrap().iter() {
+                if !fiber.inject.lock().unwrap().contains_key(name) {
                     continue;
                 }
                 let label = fiber.ctx.isolate_label(name);
@@ -328,20 +338,16 @@ impl RegistryService {
         affected
     }
 
-    /// Removes a runtime once its last fiber is disposed.
-    pub(crate) fn remove_runtime(&self, fiber: &Rc<Fiber>) {
-        if let Some(runtime) = &*fiber.runtime.borrow() {
-            let key = Rc::as_ptr(&runtime.callback) as *const () as usize;
-
-            self.runtimes.borrow_mut().remove(&key);
-        }
+    /// Removes a runtime by callback key once its last fiber is disposed.
+    pub(crate) fn remove_runtime_by_key(&self, key: usize) {
+        self.runtimes.lock().unwrap().remove(&key);
     }
 }
 
 fn build_child_inner(
     parent: &Context,
-    inject: &[(String, Option<Rc<dyn Any>>)],
-) -> Rc<ContextInner> {
+    inject: &[(String, Option<Arc<dyn Any + Send + Sync>>)],
+) -> Arc<ContextInner> {
     let intercept = if inject.is_empty() {
         parent.inner.intercept.clone()
     } else {
@@ -352,36 +358,44 @@ fn build_child_inner(
                 Some((name.clone(), config))
             })
             .collect();
-        Rc::new(InterceptLayer {
-            entries: RefCell::new(entries),
-            parent: RefCell::new(Some(parent.inner.intercept.clone())),
-        })
+        InterceptLayer::with(entries, Some(parent.inner.intercept.clone()))
     };
-    Rc::new(ContextInner {
+    Arc::new(ContextInner {
         isolate: parent.inner.isolate.clone(),
         intercept,
         store: parent.inner.store.clone(),
-        meta: RefCell::new(parent.inner.meta.borrow().clone()),
+        write_lock: parent.inner.write_lock.clone(),
+        meta: Mutex::new(parent.inner.meta.lock().unwrap().clone()),
         props: parent.inner.props.clone(),
     })
 }
 
-async fn unregister_dispose(fiber: Rc<Fiber>) {
-    if fiber.uid.replace(None).is_none() {
+async fn unregister_dispose(fiber: Arc<Fiber>) {
+    if fiber.uid().is_none() {
         return;
     }
+    fiber.set_uid(None);
     if let Some(parent) = &fiber.parent {
         let _ = parent_events_emit(parent, &fiber);
     }
-    if let Some(runtime) = &*fiber.runtime.borrow() {
-        let mut fibers = runtime.fibers.borrow_mut();
-        if let Some(position) = fibers.iter().position(|f| Rc::ptr_eq(f, &fiber)) {
+    let remove = {
+        let runtime = fiber.runtime.lock().unwrap().clone();
+        let Some(runtime) = runtime else {
+            return;
+        };
+        let mut fibers = runtime.fibers.lock().unwrap();
+        if let Some(position) = fibers.iter().position(|f| Arc::ptr_eq(f, &fiber)) {
             fibers.remove(position);
         }
-        if fibers.is_empty()
-            && let Some(registry) = runtime.registry.borrow().as_ref().and_then(Weak::upgrade)
-        {
-            registry.remove_runtime(&fiber);
+        let registry = runtime.registry.lock().unwrap().clone();
+        let key = Arc::as_ptr(&runtime.callback) as *const () as usize;
+        (fibers.is_empty(), registry, key)
+    };
+    if remove.0 {
+        // All guards are dropped before touching the registry again, so the
+        // runtime removal never re-locks `fiber.runtime` while it is held.
+        if let Some(registry) = remove.1.as_ref().and_then(Weak::upgrade) {
+            registry.remove_runtime_by_key(remove.2);
         }
     }
     fiber.set_epoch(Epoch::Inactive);
@@ -390,9 +404,9 @@ async fn unregister_dispose(fiber: Rc<Fiber>) {
 
 /// Emits the `internal/plugin` event for a fiber (mirrors the TS fiber
 /// constructor/dispose emits).
-fn parent_events_emit(parent: &Context, fiber: &Rc<Fiber>) -> Result<(), ()> {
+fn parent_events_emit(parent: &Context, fiber: &Arc<Fiber>) -> Result<(), ()> {
     if let Some(events) = parent.get::<crate::EventsService>() {
-        let fiber_any: Rc<dyn Any> = fiber.clone();
+        let fiber_any: Arc<dyn Any + Send + Sync> = fiber.clone();
         events.emit(parent, "internal/plugin", &[fiber_any]);
     }
     Ok(())

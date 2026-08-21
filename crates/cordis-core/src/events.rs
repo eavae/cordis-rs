@@ -7,17 +7,19 @@
 //! (as in Cordis) and consume only the first poll of a listener future.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
-use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context as TaskContext, Poll, Waker};
+
+use arc_swap::ArcSwap;
 
 use crate::context::{Context, ContextInner};
 use crate::fiber::{CordisError, EffectHandle, Fiber};
-use crate::service::{BoxFuture, Effect, Service, sync_disposer};
+use crate::service::{BoxError, BoxFuture, Effect, Service, sync_disposer};
 
 /// A single event listener.
 ///
@@ -25,8 +27,12 @@ use crate::service::{BoxFuture, Effect, Service, sync_disposer};
 /// result (used by `serial`/`bail`/`waterfall`) or `Err` to propagate an
 /// error (used by all modes). As in Cordis, listeners may be synchronous or
 /// asynchronous; the dispatch mode decides whether the future is awaited.
-pub type EventCallback = Rc<
-    dyn Fn(&[Rc<dyn Any>]) -> BoxFuture<'static, Result<Option<Rc<dyn Any>>, Box<dyn Error>>>
+pub type EventCallback = Arc<
+    dyn Fn(
+            &[Arc<dyn Any + Send + Sync>],
+        ) -> BoxFuture<'static, Result<Option<Arc<dyn Any + Send + Sync>>, BoxError>>
+        + Send
+        + Sync
         + 'static,
 >;
 
@@ -36,10 +42,10 @@ pub type EventCallback = Rc<
 /// returned future is polled.
 pub fn event_listener<F>(f: F) -> EventCallback
 where
-    F: Fn(&[Rc<dyn Any>]) + 'static,
+    F: Fn(&[Arc<dyn Any + Send + Sync>]) + Send + Sync + 'static,
 {
-    let f = Rc::new(f);
-    Rc::new(move |args: &[Rc<dyn Any>]| {
+    let f = Arc::new(f);
+    Arc::new(move |args: &[Arc<dyn Any + Send + Sync>]| {
         let args = args.to_vec();
         let f = f.clone();
         Box::pin(async move {
@@ -57,10 +63,13 @@ where
 /// consume its result without awaiting.
 pub fn event_callback<F>(f: F) -> EventCallback
 where
-    F: Fn(&[Rc<dyn Any>]) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> + 'static,
+    F: Fn(&[Arc<dyn Any + Send + Sync>]) -> Result<Option<Arc<dyn Any + Send + Sync>>, BoxError>
+        + Send
+        + Sync
+        + 'static,
 {
-    let f = Rc::new(f);
-    Rc::new(move |args: &[Rc<dyn Any>]| {
+    let f = Arc::new(f);
+    Arc::new(move |args: &[Arc<dyn Any + Send + Sync>]| {
         let args = args.to_vec();
         let f = f.clone();
         Box::pin(async move { f(&args) })
@@ -74,11 +83,11 @@ where
 /// `serial`).
 pub fn event_listener_async<F, Fut>(f: F) -> EventCallback
 where
-    F: Fn(Vec<Rc<dyn Any>>) -> Fut + 'static,
-    Fut: Future<Output = Result<Option<Rc<dyn Any>>, Box<dyn Error>>> + 'static,
+    F: Fn(Vec<Arc<dyn Any + Send + Sync>>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Option<Arc<dyn Any + Send + Sync>>, BoxError>> + Send + 'static,
 {
-    let f = Rc::new(f);
-    Rc::new(move |args: &[Rc<dyn Any>]| {
+    let f = Arc::new(f);
+    Arc::new(move |args: &[Arc<dyn Any + Send + Sync>]| {
         let f = f.clone();
         Box::pin(f(args.to_vec()))
     })
@@ -88,10 +97,10 @@ where
 ///
 /// Resolves to the downstream listener's result; the chain is driven by
 /// whoever awaits the returned future.
-pub type WaterfallNext = Rc<dyn Fn() -> BoxFuture<'static, ListenerResult>>;
+pub type WaterfallNext = Arc<dyn Fn() -> BoxFuture<'static, ListenerResult> + Send + Sync>;
 
 /// The result type of a listener invocation.
-type ListenerResult = Result<Option<Rc<dyn Any>>, Box<dyn Error>>;
+type ListenerResult = Result<Option<Arc<dyn Any + Send + Sync>>, BoxError>;
 
 /// Polls a listener future once with a no-op waker.
 ///
@@ -103,12 +112,12 @@ pub(crate) fn poll_once(future: &mut BoxFuture<'static, ListenerResult>) -> Poll
     future.as_mut().poll(&mut cx)
 }
 
-/// Boxes a [`WaterfallNext`] so it can travel inside `Rc<dyn Any>` args.
+/// Boxes a [`WaterfallNext`] so it can travel inside `Arc<dyn Any + Send + Sync>` args.
 #[derive(Clone)]
 pub struct AnyNext(pub WaterfallNext);
 
 /// Event name → listeners table.
-type HookTable = Rc<RefCell<HashMap<String, Vec<Hook>>>>;
+type HookTable = Arc<ArcSwap<HashMap<String, Vec<Hook>>>>;
 
 /// A registered hook.
 #[derive(Clone)]
@@ -130,7 +139,7 @@ pub struct EventOptions {
 }
 
 /// A filter closure attached to a listener registration.
-pub type ListenerFilter = Rc<dyn Fn(&dyn EventFilter) -> bool>;
+pub type ListenerFilter = Arc<dyn Fn(&dyn EventFilter) -> bool + Send + Sync>;
 
 /// A filter attached to a dispatch call (`thisArg` in the TS reference).
 pub trait EventFilter: Any {
@@ -144,7 +153,7 @@ pub trait EventFilter: Any {
 #[derive(Debug)]
 pub struct ParallelError {
     /// All rejected listener errors.
-    pub errors: Vec<Box<dyn Error>>,
+    pub errors: Vec<BoxError>,
 }
 
 impl fmt::Display for ParallelError {
@@ -166,12 +175,15 @@ impl Error for ParallelError {}
 /// Event dispatch service, available on every context as `ctx.events`.
 pub struct EventsService {
     hooks: HookTable,
+    /// Serializes hook-table mutations (registration / removal).
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl Default for EventsService {
     fn default() -> Self {
         Self {
-            hooks: Rc::new(RefCell::new(HashMap::new())),
+            hooks: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            write_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -192,7 +204,7 @@ impl EventsService {
         event: &str,
         callback: EventCallback,
         options: EventOptions,
-    ) -> Result<Rc<EffectHandle>, CordisError> {
+    ) -> Result<Arc<EffectHandle>, CordisError> {
         ctx.fiber().assert_active()?;
         if event == "internal/update" && !options.global {
             return ctx
@@ -208,7 +220,7 @@ impl EventsService {
     /// hooks are stored on fibers).
     pub(crate) fn global_internal_update_hooks(&self) -> Vec<EventCallback> {
         self.hooks
-            .borrow()
+            .load_full()
             .get("internal/update")
             .cloned()
             .unwrap_or_default()
@@ -226,7 +238,7 @@ impl EventsService {
         callback: EventCallback,
         options: EventOptions,
         filter: ListenerFilter,
-    ) -> Result<Rc<EffectHandle>, CordisError> {
+    ) -> Result<Arc<EffectHandle>, CordisError> {
         ctx.fiber().assert_active()?;
         if event == "internal/update" && !options.global {
             return ctx
@@ -246,35 +258,41 @@ impl EventsService {
         options: EventOptions,
         filter: Option<ListenerFilter>,
         effect_label: &str,
-    ) -> Result<Rc<EffectHandle>, CordisError> {
-        let hooks = Rc::clone(&self.hooks);
+    ) -> Result<Arc<EffectHandle>, CordisError> {
+        let hooks = self.hooks.clone();
+        let hooks_write = self.write_lock.clone();
         ctx.fiber().effect(
             move || {
                 let hook = Hook {
-                    ctx: Rc::downgrade(&ctx.inner),
-                    fiber: Rc::downgrade(ctx.fiber()),
+                    ctx: Arc::downgrade(&ctx.inner),
+                    fiber: Arc::downgrade(ctx.fiber()),
                     global: options.global,
                     callback: callback.clone(),
                     filter: filter.clone(),
                 };
-                let mut hooks_borrow = hooks.borrow_mut();
-                let list = hooks_borrow.entry(event.clone()).or_default();
+                let _guard = hooks_write.lock().unwrap();
+                let mut table = (*hooks.load_full()).clone();
+                let list = table.entry(event.clone()).or_default();
                 if options.prepend {
                     list.insert(0, hook);
                 } else {
                     list.push(hook);
                 }
-                drop(hooks_borrow);
-                let hooks = Rc::clone(&hooks);
+                hooks.store(Arc::new(table));
+                drop(_guard);
+                let hooks = hooks.clone();
                 let event = event.clone();
                 Effect::Disposer(sync_disposer(move || {
-                    if let Some(list) = hooks.borrow_mut().get_mut(&event)
+                    let _guard = hooks_write.lock().unwrap();
+                    let mut table = (*hooks.load_full()).clone();
+                    if let Some(list) = table.get_mut(&event)
                         && let Some(position) = list
                             .iter()
-                            .position(|hook| Rc::ptr_eq(&hook.callback, &callback))
+                            .position(|hook| Arc::ptr_eq(&hook.callback, &callback))
                     {
                         list.remove(position);
                     }
+                    hooks.store(Arc::new(table));
                 }))
             },
             effect_label,
@@ -288,12 +306,12 @@ impl EventsService {
         event: &str,
         callback: EventCallback,
         options: EventOptions,
-    ) -> Result<Rc<EffectHandle>, CordisError> {
+    ) -> Result<Arc<EffectHandle>, CordisError> {
         let event = event.to_string();
         let callback = callback.clone();
-        let called = Rc::new(Cell::new(false));
-        let wrapper: EventCallback = Rc::new(move |args: &[Rc<dyn Any>]| {
-            if called.replace(true) {
+        let called = Arc::new(AtomicBool::new(false));
+        let wrapper: EventCallback = Arc::new(move |args: &[Arc<dyn Any + Send + Sync>]| {
+            if called.swap(true, Ordering::AcqRel) {
                 return Box::pin(async { Ok(None) });
             }
             callback(args)
@@ -302,7 +320,7 @@ impl EventsService {
     }
 
     /// Emits synchronously; the first listener error propagates.
-    pub fn emit(&self, ctx: &Context, event: &str, args: &[Rc<dyn Any>]) {
+    pub fn emit(&self, ctx: &Context, event: &str, args: &[Arc<dyn Any + Send + Sync>]) {
         self.emit_with(ctx, event, args, None)
     }
 
@@ -317,7 +335,7 @@ impl EventsService {
         &self,
         ctx: &Context,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
     ) {
         let callbacks = self.resolve("emit", event, args, this_arg, ctx);
@@ -333,7 +351,7 @@ impl EventsService {
         &self,
         ctx: &Context,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Result<(), ParallelError> {
         let callbacks = self.resolve("emit", event, args, this_arg, ctx);
@@ -347,7 +365,7 @@ impl EventsService {
         &self,
         _event: &str,
         callbacks: Vec<EventCallback>,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
     ) -> Result<(), ParallelError> {
         let results =
             futures_util::future::join_all(callbacks.into_iter().map(|callback| callback(args)))
@@ -371,9 +389,9 @@ impl EventsService {
         &self,
         ctx: &Context,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
-    ) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> {
+    ) -> Result<Option<Arc<dyn Any + Send + Sync>>, BoxError> {
         let callbacks = self.resolve("serial", event, args, this_arg, ctx);
         for callback in callbacks {
             if let Some(result) = callback(args).await? {
@@ -389,9 +407,9 @@ impl EventsService {
         &self,
         ctx: &Context,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
-    ) -> Result<Option<Rc<dyn Any>>, Box<dyn Error>> {
+    ) -> Result<Option<Arc<dyn Any + Send + Sync>>, BoxError> {
         let callbacks = self.resolve("bail", event, args, this_arg, ctx);
         for callback in callbacks {
             let mut future = callback(args);
@@ -420,7 +438,7 @@ impl EventsService {
         &self,
         ctx: &Context,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
         tail: WaterfallNext,
     ) -> BoxFuture<'static, ListenerResult> {
@@ -433,17 +451,17 @@ impl EventsService {
         } else {
             Some(callbacks.remove(0))
         };
-        let callbacks = Rc::new(RefCell::new(callbacks));
+        let callbacks = Arc::new(Mutex::new(callbacks));
         let args = args.to_vec();
         let args_for_inner = args.clone();
         Box::pin(async move {
             match first {
                 Some(callback) => {
-                    let inner: WaterfallNext = Rc::new(move || {
+                    let inner: WaterfallNext = Arc::new(move || {
                         run_waterfall_step(callbacks.clone(), args_for_inner.clone(), tail.clone())
                     });
                     let mut next_args = args.clone();
-                    let next_any: Rc<dyn Any> = Rc::new(AnyNext(inner));
+                    let next_any: Arc<dyn Any + Send + Sync> = Arc::new(AnyNext(inner));
                     next_args.push(next_any);
                     callback(&next_args).await
                 }
@@ -453,7 +471,12 @@ impl EventsService {
     }
 
     /// Dispatches to listeners with `emit` semantics.
-    fn emit_callbacks(&self, ctx: &Context, callbacks: Vec<EventCallback>, args: &[Rc<dyn Any>]) {
+    fn emit_callbacks(
+        &self,
+        ctx: &Context,
+        callbacks: Vec<EventCallback>,
+        args: &[Arc<dyn Any + Send + Sync>],
+    ) {
         for callback in callbacks {
             let mut future = callback(args);
             match poll_once(&mut future) {
@@ -479,7 +502,7 @@ impl EventsService {
         &self,
         ctx: &Context,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
     ) -> Vec<EventCallback> {
         self.resolve("emit", event, args, this_arg, ctx)
@@ -493,7 +516,7 @@ impl EventsService {
         ctx: &Context,
         event: &str,
         callbacks: Vec<EventCallback>,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
     ) {
         let event = event.to_string();
         for callback in callbacks {
@@ -526,8 +549,8 @@ impl EventsService {
         ctx: &Context,
         event: &str,
         callbacks: Vec<EventCallback>,
-        args: &[Rc<dyn Any>],
-    ) -> Result<(), Box<dyn Error>> {
+        args: &[Arc<dyn Any + Send + Sync>],
+    ) -> Result<(), BoxError> {
         let event = event.to_string();
         for callback in callbacks {
             let mut future = callback(args);
@@ -552,7 +575,7 @@ impl EventsService {
         &self,
         mode: &'static str,
         event: &str,
-        args: &[Rc<dyn Any>],
+        args: &[Arc<dyn Any + Send + Sync>],
         this_arg: Option<&dyn EventFilter>,
         ctx: &Context,
     ) -> Vec<EventCallback> {
@@ -562,19 +585,24 @@ impl EventsService {
         // mirroring the TS `_resolve` guard.
         let has_dispatch_hooks = self
             .hooks
-            .borrow()
+            .load_full()
             .get("internal/dispatch")
             .is_some_and(|hooks| !hooks.is_empty());
         if !event.starts_with("internal/") && has_dispatch_hooks {
-            let dispatch_args: Vec<Rc<dyn Any>> = vec![
-                Rc::new(mode.to_string()),
-                Rc::new(event.to_string()),
-                Rc::new(args.to_vec()),
+            let dispatch_args: Vec<Arc<dyn Any + Send + Sync>> = vec![
+                Arc::new(mode.to_string()),
+                Arc::new(event.to_string()),
+                Arc::new(args.to_vec()),
             ];
             let callbacks = self.resolve("emit", "internal/dispatch", &dispatch_args, None, ctx);
             self.emit_callbacks(ctx, callbacks, &dispatch_args);
         }
-        let listeners = self.hooks.borrow().get(event).cloned().unwrap_or_default();
+        let listeners = self
+            .hooks
+            .load_full()
+            .get(event)
+            .cloned()
+            .unwrap_or_default();
         listeners
             .into_iter()
             .filter(|hook| {
@@ -605,20 +633,20 @@ impl EventsService {
 }
 
 pub(crate) fn run_waterfall_step(
-    callbacks: Rc<RefCell<Vec<EventCallback>>>,
-    args: Vec<Rc<dyn Any>>,
+    callbacks: Arc<Mutex<Vec<EventCallback>>>,
+    args: Vec<Arc<dyn Any + Send + Sync>>,
     tail: WaterfallNext,
 ) -> BoxFuture<'static, ListenerResult> {
     Box::pin(async move {
-        let next_callback = callbacks.borrow_mut().first().cloned();
+        let next_callback = callbacks.lock().unwrap().first().cloned();
         if let Some(callback) = next_callback {
-            callbacks.borrow_mut().remove(0);
+            callbacks.lock().unwrap().remove(0);
             let args_for_inner = args.clone();
-            let inner: WaterfallNext = Rc::new(move || {
+            let inner: WaterfallNext = Arc::new(move || {
                 run_waterfall_step(callbacks.clone(), args_for_inner.clone(), tail.clone())
             });
             let mut next_args = args.clone();
-            let next_any: Rc<dyn Any> = Rc::new(AnyNext(inner));
+            let next_any: Arc<dyn Any + Send + Sync> = Arc::new(AnyNext(inner));
             next_args.push(next_any);
             callback(&next_args).await
         } else {

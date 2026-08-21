@@ -1,9 +1,10 @@
 //! Ported cases from `packages/core/tests/events.spec.ts`.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
 use std::error::Error;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use cordis_core::{
     AnyNext, Context, Effect, EventCallback, EventFilter, EventOptions, ListenerFilter, Plugin,
@@ -26,7 +27,7 @@ impl EventFilter for Session {
 }
 
 fn flag_filter(expected: bool) -> ListenerFilter {
-    Rc::new(move |session: &dyn EventFilter| {
+    Arc::new(move |session: &dyn EventFilter| {
         session
             .as_any()
             .downcast_ref::<Session>()
@@ -42,56 +43,62 @@ struct Config {
 #[tokio::test]
 async fn events_ctx_on() {
     let root = Context::new();
-    let count = Rc::new(Cell::new(0u32));
+    let count = Arc::new(AtomicU32::new(0));
     let dispose = {
         let count = count.clone();
         root.on(
             "event",
-            event_listener(move |_| count.set(count.get() + 1)),
+            event_listener(move |_| {
+                count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+            }),
             EventOptions::default(),
         )
         .unwrap()
     };
     root.emit("event", &[]);
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     root.emit("event", &[]);
-    assert_eq!(count.get(), 2);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
     dispose.dispose().await.unwrap();
     root.emit("event", &[]);
-    assert_eq!(count.get(), 2);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
 async fn events_ctx_once() {
     let root = Context::new();
-    let count = Rc::new(Cell::new(0u32));
+    let count = Arc::new(AtomicU32::new(0));
     let dispose = {
         let count = count.clone();
         root.once(
             "event",
-            event_listener(move |_| count.set(count.get() + 1)),
+            event_listener(move |_| {
+                count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+            }),
             EventOptions::default(),
         )
         .unwrap()
     };
     root.emit("event", &[]);
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     root.emit("event", &[]);
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     dispose.dispose().await.unwrap();
     root.emit("event", &[]);
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
 async fn events_ctx_parallel() {
     let root = Context::new();
-    let count = Rc::new(Cell::new(0u32));
+    let count = Arc::new(AtomicU32::new(0));
     {
         let count = count.clone();
         root.on_filtered(
             "event",
-            event_listener(move |_| count.set(count.get() + 1)),
+            event_listener(move |_| {
+                count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+            }),
             EventOptions::default(),
             flag_filter(true),
         )
@@ -99,15 +106,15 @@ async fn events_ctx_parallel() {
     }
 
     root.parallel("event", &[], None).await.unwrap();
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     root.parallel("event", &[], Some(&Session { flag: false }))
         .await
         .unwrap();
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     root.parallel("event", &[], Some(&Session { flag: true }))
         .await
         .unwrap();
-    assert_eq!(count.get(), 2);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
 
     // Rejecting listeners must not short-circuit the others; errors are
     // aggregated (mirrors `AggregateError`).
@@ -137,12 +144,14 @@ async fn events_ctx_parallel() {
 #[tokio::test]
 async fn events_ctx_emit() {
     let root = Context::new();
-    let count = Rc::new(Cell::new(0u32));
+    let count = Arc::new(AtomicU32::new(0));
     {
         let count = count.clone();
         root.on_filtered(
             "event",
-            event_listener(move |_| count.set(count.get() + 1)),
+            event_listener(move |_| {
+                count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+            }),
             EventOptions::default(),
             flag_filter(true),
         )
@@ -150,11 +159,11 @@ async fn events_ctx_emit() {
     }
 
     root.emit("event", &[]);
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     root.emit_with("event", &[], &Session { flag: false });
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     root.emit_with("event", &[], &Session { flag: true });
-    assert_eq!(count.get(), 2);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
 
     root.on(
         "event",
@@ -174,12 +183,14 @@ async fn events_ctx_emit() {
 #[tokio::test]
 async fn events_ctx_serial() {
     let root = Context::new();
-    let count = Rc::new(Cell::new(0u32));
+    let count = Arc::new(AtomicU32::new(0));
     {
         let count = count.clone();
         root.on_filtered(
             "event",
-            event_listener(move |_| count.set(count.get() + 1)),
+            event_listener(move |_| {
+                count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+            }),
             EventOptions::default(),
             flag_filter(true),
         )
@@ -187,15 +198,15 @@ async fn events_ctx_serial() {
     }
 
     root.serial("event", &[], None).await.unwrap();
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     root.serial("event", &[], Some(&Session { flag: false }))
         .await
         .unwrap();
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     root.serial("event", &[], Some(&Session { flag: true }))
         .await
         .unwrap();
-    assert_eq!(count.get(), 2);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
 
     root.on(
         "event",
@@ -209,12 +220,14 @@ async fn events_ctx_serial() {
 #[tokio::test]
 async fn events_ctx_bail() {
     let root = Context::new();
-    let count = Rc::new(Cell::new(0u32));
+    let count = Arc::new(AtomicU32::new(0));
     {
         let count = count.clone();
         root.on_filtered(
             "event",
-            event_listener(move |_| count.set(count.get() + 1)),
+            event_listener(move |_| {
+                count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
+            }),
             EventOptions::default(),
             flag_filter(true),
         )
@@ -222,13 +235,13 @@ async fn events_ctx_bail() {
     }
 
     root.bail("event", &[], None).unwrap();
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     root.bail("event", &[], Some(&Session { flag: false }))
         .unwrap();
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     root.bail("event", &[], Some(&Session { flag: true }))
         .unwrap();
-    assert_eq!(count.get(), 2);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
 
     root.on(
         "event",
@@ -242,7 +255,7 @@ async fn events_ctx_bail() {
 #[tokio::test]
 async fn events_ctx_parallel_async_fan_out() {
     let root = Context::new();
-    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    let log = Arc::new(Mutex::new(Vec::<String>::new()));
     for index in 1..=2 {
         let log = log.clone();
         root.on(
@@ -250,9 +263,9 @@ async fn events_ctx_parallel_async_fan_out() {
             event_listener_async(move |_args| {
                 let log = log.clone();
                 async move {
-                    log.borrow_mut().push(format!("start-{index}"));
+                    log.lock().unwrap().push(format!("start-{index}"));
                     tokio::task::yield_now().await;
-                    log.borrow_mut().push(format!("end-{index}"));
+                    log.lock().unwrap().push(format!("end-{index}"));
                     Ok(None)
                 }
             }),
@@ -263,7 +276,7 @@ async fn events_ctx_parallel_async_fan_out() {
 
     root.parallel("async-event", &[], None).await.unwrap();
     assert_eq!(
-        log.borrow().as_slice(),
+        log.lock().unwrap().as_slice(),
         &["start-1", "start-2", "end-1", "end-2"],
         "all listeners must start before any continuation (concurrent fan-out)"
     );
@@ -272,7 +285,7 @@ async fn events_ctx_parallel_async_fan_out() {
 #[tokio::test]
 async fn events_ctx_parallel_async_aggregates_errors() {
     let root = Context::new();
-    let settled = Rc::new(Cell::new(false));
+    let settled = Arc::new(AtomicBool::new(false));
     {
         let settled = settled.clone();
         root.on(
@@ -281,8 +294,10 @@ async fn events_ctx_parallel_async_aggregates_errors() {
                 let settled = settled.clone();
                 async move {
                     tokio::task::yield_now().await;
-                    settled.set(true);
-                    Err(Box::<dyn Error>::from(std::io::Error::other("async")))
+                    settled.store(true, Ordering::SeqCst);
+                    Err(Box::<dyn Error + Send + Sync>::from(std::io::Error::other(
+                        "async",
+                    )))
                 }
             }),
             EventOptions::default(),
@@ -293,7 +308,9 @@ async fn events_ctx_parallel_async_aggregates_errors() {
         "async-errors",
         event_listener_async(|_args| async move {
             tokio::task::yield_now().await;
-            Err(Box::<dyn Error>::from(std::io::Error::other("test")))
+            Err(Box::<dyn Error + Send + Sync>::from(std::io::Error::other(
+                "test",
+            )))
         }),
         EventOptions::default(),
     )
@@ -301,7 +318,7 @@ async fn events_ctx_parallel_async_aggregates_errors() {
 
     let error = root.parallel("async-errors", &[], None).await.unwrap_err();
     assert!(
-        settled.get(),
+        settled.load(Ordering::SeqCst),
         "a rejecting listener must not short-circuit the others"
     );
     assert_eq!(error.errors.len(), 2);
@@ -317,7 +334,7 @@ async fn events_ctx_parallel_async_aggregates_errors() {
 #[tokio::test]
 async fn events_ctx_serial_async_short_circuits_in_order() {
     let root = Context::new();
-    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    let log = Arc::new(Mutex::new(Vec::<String>::new()));
     {
         let log = log.clone();
         root.on(
@@ -325,9 +342,9 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
             event_listener_async(move |_args| {
                 let log = log.clone();
                 async move {
-                    log.borrow_mut().push("one-start".to_string());
+                    log.lock().unwrap().push("one-start".to_string());
                     tokio::task::yield_now().await;
-                    log.borrow_mut().push("one-end".to_string());
+                    log.lock().unwrap().push("one-end".to_string());
                     Ok(None)
                 }
             }),
@@ -342,10 +359,10 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
             event_listener_async(move |_args| {
                 let log = log.clone();
                 async move {
-                    log.borrow_mut().push("two-start".to_string());
+                    log.lock().unwrap().push("two-start".to_string());
                     tokio::task::yield_now().await;
-                    log.borrow_mut().push("two-end".to_string());
-                    let value: Rc<dyn Any> = Rc::new("b".to_string());
+                    log.lock().unwrap().push("two-end".to_string());
+                    let value: Arc<dyn Any + Send + Sync> = Arc::new("b".to_string());
                     Ok(Some(value))
                 }
             }),
@@ -360,7 +377,7 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
             event_listener_async(move |_args| {
                 let log = log.clone();
                 async move {
-                    log.borrow_mut().push("three".to_string());
+                    log.lock().unwrap().push("three".to_string());
                     Ok(None)
                 }
             }),
@@ -378,7 +395,7 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
         Some("b")
     );
     assert_eq!(
-        log.borrow().as_slice(),
+        log.lock().unwrap().as_slice(),
         &["one-start", "one-end", "two-start", "two-end"],
         "listeners are awaited in order and short-circuit on the first truthy result"
     );
@@ -390,7 +407,7 @@ async fn events_ctx_emit_async_continues_in_background() {
     local
         .run_until(async {
             let root = Context::new();
-            let done = Rc::new(Cell::new(false));
+            let done = Arc::new(AtomicBool::new(false));
             {
                 let done = done.clone();
                 root.on(
@@ -399,7 +416,7 @@ async fn events_ctx_emit_async_continues_in_background() {
                         let done = done.clone();
                         async move {
                             tokio::task::yield_now().await;
-                            done.set(true);
+                            done.store(true, Ordering::SeqCst);
                             Ok(None)
                         }
                     }),
@@ -410,17 +427,17 @@ async fn events_ctx_emit_async_continues_in_background() {
 
             root.emit("async-emit", &[]);
             assert!(
-                !done.get(),
+                !done.load(Ordering::SeqCst),
                 "emit must return before async listeners finish"
             );
             for _ in 0..8 {
                 tokio::task::yield_now().await;
-                if done.get() {
+                if done.load(Ordering::SeqCst) {
                     break;
                 }
             }
             assert!(
-                done.get(),
+                done.load(Ordering::SeqCst),
                 "the background continuation must run to completion"
             );
         })
@@ -437,7 +454,7 @@ async fn events_ctx_emit_async_error_is_not_propagated() {
                 "async-emit-error",
                 event_listener_async(|_args| async move {
                     tokio::task::yield_now().await;
-                    Err(Box::<dyn Error>::from(std::io::Error::other(
+                    Err(Box::<dyn Error + Send + Sync>::from(std::io::Error::other(
                         "late failure",
                     )))
                 }),
@@ -478,7 +495,7 @@ async fn events_ctx_bail_rejects_async_listeners() {
 #[tokio::test]
 async fn events_ctx_once_async() {
     let root = Context::new();
-    let count = Rc::new(Cell::new(0u32));
+    let count = Arc::new(AtomicU32::new(0));
     {
         let count = count.clone();
         root.once(
@@ -486,7 +503,7 @@ async fn events_ctx_once_async() {
             event_listener_async(move |_args| {
                 let count = count.clone();
                 async move {
-                    count.set(count.get() + 1);
+                    count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                     tokio::task::yield_now().await;
                     Ok(None)
                 }
@@ -498,7 +515,7 @@ async fn events_ctx_once_async() {
 
     root.parallel("async-once", &[], None).await.unwrap();
     root.parallel("async-once", &[], None).await.unwrap();
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 }
 
 fn waterfall_step() -> EventCallback {
@@ -507,7 +524,7 @@ fn waterfall_step() -> EventCallback {
         let next = args[1].downcast_ref::<AnyNext>().expect("next").0.clone();
         let binding = next().await.expect("next result").expect("next value");
         let inner = binding.downcast_ref::<i64>().expect("i64");
-        let result: Option<Rc<dyn Any>> = Some(Rc::new(value + inner));
+        let result: Option<Arc<dyn Any + Send + Sync>> = Some(Arc::new(value + inner));
         Ok(result)
     })
 }
@@ -515,7 +532,7 @@ fn waterfall_step() -> EventCallback {
 fn waterfall_stop() -> EventCallback {
     event_listener_async(|args| async move {
         let value = args[0].downcast_ref::<i64>().expect("value");
-        let result: Option<Rc<dyn Any>> = Some(Rc::new(*value));
+        let result: Option<Arc<dyn Any + Send + Sync>> = Some(Arc::new(*value));
         Ok(result)
     })
 }
@@ -533,10 +550,14 @@ async fn events_ctx_waterfall() {
     let result = root
         .waterfall(
             "test/waterfall",
-            &[Rc::new(1i64)],
+            &[Arc::new(1i64)],
             None,
-            Rc::new(|| {
-                Box::pin(async { Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new(2i64))) })
+            Arc::new(|| {
+                Box::pin(async {
+                    Ok::<Option<Arc<dyn Any + Send + Sync>>, Box<dyn Error + Send + Sync>>(Some(
+                        Arc::new(2i64),
+                    ))
+                })
             }),
         )
         .await
@@ -555,10 +576,14 @@ async fn events_ctx_waterfall() {
     let result = root
         .waterfall(
             "test/waterfall",
-            &[Rc::new(1i64)],
+            &[Arc::new(1i64)],
             None,
-            Rc::new(|| {
-                Box::pin(async { Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new(2i64))) })
+            Arc::new(|| {
+                Box::pin(async {
+                    Ok::<Option<Arc<dyn Any + Send + Sync>>, Box<dyn Error + Send + Sync>>(Some(
+                        Arc::new(2i64),
+                    ))
+                })
             }),
         )
         .await
@@ -570,7 +595,7 @@ async fn events_ctx_waterfall() {
 #[tokio::test]
 async fn events_ctx_waterfall_filter() {
     let root = Context::new();
-    let count = Rc::new(Cell::new(0u32));
+    let count = Arc::new(AtomicU32::new(0));
     {
         let count = count.clone();
         root.on_filtered(
@@ -578,9 +603,9 @@ async fn events_ctx_waterfall_filter() {
             event_listener_async(move |args| {
                 let count = count.clone();
                 async move {
-                    count.set(count.get() + 1);
+                    count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                     let value = args[0].downcast_ref::<i64>().expect("value");
-                    let result: Option<Rc<dyn Any>> = Some(Rc::new(*value + 10));
+                    let result: Option<Arc<dyn Any + Send + Sync>> = Some(Arc::new(*value + 10));
                     Ok(result)
                 }
             }),
@@ -590,15 +615,19 @@ async fn events_ctx_waterfall_filter() {
         .unwrap();
     }
 
-    let tail: WaterfallNext = Rc::new(|| {
-        Box::pin(async { Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new(1i64))) })
+    let tail: WaterfallNext = Arc::new(|| {
+        Box::pin(async {
+            Ok::<Option<Arc<dyn Any + Send + Sync>>, Box<dyn Error + Send + Sync>>(Some(Arc::new(
+                1i64,
+            )))
+        })
     });
 
     // Unfiltered: the scoped listener receives the event.
     let result = root
         .waterfall(
             "test/waterfall-filter",
-            &[Rc::new(1i64)],
+            &[Arc::new(1i64)],
             None,
             tail.clone(),
         )
@@ -606,14 +635,14 @@ async fn events_ctx_waterfall_filter() {
         .unwrap()
         .expect("result");
     assert_eq!(result.downcast_ref::<i64>().unwrap(), &11);
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 
     // Filter rejects: the listener is skipped and the chain falls back to
     // the tail.
     let result = root
         .waterfall(
             "test/waterfall-filter",
-            &[Rc::new(1i64)],
+            &[Arc::new(1i64)],
             Some(&Session { flag: false }),
             tail.clone(),
         )
@@ -621,13 +650,13 @@ async fn events_ctx_waterfall_filter() {
         .unwrap()
         .expect("result");
     assert_eq!(result.downcast_ref::<i64>().unwrap(), &1);
-    assert_eq!(count.get(), 1);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
 
     // Filter accepts: the scoped listener runs again.
     let result = root
         .waterfall(
             "test/waterfall-filter",
-            &[Rc::new(1i64)],
+            &[Arc::new(1i64)],
             Some(&Session { flag: true }),
             tail,
         )
@@ -635,7 +664,7 @@ async fn events_ctx_waterfall_filter() {
         .unwrap()
         .expect("result");
     assert_eq!(result.downcast_ref::<i64>().unwrap(), &11);
-    assert_eq!(count.get(), 2);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -651,7 +680,8 @@ async fn events_ctx_waterfall_async_chain() {
             let downstream = next().await.expect("next result").expect("next value");
             let value = downstream.downcast_ref::<String>().unwrap();
             tokio::task::yield_now().await;
-            let result: Option<Rc<dyn Any>> = Some(Rc::new(format!("[{input}] {value}")));
+            let result: Option<Arc<dyn Any + Send + Sync>> =
+                Some(Arc::new(format!("[{input}] {value}")));
             Ok(result)
         }),
         EventOptions::default(),
@@ -664,7 +694,8 @@ async fn events_ctx_waterfall_async_chain() {
             let input = args[0].downcast_ref::<String>().unwrap().clone();
             let next = args[1].downcast_ref::<AnyNext>().unwrap().0.clone();
             if input.contains("blocked") {
-                let result: Option<Rc<dyn Any>> = Some(Rc::new("** blocked **".to_string()));
+                let result: Option<Arc<dyn Any + Send + Sync>> =
+                    Some(Arc::new("** blocked **".to_string()));
                 Ok(result)
             } else {
                 next().await
@@ -674,15 +705,17 @@ async fn events_ctx_waterfall_async_chain() {
     )
     .unwrap();
 
-    let tail: WaterfallNext = Rc::new(|| {
+    let tail: WaterfallNext = Arc::new(|| {
         Box::pin(async {
-            Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new("hello".to_string())))
+            Ok::<Option<Arc<dyn Any + Send + Sync>>, Box<dyn Error + Send + Sync>>(Some(Arc::new(
+                "hello".to_string(),
+            )))
         })
     });
     let result = root
         .waterfall(
             "async-waterfall",
-            &[Rc::new("hello".to_string())],
+            &[Arc::new("hello".to_string())],
             None,
             tail,
         )
@@ -691,15 +724,17 @@ async fn events_ctx_waterfall_async_chain() {
         .expect("result");
     assert_eq!(result.downcast_ref::<String>().unwrap(), "[hello] hello");
 
-    let tail: WaterfallNext = Rc::new(|| {
+    let tail: WaterfallNext = Arc::new(|| {
         Box::pin(async {
-            Ok::<Option<Rc<dyn Any>>, Box<dyn Error>>(Some(Rc::new("fallback".to_string())))
+            Ok::<Option<Arc<dyn Any + Send + Sync>>, Box<dyn Error + Send + Sync>>(Some(Arc::new(
+                "fallback".to_string(),
+            )))
         })
     });
     let result = root
         .waterfall(
             "async-waterfall",
-            &[Rc::new("blocked words".to_string())],
+            &[Arc::new("blocked words".to_string())],
             None,
             tail,
         )
@@ -718,20 +753,20 @@ async fn internal_update_hook() {
     local
         .run_until(async {
             let root = Context::new();
-            let seen = Rc::new(RefCell::new(Vec::new()));
+            let seen = Arc::new(Mutex::new(Vec::new()));
             let applied_seen = seen.clone();
             let fiber = root.plugin(
                 &Plugin {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(move |_ctx: &Context, config: &Rc<dyn Any>| {
+                    apply: Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                         let value = config.downcast_ref::<Config>().expect("config").value;
-                        applied_seen.borrow_mut().push(("apply", value));
+                        applied_seen.lock().unwrap().push(("apply", value));
                         Effect::None
                     }),
                 },
-                Some(Rc::new(Config { value: 1 })),
+                Some(Arc::new(Config { value: 1 })),
             );
             // Register an `internal/update` hook on the fiber's own context:
             // it runs before the default update path.
@@ -744,7 +779,7 @@ async fn internal_update_hook() {
                         let hook_seen = hook_seen.clone();
                         async move {
                             let config = args[0].downcast_ref::<Config>().expect("config").value;
-                            hook_seen.borrow_mut().push(("hook", config));
+                            hook_seen.lock().unwrap().push(("hook", config));
                             let next = args[3].downcast_ref::<AnyNext>().expect("next").0.clone();
                             let _ = next().await;
                             Ok(None)
@@ -756,11 +791,11 @@ async fn internal_update_hook() {
             fiber.wait().await.unwrap();
 
             fiber
-                .update(Some(Rc::new(Config { value: 2 })))
+                .update(Some(Arc::new(Config { value: 2 })))
                 .await
                 .unwrap();
             assert_eq!(
-                seen.borrow().as_slice(),
+                seen.lock().unwrap().as_slice(),
                 &[("apply", 1), ("hook", 2), ("apply", 2)]
             );
         })

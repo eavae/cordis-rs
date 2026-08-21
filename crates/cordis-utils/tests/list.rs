@@ -1,6 +1,6 @@
 //! Utils List utility.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cordis_core::Context;
 use cordis_utils::List;
@@ -38,7 +38,7 @@ async fn context_dispose_removes_items() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(move |ctx: &Context, _config| {
+                    apply: Arc::new(move |ctx: &Context, _config| {
                         drop(list_apply.push(ctx, "hello").unwrap());
                         cordis_core::Effect::None
                     }),

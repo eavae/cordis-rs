@@ -13,10 +13,9 @@
 //! unloads and dropping a plugin with pending tasks would otherwise call
 //! into unmapped code.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::ffi::c_void;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use cordis_sdk::{BoxedFuture, RcWaker, WakerData};
@@ -24,13 +23,13 @@ use libloading::Library;
 
 /// The per-plugin-instance host runtime: owns every task the plugin spawned.
 pub struct HostRuntime {
-    tasks: std::cell::RefCell<Vec<tokio::task::JoinHandle<()>>>,
+    tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     library: Option<Arc<Library>>,
 }
 
 impl HostRuntime {
     /// Creates an empty runtime.
-    pub fn new() -> Rc<Self> {
+    pub fn new() -> Arc<Self> {
         Self::with_library(None)
     }
 
@@ -38,16 +37,16 @@ impl HostRuntime {
     /// task is dropped: pending tasks hold their own `Arc` clone, so the
     /// plugin's boxed futures are always dropped (through the plugin's drop
     /// function) while the library is still loaded.
-    pub fn with_library(library: Option<Arc<Library>>) -> Rc<Self> {
-        Rc::new(Self {
-            tasks: RefCell::new(Vec::new()),
+    pub fn with_library(library: Option<Arc<Library>>) -> Arc<Self> {
+        Arc::new(Self {
+            tasks: Mutex::new(Vec::new()),
             library,
         })
     }
 
     /// Cancels and drops every pending task (plugin instance disposed).
     pub fn cancel_all(&mut self) {
-        let tasks = std::mem::take(&mut *self.tasks.borrow_mut());
+        let tasks = std::mem::take(&mut *self.tasks.lock().unwrap());
         for task in tasks {
             task.abort();
         }
@@ -75,7 +74,7 @@ pub unsafe extern "C" fn host_spawn(data: *mut c_void, future: *mut c_void) {
         _library: runtime.library.clone(),
     };
     let handle = tokio::task::spawn_local(task);
-    runtime.tasks.borrow_mut().push(handle);
+    runtime.tasks.lock().unwrap().push(handle);
 }
 
 /// A host task: polls a plugin boxed future until it completes.

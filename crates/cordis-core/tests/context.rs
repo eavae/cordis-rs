@@ -1,7 +1,7 @@
 //! Context skeleton: dual-track Service access and chained isolation.
 
 use std::any::Any;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cordis_core::{
     Config, Context, EventsService, FiberState, LoggerService, ReflectService, RegistryService,
@@ -40,7 +40,7 @@ struct MetaValue(String);
 #[tokio::test]
 async fn root_construction_provides_four_services() {
     let root = Context::new();
-    assert_eq!(root.fiber().state.get(), FiberState::Active);
+    assert_eq!(root.fiber().state(), FiberState::Active);
     assert_eq!(root.fiber().name(), "root");
 
     assert!(root.get::<EventsService>().is_some());
@@ -57,7 +57,7 @@ async fn get_and_provide_roundtrip() {
     // Missing names resolve to None without panicking.
     assert!(root.get_str("missing").is_none());
 
-    let handle = root.provide::<Foo>(Rc::new(Foo { bar: 100 })).unwrap();
+    let handle = root.provide::<Foo>(Arc::new(Foo { bar: 100 })).unwrap();
     let foo = root.get::<Foo>().expect("foo must be visible");
     assert_eq!(foo.bar, 100);
 
@@ -68,8 +68,8 @@ async fn get_and_provide_roundtrip() {
 #[tokio::test]
 async fn duplicate_provide_reports_error() {
     let root = Context::new();
-    drop(root.provide::<Foo>(Rc::new(Foo { bar: 1 })).unwrap());
-    let err = match root.provide::<Foo>(Rc::new(Foo { bar: 2 })) {
+    drop(root.provide::<Foo>(Arc::new(Foo { bar: 1 })).unwrap());
+    let err = match root.provide::<Foo>(Arc::new(Foo { bar: 2 })) {
         Ok(_) => panic!("duplicate provide must fail"),
         Err(err) => err,
     };
@@ -79,16 +79,16 @@ async fn duplicate_provide_reports_error() {
 #[tokio::test]
 async fn isolate_hides_isolated_services_from_parent() {
     let root = Context::new();
-    let ctx1 = root.isolate("foo", Rc::from("label-1"));
-    let ctx2 = root.isolate("foo", Rc::from("label-2"));
+    let ctx1 = root.isolate("foo", Arc::from("label-1"));
+    let ctx2 = root.isolate("foo", Arc::from("label-2"));
 
-    let dispose0 = root.provide::<Foo>(Rc::new(Foo { bar: 100 })).unwrap();
+    let dispose0 = root.provide::<Foo>(Arc::new(Foo { bar: 100 })).unwrap();
     assert_eq!(root.get::<Foo>().unwrap().bar, 100);
     // Children isolated with fresh labels cannot see the root provider.
     assert!(ctx1.get::<Foo>().is_none());
     assert!(ctx2.get::<Foo>().is_none());
 
-    let dispose1 = ctx1.provide::<Foo>(Rc::new(Foo { bar: 200 })).unwrap();
+    let dispose1 = ctx1.provide::<Foo>(Arc::new(Foo { bar: 200 })).unwrap();
     assert_eq!(root.get::<Foo>().unwrap().bar, 100);
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert!(ctx2.get::<Foo>().is_none());
@@ -98,7 +98,7 @@ async fn isolate_hides_isolated_services_from_parent() {
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert!(ctx2.get::<Foo>().is_none());
 
-    let dispose2 = ctx2.provide::<Foo>(Rc::new(Foo { bar: 300 })).unwrap();
+    let dispose2 = ctx2.provide::<Foo>(Arc::new(Foo { bar: 300 })).unwrap();
     assert!(root.get::<Foo>().is_none());
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert_eq!(ctx2.get::<Foo>().unwrap().bar, 300);
@@ -110,16 +110,16 @@ async fn isolate_hides_isolated_services_from_parent() {
 #[tokio::test]
 async fn shared_label_shares_service_instance() {
     let root = Context::new();
-    let label = Rc::<str>::from("test");
+    let label = Arc::<str>::from("test");
     let ctx1 = root.isolate("foo", label.clone());
     let ctx2 = root.isolate("foo", label);
 
-    let dispose0 = root.provide::<Foo>(Rc::new(Foo { bar: 100 })).unwrap();
+    let dispose0 = root.provide::<Foo>(Arc::new(Foo { bar: 100 })).unwrap();
     assert_eq!(root.get::<Foo>().unwrap().bar, 100);
     assert!(ctx1.get::<Foo>().is_none());
     assert!(ctx2.get::<Foo>().is_none());
 
-    let dispose12 = ctx1.provide::<Foo>(Rc::new(Foo { bar: 200 })).unwrap();
+    let dispose12 = ctx1.provide::<Foo>(Arc::new(Foo { bar: 200 })).unwrap();
     assert_eq!(root.get::<Foo>().unwrap().bar, 100);
     assert_eq!(ctx1.get::<Foo>().unwrap().bar, 200);
     assert_eq!(ctx2.get::<Foo>().unwrap().bar, 200);
@@ -135,7 +135,7 @@ async fn shared_label_shares_service_instance() {
 #[tokio::test]
 async fn unisolated_child_sees_parent_services() {
     let root = Context::new();
-    drop(root.provide::<Foo>(Rc::new(Foo { bar: 100 })).unwrap());
+    drop(root.provide::<Foo>(Arc::new(Foo { bar: 100 })).unwrap());
 
     let child = root.extend(&[]);
     assert_eq!(child.get::<Foo>().unwrap().bar, 100);
@@ -217,7 +217,7 @@ async fn extend_carries_metadata() {
     let root = Context::new();
     let child = root.extend(&[(
         "loader/entry-init",
-        Rc::new(MetaValue("demo".into())) as Rc<dyn Any>,
+        Arc::new(MetaValue("demo".into())) as Arc<dyn Any + Send + Sync>,
     )]);
 
     let meta = child

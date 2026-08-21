@@ -1,36 +1,51 @@
 //! Fiber lifecycle state machine and effect executor.
 
 use std::any::Any;
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::future::poll_fn;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use crate::context::{Context, ContextInner, StoreEntry};
 use crate::error::ConfigValidator;
 use crate::events::{EventCallback, WaterfallNext, run_waterfall_step};
 use crate::registry::Runtime;
-use crate::service::{ApplyFn, BoxFuture, Disposer, Effect, EffectItem, sync_disposer};
+use crate::service::{ApplyFn, BoxError, BoxFuture, Disposer, Effect, EffectItem, sync_disposer};
 use tokio::sync::Notify;
 
 /// Lifecycle state of a [`Fiber`] (mirrors `FiberState` in the TS reference).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum FiberState {
     /// The fiber is scheduled but not yet loading.
-    Pending,
+    Pending = 0,
     /// The plugin entry is being applied.
-    Loading,
+    Loading = 1,
     /// The plugin entry is active.
-    Active,
+    Active = 2,
     /// The plugin entry failed to apply.
-    Failed,
+    Failed = 3,
     /// The fiber has been disposed.
-    Disposed,
+    Disposed = 4,
     /// The fiber is being unloaded.
-    Unloading,
+    Unloading = 5,
+}
+
+impl FiberState {
+    /// Decodes a state stored in the fiber's `AtomicU8`.
+    pub(crate) fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Pending,
+            1 => Self::Loading,
+            2 => Self::Active,
+            3 => Self::Failed,
+            4 => Self::Disposed,
+            _ => Self::Unloading,
+        }
+    }
 }
 
 /// Inject-resolution epoch of a fiber (mirrors the string epoch in fiber.ts).
@@ -112,7 +127,7 @@ pub(crate) enum Disposable {
     /// A plain disposer (from a plugin apply or a yielded disposer).
     Direct(Disposer),
     /// A nested effect handle.
-    Effect(Rc<EffectHandle>),
+    Effect(Arc<EffectHandle>),
 }
 
 /// A fiber-level internal hook (e.g. `internal/update`).
@@ -122,32 +137,32 @@ pub(crate) struct InternalHook {
 }
 
 /// The optional background task produced by an async effect or apply.
-pub(crate) type EffectTask = Option<BoxFuture<'static, Result<(), Box<dyn Error>>>>;
+pub(crate) type EffectTask = Option<BoxFuture<'static, Result<(), BoxError>>>;
 
 /// Idempotent effect handle returned by [`Fiber::effect`].
 pub struct EffectHandle {
     /// Label used for diagnostics and effect metadata.
     pub label: String,
-    epoch: Cell<bool>,
-    disposables: RefCell<Vec<Disposable>>,
-    has_task: Cell<bool>,
-    task_done: Rc<Cell<bool>>,
-    task_notify: Rc<Notify>,
-    task_result: Rc<RefCell<Option<Result<(), String>>>>,
-    meta: RefCell<EffectMeta>,
+    epoch: AtomicBool,
+    disposables: Mutex<Vec<Disposable>>,
+    has_task: AtomicBool,
+    task_done: Arc<AtomicBool>,
+    task_notify: Arc<Notify>,
+    task_result: Arc<Mutex<Option<Result<(), String>>>>,
+    meta: Mutex<EffectMeta>,
 }
 
 impl EffectHandle {
-    fn new(label: &str) -> Rc<Self> {
-        Rc::new(Self {
+    fn new(label: &str) -> Arc<Self> {
+        Arc::new(Self {
             label: label.to_string(),
-            epoch: Cell::new(true),
-            disposables: RefCell::new(Vec::new()),
-            has_task: Cell::new(false),
-            task_done: Rc::new(Cell::new(true)),
-            task_notify: Rc::new(Notify::new()),
-            task_result: Rc::new(RefCell::new(None)),
-            meta: RefCell::new(EffectMeta {
+            epoch: AtomicBool::new(true),
+            disposables: Mutex::new(Vec::new()),
+            has_task: AtomicBool::new(false),
+            task_done: Arc::new(AtomicBool::new(true)),
+            task_notify: Arc::new(Notify::new()),
+            task_result: Arc::new(Mutex::new(None)),
+            meta: Mutex::new(EffectMeta {
                 label: label.to_string(),
                 children: Vec::new(),
             }),
@@ -155,26 +170,26 @@ impl EffectHandle {
     }
 
     fn collect(&self, item: Disposable) {
-        self.disposables.borrow_mut().push(item);
+        self.disposables.lock().unwrap().push(item);
     }
 
     /// Whether the effect has already been disposed.
     pub fn is_disposed(&self) -> bool {
-        !self.epoch.get()
+        !self.epoch.load(Ordering::Acquire)
     }
 
     /// The metadata tree of this effect.
     pub fn meta(&self) -> EffectMeta {
-        self.meta.borrow().clone()
+        self.meta.lock().unwrap().clone()
     }
 
     /// Runs the disposer chain (idempotent) and resolves with the first
     /// error, if any. Async effects are awaited before the chain runs.
-    pub fn dispose(self: &Rc<Self>) -> BoxFuture<'static, Result<(), Box<dyn Error>>> {
-        if !self.epoch.replace(false) {
+    pub fn dispose(self: &Arc<Self>) -> BoxFuture<'static, Result<(), BoxError>> {
+        if !self.epoch.swap(false, Ordering::AcqRel) {
             return Box::pin(async { Ok(()) });
         }
-        if !self.has_task.get() {
+        if !self.has_task.load(Ordering::Acquire) {
             return Box::pin(self.clone().run_dispose_chain());
         }
         self.clone().spawn_dispose_with_task()
@@ -185,29 +200,29 @@ impl EffectHandle {
     ///
     /// On task failure the already-collected disposables are cleaned up (the
     /// TS `task?.catch(dispose)` path) and the error is propagated.
-    pub fn wait_task(self: &Rc<Self>) -> BoxFuture<'static, Result<(), Box<dyn Error>>> {
-        if !self.has_task.get() {
+    pub fn wait_task(self: &Arc<Self>) -> BoxFuture<'static, Result<(), BoxError>> {
+        if !self.has_task.load(Ordering::Acquire) {
             return Box::pin(async { Ok(()) });
         }
         let done = self.task_done.clone();
         let task_notify = self.task_notify.clone();
         let this = self.clone();
         Box::pin(async move {
-            while !done.get() {
+            while !done.load(Ordering::Acquire) {
                 let notified = task_notify.notified();
-                if done.get() {
+                if done.load(Ordering::Acquire) {
                     break;
                 }
                 notified.await;
             }
-            let mut result = match &*this.task_result.borrow() {
+            let mut result = match &*this.task_result.lock().unwrap() {
                 Some(Err(message)) => {
-                    Err(Box::new(std::io::Error::other(message.clone())) as Box<dyn Error>)
+                    Err(Box::new(std::io::Error::other(message.clone())) as BoxError)
                 }
                 _ => Ok(()),
             };
             if result.is_err() {
-                let mut disposables = this.disposables.take();
+                let mut disposables = std::mem::take(&mut *this.disposables.lock().unwrap());
                 for item in disposables.drain(..).rev() {
                     let outcome = match item {
                         Disposable::Direct(disposer) => disposer().await,
@@ -224,48 +239,46 @@ impl EffectHandle {
 
     /// Waits for the background task, then runs the disposer chain in the
     /// background; the returned future resolves when cleanup completes.
-    fn spawn_dispose_with_task(self: Rc<Self>) -> BoxFuture<'static, Result<(), Box<dyn Error>>> {
+    fn spawn_dispose_with_task(self: Arc<Self>) -> BoxFuture<'static, Result<(), BoxError>> {
         let done = self.task_done.clone();
         let task_notify = self.task_notify.clone();
         let this = self;
-        let cleanup_done = Rc::new(Cell::new(false));
+        let cleanup_done = Arc::new(AtomicBool::new(false));
         let cleanup_done_waiter = cleanup_done.clone();
-        let cleanup_notify = Rc::new(Notify::new());
+        let cleanup_notify = Arc::new(Notify::new());
         let cleanup_notify_waiter = cleanup_notify.clone();
         let join = tokio::task::spawn_local(async move {
-            while !done.get() {
+            while !done.load(Ordering::Acquire) {
                 let notified = task_notify.notified();
-                if done.get() {
+                if done.load(Ordering::Acquire) {
                     break;
                 }
                 notified.await;
             }
             let result = this.run_dispose_chain().await;
-            cleanup_done_waiter.set(true);
+            cleanup_done_waiter.store(true, Ordering::Release);
             cleanup_notify_waiter.notify_waiters();
             result
         });
         Box::pin(async move {
-            while !cleanup_done.get() {
+            while !cleanup_done.load(Ordering::Acquire) {
                 let notified = cleanup_notify.notified();
-                if cleanup_done.get() {
+                if cleanup_done.load(Ordering::Acquire) {
                     break;
                 }
                 notified.await;
             }
             join.await
-                .unwrap_or_else(|error| Err(Box::new(error) as Box<dyn Error>))
+                .unwrap_or_else(|error| Err(Box::new(error) as BoxError))
         })
     }
 
-    async fn run_dispose_chain(self: Rc<Self>) -> Result<(), Box<dyn Error>> {
-        let mut result = match &*self.task_result.borrow() {
-            Some(Err(message)) => {
-                Err(Box::new(std::io::Error::other(message.clone())) as Box<dyn Error>)
-            }
+    async fn run_dispose_chain(self: Arc<Self>) -> Result<(), BoxError> {
+        let mut result = match &*self.task_result.lock().unwrap() {
+            Some(Err(message)) => Err(Box::new(std::io::Error::other(message.clone())) as BoxError),
             _ => Ok(()),
         };
-        let mut disposables = self.disposables.take();
+        let mut disposables = std::mem::take(&mut *self.disposables.lock().unwrap());
         for item in disposables.drain(..).rev() {
             let outcome = match item {
                 Disposable::Direct(disposer) => disposer().await,
@@ -301,60 +314,81 @@ pub(crate) struct Inertia {
 /// effect executor.
 pub struct Fiber {
     /// Fiber id; `None` once disposed (mirrors `uid: null`).
-    pub uid: Cell<Option<u64>>,
+    pub(crate) uid: AtomicU64,
     /// The context owned by this fiber.
-    pub(crate) ctx: Rc<ContextInner>,
+    pub(crate) ctx: Arc<ContextInner>,
     /// Parent context (the root fiber has no parent).
     pub parent: Option<Context>,
     /// Current plugin config.
-    pub config: RefCell<Option<Rc<dyn Any>>>,
+    pub config: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
     /// Current lifecycle state.
-    pub state: Cell<FiberState>,
+    pub(crate) state: AtomicU8,
     /// Declared inject dependencies: name → config.
-    pub inject: RefCell<HashMap<String, Option<Rc<dyn Any>>>>,
+    pub inject: Mutex<HashMap<String, Option<Arc<dyn Any + Send + Sync>>>>,
     /// The plugin runtime this fiber belongs to.
-    pub(crate) runtime: RefCell<Option<Rc<Runtime>>>,
+    pub(crate) runtime: Mutex<Option<Arc<Runtime>>>,
     /// Error captured from the last apply attempt.
-    pub error: RefCell<Option<Box<dyn Error>>>,
+    pub error: Mutex<Option<BoxError>>,
     /// Current inject-resolution epoch.
-    pub(crate) epoch: RefCell<Epoch>,
+    pub(crate) epoch: Mutex<Epoch>,
     /// Resolved service entries for the inject map.
-    pub(crate) resolved: RefCell<HashMap<String, Rc<StoreEntry>>>,
+    pub(crate) resolved: Mutex<HashMap<String, Arc<StoreEntry>>>,
     /// Ordered effect disposables (disposed in reverse order).
-    pub(crate) disposables: RefCell<Vec<Disposable>>,
+    pub(crate) disposables: Mutex<Vec<Disposable>>,
     /// Inertia lock state.
-    pub(crate) inertia: RefCell<Inertia>,
+    pub(crate) inertia: Mutex<Inertia>,
     /// Notifies waiters when the inertia lock is released.
-    pub(crate) inertia_notify: Rc<Notify>,
+    pub(crate) inertia_notify: Arc<Notify>,
     /// The dispose handle registered on the parent fiber.
-    pub(crate) dispose: RefCell<Option<Rc<EffectHandle>>>,
+    pub(crate) dispose: Mutex<Option<Arc<EffectHandle>>>,
     /// Fiber-level internal hooks.
-    pub(crate) _hooks: RefCell<HashMap<String, Vec<InternalHook>>>,
+    pub(crate) _hooks: Mutex<HashMap<String, Vec<InternalHook>>>,
     /// Config validator applied on updates.
-    pub(crate) validator: RefCell<Option<ConfigValidator>>,
+    pub(crate) validator: Mutex<Option<ConfigValidator>>,
 }
 
 impl Fiber {
     /// Creates the root fiber of a context tree.
-    pub(crate) fn root(ctx: Rc<ContextInner>) -> Rc<Self> {
-        Rc::new(Self {
-            uid: Cell::new(Some(0)),
+    pub(crate) fn root(ctx: Arc<ContextInner>) -> Arc<Self> {
+        Arc::new(Self {
+            uid: AtomicU64::new(0),
             ctx,
             parent: None,
-            config: RefCell::new(None),
-            state: Cell::new(FiberState::Active),
-            inject: RefCell::new(HashMap::new()),
-            runtime: RefCell::new(None),
-            error: RefCell::new(None),
-            epoch: RefCell::new(Epoch::Active(String::new())),
-            resolved: RefCell::new(HashMap::new()),
-            disposables: RefCell::new(Vec::new()),
-            inertia: RefCell::new(Inertia::default()),
-            inertia_notify: Rc::new(Notify::new()),
-            dispose: RefCell::new(None),
-            _hooks: RefCell::new(HashMap::new()),
-            validator: RefCell::new(None),
+            config: Mutex::new(None),
+            state: AtomicU8::new(FiberState::Active as u8),
+            inject: Mutex::new(HashMap::new()),
+            runtime: Mutex::new(None),
+            error: Mutex::new(None),
+            epoch: Mutex::new(Epoch::Active(String::new())),
+            resolved: Mutex::new(HashMap::new()),
+            disposables: Mutex::new(Vec::new()),
+            inertia: Mutex::new(Inertia::default()),
+            inertia_notify: Arc::new(Notify::new()),
+            dispose: Mutex::new(None),
+            _hooks: Mutex::new(HashMap::new()),
+            validator: Mutex::new(None),
         })
+    }
+
+    /// The fiber id; `None` once disposed (`u64::MAX` is the sentinel).
+    pub fn uid(&self) -> Option<u64> {
+        let uid = self.uid.load(Ordering::Acquire);
+        if uid == u64::MAX { None } else { Some(uid) }
+    }
+
+    /// Sets the fiber id (`None` marks the fiber disposed).
+    pub(crate) fn set_uid(&self, uid: Option<u64>) {
+        self.uid.store(uid.unwrap_or(u64::MAX), Ordering::Release);
+    }
+
+    /// The current lifecycle state.
+    pub fn state(&self) -> FiberState {
+        FiberState::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    /// Sets the lifecycle state.
+    pub(crate) fn set_state(&self, state: FiberState) {
+        self.state.store(state as u8, Ordering::Release);
     }
 
     /// Resolves the fiber name: runtime name → nearest parent fiber name →
@@ -364,7 +398,8 @@ impl Fiber {
         while let Some(current) = fiber {
             if let Some(name) = current
                 .runtime
-                .borrow()
+                .lock()
+                .unwrap()
                 .as_ref()
                 .and_then(|r| r.name.clone())
             {
@@ -376,7 +411,7 @@ impl Fiber {
     }
 
     /// Returns the context owned by this fiber.
-    pub fn context(self: &Rc<Self>) -> Context {
+    pub fn context(self: &Arc<Self>) -> Context {
         Context {
             inner: self.ctx.clone(),
             fiber: self.clone(),
@@ -385,7 +420,7 @@ impl Fiber {
 
     /// Asserts the fiber is not disposed.
     pub fn assert_active(&self) -> Result<(), CordisError> {
-        if self.uid.get().is_none() {
+        if self.uid().is_none() {
             Err(CordisError::inactive_effect())
         } else {
             Ok(())
@@ -397,10 +432,10 @@ impl Fiber {
     /// The callback runs synchronously; async effects are awaited before the
     /// disposer chain runs. Disposal is idempotent.
     pub fn effect<F>(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         execute: F,
         label: &str,
-    ) -> Result<Rc<EffectHandle>, CordisError>
+    ) -> Result<Arc<EffectHandle>, CordisError>
     where
         F: FnOnce() -> Effect,
     {
@@ -436,17 +471,18 @@ impl Fiber {
                     Ok(Err(error)) => Err(error.to_string()),
                     Err(error) => Err(format!("async effect task failed: {error}")),
                 };
-                *task_result.borrow_mut() = Some(result);
-                done.set(true);
+                *task_result.lock().unwrap() = Some(result);
+                done.store(true, Ordering::Release);
                 task_notify.notify_waiters();
-                Ok::<(), Box<dyn Error>>(())
+                Ok::<(), BoxError>(())
             });
-            handle.has_task.set(true);
-            handle.task_done.set(false);
+            handle.has_task.store(true, Ordering::Release);
+            handle.task_done.store(false, Ordering::Release);
             tokio::task::spawn_local(wrapped);
         }
         self.disposables
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .push(Disposable::Effect(handle.clone()));
         Ok(handle)
     }
@@ -454,7 +490,8 @@ impl Fiber {
     /// Returns the ordered effect metadata tree (mirrors `fiber.getEffects()`).
     pub fn get_effects(&self) -> Vec<EffectMeta> {
         self.disposables
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .filter_map(|item| match item {
                 Disposable::Effect(handle) => Some(handle.meta()),
@@ -466,19 +503,19 @@ impl Fiber {
     /// Number of registered effect disposables (mirrors
     /// `fiber._disposables.length`).
     pub fn effect_count(&self) -> usize {
-        self.disposables.borrow().len()
+        self.disposables.lock().unwrap().len()
     }
 
     /// Awaits inertia completion and propagates apply errors.
-    pub async fn wait(self: &Rc<Self>) -> Result<(), FiberError> {
-        while self.inertia.borrow().active {
+    pub async fn wait(self: &Arc<Self>) -> Result<(), FiberError> {
+        while self.inertia.lock().unwrap().active {
             let notified = self.inertia_notify.notified();
-            if !self.inertia.borrow().active {
+            if !self.inertia.lock().unwrap().active {
                 break;
             }
             notified.await;
         }
-        if let Some(error) = &*self.error.borrow() {
+        if let Some(error) = &*self.error.lock().unwrap() {
             return Err(FiberError::new(error.to_string()));
         }
         Ok(())
@@ -486,12 +523,12 @@ impl Fiber {
 
     /// Whether an inertia task is currently in flight.
     pub fn inertia_active(&self) -> bool {
-        self.inertia.borrow().active
+        self.inertia.lock().unwrap().active
     }
 
     /// Restarts the fiber: unloads current effects, re-resolves injects and
     /// applies the plugin again.
-    pub fn restart(self: &Rc<Self>) -> BoxFuture<'static, Result<(), FiberError>> {
+    pub fn restart(self: &Arc<Self>) -> BoxFuture<'static, Result<(), FiberError>> {
         let this = self.clone();
         Box::pin(async move {
             this.assert_active()?;
@@ -503,8 +540,8 @@ impl Fiber {
 
     /// Updates the plugin config and restarts.
     pub fn update(
-        self: &Rc<Self>,
-        config: Option<Rc<dyn Any>>,
+        self: &Arc<Self>,
+        config: Option<Arc<dyn Any + Send + Sync>>,
     ) -> BoxFuture<'static, Result<(), FiberError>> {
         self.update_with(config, false)
     }
@@ -512,19 +549,20 @@ impl Fiber {
     /// Updates the plugin config with the `noSave` flag and dispatches the
     /// `internal/update` waterfall (service hooks → fiber hooks → default).
     pub fn update_with(
-        self: &Rc<Self>,
-        config: Option<Rc<dyn Any>>,
+        self: &Arc<Self>,
+        config: Option<Arc<dyn Any + Send + Sync>>,
         no_save: bool,
     ) -> BoxFuture<'static, Result<(), FiberError>> {
         let this = self.clone();
         Box::pin(async move {
             this.assert_active()?;
-            if let Some(validator) = &*this.validator.borrow()
+            let validator = this.validator.lock().unwrap().clone();
+            if let Some(validator) = validator.as_ref()
                 && let Some(config) = &config
                 && let Err(error) = validator(config)
             {
                 this.log_error(&error);
-                *this.error.borrow_mut() = Some(Box::new(FiberError::new(error.to_string())));
+                *this.error.lock().unwrap() = Some(Box::new(FiberError::new(error.to_string())));
                 return Err(FiberError::new(error.to_string()));
             }
             // Service-level global hooks first (e.g. the loader's write-back
@@ -538,37 +576,38 @@ impl Fiber {
             };
             let fiber_hooks = this
                 ._hooks
-                .borrow()
+                .lock()
+                .unwrap()
                 .get("internal/update")
                 .cloned()
                 .unwrap_or_default();
             callbacks.extend(fiber_hooks.into_iter().map(|hook| hook.callback));
-            let applied = Rc::new(Cell::new(false));
+            let applied = Arc::new(AtomicBool::new(false));
             let this_for_tail = this.clone();
             let config_for_tail = config.clone();
             let applied_for_tail = applied.clone();
-            let tail: WaterfallNext = Rc::new(move || {
+            let tail: WaterfallNext = Arc::new(move || {
                 let this = this_for_tail.clone();
                 let config = config_for_tail.clone();
                 let applied = applied_for_tail.clone();
                 Box::pin(async move {
-                    *this.config.borrow_mut() = config;
-                    *this.error.borrow_mut() = None;
-                    applied.set(true);
+                    *this.config.lock().unwrap() = config;
+                    *this.error.lock().unwrap() = None;
+                    applied.store(true, Ordering::Release);
                     Ok(None)
                 })
             });
-            let args: Vec<Rc<dyn Any>> = vec![
-                config.unwrap_or_else(|| Rc::new(()) as Rc<dyn Any>),
-                Rc::new(no_save),
+            let args: Vec<Arc<dyn Any + Send + Sync>> = vec![
+                config.unwrap_or_else(|| Arc::new(()) as Arc<dyn Any + Send + Sync>),
+                Arc::new(no_save),
                 {
-                    let fiber_any: Rc<dyn Any> = this.clone();
+                    let fiber_any: Arc<dyn Any + Send + Sync> = this.clone();
                     fiber_any
                 },
             ];
-            let callbacks = Rc::new(RefCell::new(callbacks));
+            let callbacks = Arc::new(Mutex::new(callbacks));
             let _ = run_waterfall_step(callbacks, args, tail).await;
-            if applied.get() {
+            if applied.load(Ordering::Acquire) {
                 this.restart().await
             } else {
                 Ok(())
@@ -579,11 +618,11 @@ impl Fiber {
     /// Registers a fiber-level internal hook (mirrors the `EventsService`
     /// constructor path for `internal/update`).
     pub fn register_internal_hook(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         event: &str,
         callback: EventCallback,
         prepend: bool,
-    ) -> Result<Rc<EffectHandle>, CordisError> {
+    ) -> Result<Arc<EffectHandle>, CordisError> {
         let event = event.to_string();
         let this = self.clone();
         let effect_label = format!("ctx.on({event:?})");
@@ -592,7 +631,7 @@ impl Fiber {
                 let hook = InternalHook {
                     callback: callback.clone(),
                 };
-                let mut hooks_borrow = this._hooks.borrow_mut();
+                let mut hooks_borrow = this._hooks.lock().unwrap();
                 let list = hooks_borrow.entry(event.clone()).or_default();
                 if prepend {
                     list.insert(0, hook);
@@ -603,8 +642,8 @@ impl Fiber {
                 let this = this.clone();
                 let event = event.clone();
                 Effect::Disposer(sync_disposer(move || {
-                    if let Some(list) = this._hooks.borrow_mut().get_mut(&event) {
-                        list.retain(|hook| !Rc::ptr_eq(&hook.callback, &callback));
+                    if let Some(list) = this._hooks.lock().unwrap().get_mut(&event) {
+                        list.retain(|hook| !Arc::ptr_eq(&hook.callback, &callback));
                     }
                 }))
             },
@@ -613,8 +652,8 @@ impl Fiber {
     }
 
     /// Disposes the fiber (unregisters from its runtime, unloads effects).
-    pub fn dispose(self: &Rc<Self>) -> BoxFuture<'static, ()> {
-        if let Some(handle) = self.dispose.borrow().clone() {
+    pub fn dispose(self: &Arc<Self>) -> BoxFuture<'static, ()> {
+        if let Some(handle) = self.dispose.lock().unwrap().clone() {
             return Box::pin(async move {
                 let _ = handle.dispose().await;
             });
@@ -627,7 +666,7 @@ impl Fiber {
     }
 
     /// Re-checks one injected service and updates the resolved map.
-    pub(crate) fn check_impl(self: &Rc<Self>, name: &str) {
+    pub(crate) fn check_impl(self: &Arc<Self>, name: &str) {
         match self.ctx.lookup_strict(name) {
             Some(entry) => {
                 let usable = match &entry.check {
@@ -641,24 +680,27 @@ impl Fiber {
                     None => true,
                 };
                 if usable {
-                    self.resolved.borrow_mut().insert(name.to_string(), entry);
+                    self.resolved
+                        .lock()
+                        .unwrap()
+                        .insert(name.to_string(), entry);
                 } else {
-                    self.resolved.borrow_mut().remove(name);
+                    self.resolved.lock().unwrap().remove(name);
                 }
             }
             None => {
-                self.resolved.borrow_mut().remove(name);
+                self.resolved.lock().unwrap().remove(name);
             }
         }
     }
 
     /// Rebuilds the inject epoch from the resolved map and starts any needed
     /// state transition.
-    pub(crate) fn refresh(self: &Rc<Self>) {
+    pub(crate) fn refresh(self: &Arc<Self>) {
         let mut epoch_str = String::new();
-        for name in self.inject.borrow().keys() {
-            match self.resolved.borrow().get(name) {
-                Some(entry) => match entry.fiber.upgrade().and_then(|fiber| fiber.uid.get()) {
+        for name in self.inject.lock().unwrap().keys() {
+            match self.resolved.lock().unwrap().get(name) {
+                Some(entry) => match entry.fiber.upgrade().and_then(|fiber| fiber.uid()) {
                     Some(uid) => {
                         // Include the resolved realm in the epoch: a provider
                         // moving between isolate realms must restart its
@@ -686,13 +728,14 @@ impl Fiber {
 
     /// Applies a new epoch; when an inertia task is running the change is
     /// queued and picked up by the running task (inertia lock semantics).
-    pub(crate) fn set_epoch(self: &Rc<Self>, epoch: Epoch) {
-        if *self.epoch.borrow() == epoch {
+    pub(crate) fn set_epoch(self: &Arc<Self>, epoch: Epoch) {
+        if *self.epoch.lock().unwrap() == epoch {
             return;
         }
-        let start_reload = epoch != Epoch::Inactive && *self.epoch.borrow() == Epoch::Inactive;
-        let _ = std::mem::replace(&mut *self.epoch.borrow_mut(), epoch);
-        let mut inertia = self.inertia.borrow_mut();
+        let start_reload =
+            epoch != Epoch::Inactive && *self.epoch.lock().unwrap() == Epoch::Inactive;
+        let _ = std::mem::replace(&mut *self.epoch.lock().unwrap(), epoch);
+        let mut inertia = self.inertia.lock().unwrap();
         if inertia.active {
             return;
         }
@@ -708,24 +751,24 @@ impl Fiber {
     }
 
     /// Runs the plugin apply callback and collects its effect disposers.
-    async fn reload(self: Rc<Self>) {
-        let target = self.epoch.borrow().clone();
+    async fn reload(self: Arc<Self>) {
+        let target = self.epoch.lock().unwrap().clone();
         let task = {
-            let runtime = self.runtime.borrow().clone();
+            let runtime = self.runtime.lock().unwrap().clone();
             match runtime {
                 Some(runtime) => {
                     let ctx = Context {
                         inner: self.ctx.clone(),
                         fiber: self.clone(),
                     };
-                    let config = self.config.borrow().clone();
+                    let config = self.config.lock().unwrap().clone();
                     match self.run_apply(&ctx, &runtime.callback, &config) {
                         Ok(task) => task,
                         Err(reason) => {
                             self.log_error(&format!("{reason} at <{}>", self.name()));
-                            *self.error.borrow_mut() =
+                            *self.error.lock().unwrap() =
                                 Some(Box::new(FiberError::new(reason.to_string())));
-                            *self.epoch.borrow_mut() = Epoch::Inactive;
+                            *self.epoch.lock().unwrap() = Epoch::Inactive;
                             None
                         }
                     }
@@ -745,12 +788,12 @@ impl Fiber {
             };
             if let Some(reason) = reason {
                 self.log_error(&format!("{reason} at <{}>", self.name()));
-                *self.error.borrow_mut() = Some(Box::new(FiberError::new(reason)));
-                *self.epoch.borrow_mut() = Epoch::Inactive;
+                *self.error.lock().unwrap() = Some(Box::new(FiberError::new(reason)));
+                *self.epoch.lock().unwrap() = Epoch::Inactive;
             }
         }
-        if *self.epoch.borrow() == target {
-            self.inertia.borrow_mut().active = false;
+        if *self.epoch.lock().unwrap() == target {
+            self.inertia.lock().unwrap().active = false;
             self.inertia_notify.notify_waiters();
             self.update_state(None);
         } else {
@@ -759,8 +802,8 @@ impl Fiber {
         }
     }
 
-    async fn unload(self: Rc<Self>) {
-        let disposables = self.disposables.take();
+    async fn unload(self: Arc<Self>) {
+        let disposables = std::mem::take(&mut *self.disposables.lock().unwrap());
         for item in disposables.into_iter().rev() {
             let outcome = match item {
                 // Run each disposer under a `JoinHandle` so a panicking
@@ -777,8 +820,8 @@ impl Fiber {
                 }
             }
         }
-        if *self.epoch.borrow() == Epoch::Inactive {
-            self.inertia.borrow_mut().active = false;
+        if *self.epoch.lock().unwrap() == Epoch::Inactive {
+            self.inertia.lock().unwrap().active = false;
             self.inertia_notify.notify_waiters();
             self.update_state(None);
         } else {
@@ -787,30 +830,30 @@ impl Fiber {
         }
     }
 
-    fn start_reload(self: &Rc<Self>) {
+    fn start_reload(self: &Arc<Self>) {
         tokio::task::spawn_local(self.clone().reload());
     }
 
-    fn start_unload(self: &Rc<Self>) {
+    fn start_unload(self: &Arc<Self>) {
         tokio::task::spawn_local(self.clone().unload());
     }
 
     fn get_state(&self) -> FiberState {
-        if self.uid.get().is_none() {
+        if self.uid().is_none() {
             FiberState::Disposed
-        } else if self.error.borrow().is_some() {
+        } else if self.error.lock().unwrap().is_some() {
             FiberState::Failed
-        } else if *self.epoch.borrow() != Epoch::Inactive {
+        } else if *self.epoch.lock().unwrap() != Epoch::Inactive {
             FiberState::Active
         } else {
             FiberState::Pending
         }
     }
 
-    pub(crate) fn update_state(self: &Rc<Self>, explicit: Option<FiberState>) {
-        let old = self.state.get();
+    pub(crate) fn update_state(self: &Arc<Self>, explicit: Option<FiberState>) {
+        let old = self.state();
         let new = explicit.unwrap_or_else(|| self.get_state());
-        self.state.set(new);
+        self.set_state(new);
         if old == new {
             return;
         }
@@ -825,8 +868,8 @@ impl Fiber {
                 inner: self.ctx.clone(),
                 fiber: self.clone(),
             };
-            let fiber_any: Rc<dyn Any> = self.clone();
-            let old_any: Rc<dyn Any> = Rc::new(old);
+            let fiber_any: Arc<dyn Any + Send + Sync> = self.clone();
+            let old_any: Arc<dyn Any + Send + Sync> = Arc::new(old);
             events.emit(&ctx, "internal/status", &[fiber_any, old_any]);
         }
         // Notify consumers when crossing the ACTIVE boundary.
@@ -836,18 +879,18 @@ impl Fiber {
         }
     }
 
-    fn notify_provided(self: &Rc<Self>) {
+    fn notify_provided(self: &Arc<Self>) {
         let names: Vec<String> = self
             .ctx
             .store
-            .borrow()
+            .load_full()
             .by_label
             .values()
             .filter(|entry| {
                 entry
                     .fiber
                     .upgrade()
-                    .is_some_and(|fiber| Rc::ptr_eq(&fiber, self))
+                    .is_some_and(|fiber| Arc::ptr_eq(&fiber, self))
             })
             .map(|entry| entry.name.clone())
             .collect();
@@ -873,20 +916,20 @@ impl Fiber {
 
     /// Executes an effect callback and collects disposers into the handle.
     fn run_effect<F>(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         execute: F,
-        handle: &Rc<EffectHandle>,
-    ) -> Result<EffectTask, Box<dyn Error>>
+        handle: &Arc<EffectHandle>,
+    ) -> Result<EffectTask, BoxError>
     where
         F: FnOnce() -> Effect,
     {
         let fiber = self.clone();
-        let collect = |fiber: &Rc<Self>, handle: &Rc<EffectHandle>, item: Disposable| {
+        let collect = |fiber: &Arc<Self>, handle: &Arc<EffectHandle>, item: Disposable| {
             if let Disposable::Effect(nested) = &item {
-                handle.meta.borrow_mut().children.push(nested.meta());
-                let mut list = fiber.disposables.borrow_mut();
+                handle.meta.lock().unwrap().children.push(nested.meta());
+                let mut list = fiber.disposables.lock().unwrap();
                 if let Some(position) = list.iter().position(
-                    |entry| matches!(entry, Disposable::Effect(h) if Rc::ptr_eq(h, nested)),
+                    |entry| matches!(entry, Disposable::Effect(h) if Arc::ptr_eq(h, nested)),
                 ) {
                     list.remove(position);
                 }
@@ -967,16 +1010,16 @@ impl Fiber {
     /// Executes the plugin apply callback, collecting disposers into the
     /// fiber's own disposables list.
     fn run_apply(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         ctx: &Context,
         callback: &ApplyFn,
-        config: &Option<Rc<dyn Any>>,
-    ) -> Result<EffectTask, Box<dyn Error>> {
-        let empty: Rc<dyn Any> = Rc::new(());
+        config: &Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Result<EffectTask, BoxError> {
+        let empty: Arc<dyn Any + Send + Sync> = Arc::new(());
         let config = config.as_ref().unwrap_or(&empty);
-        let target = self.epoch.borrow().clone();
-        let collect = |this: &Rc<Self>, item: Disposable| {
-            this.disposables.borrow_mut().push(item);
+        let target = self.epoch.lock().unwrap().clone();
+        let collect = |this: &Arc<Self>, item: Disposable| {
+            this.disposables.lock().unwrap().push(item);
         };
         let effect =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(ctx, config)))
@@ -997,7 +1040,8 @@ impl Fiber {
                     match future.await {
                         Ok(disposer) => {
                             this.disposables
-                                .borrow_mut()
+                                .lock()
+                                .unwrap()
                                 .push(Disposable::Direct(disposer));
                             Ok(())
                         }
@@ -1010,12 +1054,14 @@ impl Fiber {
                     match item {
                         Ok(EffectItem::Disposer(disposer)) => {
                             self.disposables
-                                .borrow_mut()
+                                .lock()
+                                .unwrap()
                                 .push(Disposable::Direct(disposer));
                         }
                         Ok(EffectItem::Nested(nested)) => {
                             self.disposables
-                                .borrow_mut()
+                                .lock()
+                                .unwrap()
                                 .push(Disposable::Effect(nested));
                         }
                         Err(error) => return Err(error),
@@ -1030,13 +1076,14 @@ impl Fiber {
                 Ok(Some(Box::pin(async move {
                     poll_fn(|cx| {
                         loop {
-                            if !stream_pending && *this.epoch.borrow() != target {
+                            if !stream_pending && *this.epoch.lock().unwrap() != target {
                                 return Poll::Ready(Ok(()));
                             }
                             match stream.as_mut().poll_next(cx) {
                                 Poll::Ready(Some(Ok(disposer))) => {
                                     this.disposables
-                                        .borrow_mut()
+                                        .lock()
+                                        .unwrap()
                                         .push(Disposable::Direct(disposer));
                                     stream_pending = false;
                                 }
@@ -1060,7 +1107,7 @@ impl Fiber {
 
     /// Converts a panicked apply callback into an error (mirrors the TS
     /// try/catch around the plugin entry).
-    fn apply_panic_error(payload: Box<dyn Any + Send>) -> Box<dyn Error> {
+    fn apply_panic_error(payload: Box<dyn Any + Send>) -> BoxError {
         let message = payload
             .downcast_ref::<&str>()
             .map(|message| message.to_string())
@@ -1073,9 +1120,9 @@ impl Fiber {
 impl fmt::Debug for Fiber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Fiber")
-            .field("uid", &self.uid.get())
+            .field("uid", &self.uid())
             .field("name", &self.name())
-            .field("state", &self.state.get())
+            .field("state", &self.state())
             .finish()
     }
 }
@@ -1083,7 +1130,7 @@ impl fmt::Debug for Fiber {
 /// Creates a disposer from a sync closure (public convenience helper).
 pub fn disposer<F>(f: F) -> Disposer
 where
-    F: FnOnce() + 'static,
+    F: FnOnce() + Send + 'static,
 {
     sync_disposer(f)
 }

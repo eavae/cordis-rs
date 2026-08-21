@@ -2,7 +2,6 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::Arc;
 
 use cordis_sdk::{
@@ -93,7 +92,7 @@ pub struct SoPlugin {
     _library: Arc<Library>,
     /// Per-instance host runtime: owns every task the plugin spawned;
     /// disposed together with the plugin handle.
-    runtime: Rc<HostRuntime>,
+    runtime: Arc<HostRuntime>,
     /// The vtable handed to the plugin; kept alive for the plugin's lifetime
     /// (the plugin stores a raw pointer to it).
     vtable: Option<Box<HostVtable>>,
@@ -308,7 +307,7 @@ impl Drop for SoPlugin {
         }
         // Cancel pending spawned futures (their boxed futures are dropped
         // through the plugin's drop function).
-        if let Some(runtime) = Rc::get_mut(&mut self.runtime) {
+        if let Some(runtime) = Arc::get_mut(&mut self.runtime) {
             runtime.cancel_all();
         }
     }

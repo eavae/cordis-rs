@@ -1,7 +1,7 @@
 //! Ported cases from `packages/core/tests/invoke.spec.ts`.
 
 use std::any::Any;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use cordis_core::{Config, Context, Effect, Plugin, Service, ShadowContext};
 
@@ -31,18 +31,22 @@ struct Foo {
 impl Service for Foo {
     const NAME: &'static str = "foo";
 
-    fn invoke(&self, ctx: &ShadowContext, init: Option<&Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
+    fn invoke(
+        &self,
+        ctx: &ShadowContext,
+        init: Option<&Arc<dyn Any + Send + Sync>>,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
         let init_config: Option<FooConfig> =
             init.and_then(|value| value.downcast_ref::<FooConfig>().cloned());
         let merged =
             ctx.resolve_config::<FooConfig>("foo", Some(&self.config), init_config.as_ref());
-        Some(Rc::new(merged))
+        Some(Arc::new(merged))
     }
 }
 
 impl Foo {
-    fn extend_with(&self, config: FooConfig) -> Rc<Self> {
-        Rc::new(Self {
+    fn extend_with(&self, config: FooConfig) -> Arc<Self> {
+        Arc::new(Self {
             config: self.config.merge(&config),
         })
     }
@@ -59,16 +63,16 @@ async fn functional_service() {
                     is_group: false,
                     name: None,
                     inject: Vec::new(),
-                    apply: Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
+                    apply: Arc::new(|ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                         let config = config
                             .downcast_ref::<FooConfig>()
                             .cloned()
                             .unwrap_or_default();
-                        drop(ctx.provide::<Foo>(Rc::new(Foo { config })).unwrap());
+                        drop(ctx.provide::<Foo>(Arc::new(Foo { config })).unwrap());
                         Effect::None
                     }),
                 },
-                Some(Rc::new(FooConfig {
+                Some(Arc::new(FooConfig {
                     a: Some(1),
                     ..Default::default()
                 })),

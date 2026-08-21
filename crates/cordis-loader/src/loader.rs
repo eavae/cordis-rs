@@ -1,15 +1,15 @@
 //! The Loader service.
 
 use std::any::Any;
-use std::cell::RefCell;
 use std::ops::Deref;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use cordis_core::{
     AnyNext, ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service, event_callback,
     event_listener_async,
 };
 
+use crate::context_bridge::PluginHandlePtr;
 use crate::entry::{Entry, EntryGroup, EntryOptions, EntryTree, PartialEntryOptions};
 use crate::evaluator::EvalEnv;
 use crate::so::SoPlugin;
@@ -19,12 +19,12 @@ pub struct Loader {
     /// The context the loader was created on (its own scope).
     pub ctx: Context,
     /// The underlying entry tree.
-    pub tree: Rc<EntryTree>,
+    pub tree: Arc<EntryTree>,
     /// `CORDIS_SHARED` env data (mirrors `loader.envData`).
     pub env_data: serde_json::Value,
     /// The base url exposed to `!expr` as `base_url()` (defaults to the
     /// current working directory; mirrors `ctx.baseUrl` in the TS loader).
-    base_url: RefCell<String>,
+    base_url: Mutex<String>,
 }
 
 impl Service for Loader {
@@ -42,32 +42,32 @@ impl Deref for Loader {
 impl Loader {
     /// Creates a loader on `ctx`, provides `ctx.loader` and registers the
     /// internal hooks (write-back, reload log, self-dispose).
-    pub fn new(ctx: &Context) -> Rc<Self> {
+    pub fn new(ctx: &Context) -> Arc<Self> {
         let shared = std::env::var("CORDIS_SHARED").ok();
         Self::with_shared(ctx, shared)
     }
 
     /// Creates a loader with explicit `CORDIS_SHARED` data.
-    pub fn with_shared(ctx: &Context, shared: Option<String>) -> Rc<Self> {
+    pub fn with_shared(ctx: &Context, shared: Option<String>) -> Arc<Self> {
         let env_data = shared
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
             .unwrap_or_else(|| serde_json::json!({}));
         let tree = EntryTree::new(ctx);
-        let loader = Rc::new(Self {
+        let loader = Arc::new(Self {
             ctx: ctx.clone(),
             tree,
             env_data,
-            base_url: RefCell::new(
+            base_url: Mutex::new(
                 std::env::current_dir()
                     .map_or_else(|_| ".".to_string(), |path| path.display().to_string()),
             ),
         });
         let group_plugin = group_plugin(&loader);
-        loader
-            .tree
-            .builtins
-            .borrow_mut()
-            .insert("@cordisjs/plugin-group".to_string(), group_plugin);
+        let _guard = loader.tree.write_lock.lock().unwrap();
+        let mut builtins = (*loader.tree.builtins.load_full()).clone();
+        builtins.insert("@cordisjs/plugin-group".to_string(), group_plugin);
+        loader.tree.builtins.store(Arc::new(builtins));
+        drop(_guard);
 
         // The loader service carries its availability check: while tasks are
         // pending under the `await` intercept, dependent fibers stay pending
@@ -77,7 +77,7 @@ impl Loader {
             ctx.provide_str_with_check(
                 "loader",
                 loader.clone(),
-                Some(Rc::new(move |_ctx: &Context| loader_check.check())),
+                Some(Arc::new(move |_ctx: &Context| loader_check.check())),
             )
             .unwrap(),
         );
@@ -90,22 +90,22 @@ impl Loader {
     pub fn eval_env(&self) -> EvalEnv {
         EvalEnv {
             platform: platform_name(),
-            base_url: self.base_url.borrow().clone(),
+            base_url: self.base_url.lock().unwrap().clone(),
             env_vars: std::env::vars().collect(),
         }
     }
 
     /// Overrides the base url used by `!expr` `base_url()`.
     pub fn set_base_url(&self, base_url: impl Into<String>) {
-        *self.base_url.borrow_mut() = base_url.into();
+        *self.base_url.lock().unwrap() = base_url.into();
     }
 
     /// Returns the underlying tree handle.
-    pub fn tree_handle(&self) -> Rc<EntryTree> {
-        Rc::clone(&self.tree)
+    pub fn tree_handle(&self) -> Arc<EntryTree> {
+        Arc::clone(&self.tree)
     }
 
-    fn register_internal_hooks(self: &Rc<Self>) {
+    fn register_internal_hooks(self: &Arc<Self>) {
         // internal/update write-back hook: plugin self-updates write back to
         // the entry options.
         let loader = self.clone();
@@ -126,9 +126,9 @@ impl Loader {
                                 && let Ok(config) =
                                     args[0].clone().downcast::<serde_yaml_ng::Value>()
                             {
-                                let mut options = entry.options.borrow().clone();
+                                let mut options = entry.options.lock().unwrap().clone();
                                 options.config = Some((*config).clone());
-                                *entry.options.borrow_mut() = options;
+                                *entry.options.lock().unwrap() = options;
                                 entry.tree.write();
                             }
                             let _ = next().await;
@@ -188,14 +188,14 @@ impl Loader {
                         // Merging entry-level inject happens on fiber
                         // creation; the entry is reachable from the root
                         // fiber's parent context.
-                        if fiber.uid.get().is_some()
+                        if fiber.uid().is_some()
                             && let Some(entry) = loader.find_entry_for_parent(&fiber)
                         {
                             entry.merge_inject_into(&fiber);
                             return Ok(None);
                         }
                         // Only care about disposals (`uid` becomes None).
-                        if fiber.uid.get().is_some() {
+                        if fiber.uid().is_some() {
                             return Ok(None);
                         }
                         let Some(entry) = loader.find_entry_for_fiber(&fiber) else {
@@ -204,7 +204,7 @@ impl Loader {
                         if entry.disabled() {
                             return Ok(None);
                         }
-                        entry.options.borrow_mut().disabled = Some(true);
+                        entry.options.lock().unwrap().disabled = Some(true);
                         entry.tree.write();
                         Ok(None)
                     }),
@@ -214,47 +214,48 @@ impl Loader {
         );
     }
 
-    fn find_entry_for_fiber(&self, fiber: &Rc<Fiber>) -> Option<Rc<Entry>> {
+    fn find_entry_for_fiber(&self, fiber: &Arc<Fiber>) -> Option<Arc<Entry>> {
         self.tree.entries().into_iter().find(|entry| {
             entry
                 .fiber
-                .borrow()
+                .lock()
+                .unwrap()
                 .as_ref()
-                .is_some_and(|candidate| Rc::ptr_eq(candidate, fiber))
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, fiber))
         })
     }
 
     /// Finds the entry whose own context is `fiber`'s parent context (the
     /// entry's root fiber; mirrors `fiber.parent[Entry.key]`).
-    fn find_entry_for_parent(&self, fiber: &Rc<Fiber>) -> Option<Rc<Entry>> {
+    fn find_entry_for_parent(&self, fiber: &Arc<Fiber>) -> Option<Arc<Entry>> {
         let parent = fiber.parent.as_ref()?;
         self.tree
             .entries()
             .into_iter()
-            .find(|entry| parent.shares_inner(&entry.ctx.borrow()))
+            .find(|entry| parent.shares_inner(&entry.ctx.lock().unwrap()))
     }
 
     /// Whether `fiber` is the root fiber of `entry` (mirrors
     /// `fiber.parent.fiber?.entry === fiber.entry`: child fibers under the
     /// same entry must not write back to the entry's config).
-    fn fiber_is_root_of(&self, entry: &Rc<Entry>, fiber: &Rc<Fiber>) -> bool {
-        let Some(root) = entry.fiber.borrow().clone() else {
+    fn fiber_is_root_of(&self, entry: &Arc<Entry>, fiber: &Arc<Fiber>) -> bool {
+        let Some(root) = entry.fiber.lock().unwrap().clone() else {
             return false;
         };
         fiber
             .parent
             .as_ref()
-            .is_some_and(|parent| Rc::ptr_eq(parent.fiber(), &root))
+            .is_some_and(|parent| Arc::ptr_eq(parent.fiber(), &root))
     }
 
     /// The builtin group plugin: syncs the entry's subgroup from its config.
-    fn group_plugin_inner(self: &Rc<Self>) -> Plugin {
+    fn group_plugin_inner(self: &Arc<Self>) -> Plugin {
         let loader = self.clone();
         Plugin {
             is_group: true,
             name: Some("group".to_string()),
             inject: Vec::new(),
-            apply: Rc::new(move |ctx: &Context, config: &Rc<dyn Any>| {
+            apply: Arc::new(move |ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                 let fiber = ctx.fiber().clone();
                 if let Some(entry) = loader.find_entry_for_fiber(&fiber) {
                     let configs: Vec<EntryOptions> = match config
@@ -264,17 +265,17 @@ impl Loader {
                         None => Vec::new(),
                     };
                     let subgroup = {
-                        let existing = entry.subgroup.borrow().clone();
+                        let existing = entry.subgroup.lock().unwrap().clone();
                         if let Some(subgroup) = existing {
                             subgroup
                         } else {
                             let subgroup = EntryGroup::new(
                                 loader.tree_handle(),
-                                entry.ctx.borrow().clone(),
-                                Some(entry.parent.borrow().clone()),
+                                entry.ctx.lock().unwrap().clone(),
+                                Some(entry.parent.lock().unwrap().clone()),
                             );
-                            *subgroup.entry.borrow_mut() = Some(entry.clone());
-                            *entry.subgroup.borrow_mut() = Some(subgroup.clone());
+                            *subgroup.entry.lock().unwrap() = Some(entry.clone());
+                            *entry.subgroup.lock().unwrap() = Some(subgroup.clone());
                             subgroup
                         }
                     };
@@ -283,14 +284,14 @@ impl Loader {
                     let _ = ctx.fiber().effect(
                         move || {
                             Effect::Disposer(cordis_core::sync_disposer(move || {
-                                let entries: Vec<Rc<Entry>> =
-                                    stop_subgroup.entries.borrow().clone();
+                                let entries: Vec<Arc<Entry>> =
+                                    stop_subgroup.entries.lock().unwrap().clone();
                                 for entry in entries {
-                                    let fiber = entry.fiber.borrow().clone();
+                                    let fiber = entry.fiber.lock().unwrap().clone();
                                     if let Some(fiber) = fiber {
                                         tokio::task::spawn_local(fiber.dispose());
                                     }
-                                    *entry.fiber.borrow_mut() = None;
+                                    *entry.fiber.lock().unwrap() = None;
                                 }
                             }))
                         },
@@ -310,15 +311,15 @@ impl Loader {
 
     /// Reads a config list and reconciles the tree (mirrors `tree.read`).
     pub async fn read(&self, configs: Vec<EntryOptions>) {
-        let root = self.tree.root.borrow().clone().expect("root");
+        let root = self.tree.root.lock().unwrap().clone().expect("root");
         self.read_group(&root, configs).await;
     }
 
     /// Reconciles `configs` against the entries of `group`, creating,
     /// updating and disposing entries as needed (mirrors `tree.read` applied
     /// to a subgroup).
-    pub async fn read_group(&self, group: &Rc<EntryGroup>, configs: Vec<EntryOptions>) {
-        let mut next_entries: Vec<Rc<Entry>> = Vec::new();
+    pub async fn read_group(&self, group: &Arc<EntryGroup>, configs: Vec<EntryOptions>) {
+        let mut next_entries: Vec<Arc<Entry>> = Vec::new();
         for options in configs {
             if options.group == Some(true) {
                 let mut options = options;
@@ -331,11 +332,12 @@ impl Loader {
                 } else {
                     let entry = Entry::new(self.tree_handle(), group.clone(), options.clone());
                     entry.update(PartialEntryOptions::from_options(&options), true, false);
-                    group.entries.borrow_mut().push(entry.clone());
+                    group.entries.lock().unwrap().push(entry.clone());
                     entry
                 };
                 next_entries.push(entry.clone());
-                if entry.fiber.borrow().is_none() && !entry.disabled() {
+                let needs_init = entry.fiber.lock().unwrap().is_none() && !entry.disabled();
+                if needs_init {
                     entry.init().await;
                 }
                 continue;
@@ -347,30 +349,34 @@ impl Loader {
                 let mut options = options;
                 self.tree.ensure_id(&mut options);
                 let entry = Entry::new(self.tree_handle(), group.clone(), options.clone());
+
                 entry.update(PartialEntryOptions::from_options(&options), true, false);
-                group.entries.borrow_mut().push(entry.clone());
+                group.entries.lock().unwrap().push(entry.clone());
                 next_entries.push(entry);
             }
         }
-        let removed: Vec<Rc<Entry>> = group
+
+        let removed: Vec<Arc<Entry>> = group
             .entries
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
-            .filter(|entry| !next_entries.iter().any(|next| Rc::ptr_eq(next, entry)))
+            .filter(|entry| !next_entries.iter().any(|next| Arc::ptr_eq(next, entry)))
             .cloned()
             .collect();
         for entry in removed {
-            if let Some(fiber) = entry.fiber.borrow().clone() {
+            if let Some(fiber) = entry.fiber.lock().unwrap().clone() {
                 tokio::task::spawn_local(fiber.dispose());
             }
             group
                 .entries
-                .borrow_mut()
-                .retain(|item| !Rc::ptr_eq(item, &entry));
+                .lock()
+                .unwrap()
+                .retain(|item| !Arc::ptr_eq(item, &entry));
         }
         for entry in next_entries
             .into_iter()
-            .filter(|entry| entry.fiber.borrow().is_none())
+            .filter(|entry| entry.fiber.lock().unwrap().is_none())
         {
             entry.init().await;
         }
@@ -378,17 +384,18 @@ impl Loader {
 
     /// Finds an existing entry by id, or by name when the new id is
     /// auto-generated (keeps structure stable across re-reads).
-    fn find_matching(&self, group: &Rc<EntryGroup>, options: &EntryOptions) -> Option<Rc<Entry>> {
+    fn find_matching(&self, group: &Arc<EntryGroup>, options: &EntryOptions) -> Option<Arc<Entry>> {
         group
             .entries
-            .borrow()
+            .lock()
+            .unwrap()
             .iter()
             .find(|entry| {
                 if !options.id.is_empty() {
-                    entry.options.borrow().id == options.id
+                    entry.options.lock().unwrap().id == options.id
                 } else {
-                    entry.options.borrow().name == options.name
-                        && entry.options.borrow().group == options.group
+                    entry.options.lock().unwrap().name == options.name
+                        && entry.options.lock().unwrap().group == options.group
                 }
             })
             .cloned()
@@ -401,15 +408,16 @@ impl Loader {
 
     /// Registers a mock plugin with an inject list (test helper).
     pub fn mock_with_inject(&self, name: &str, inject: Vec<String>, apply: ApplyFn) -> String {
-        self.tree.plugins.borrow_mut().insert(
-            name.to_string(),
-            Plugin {
-                is_group: false,
-                name: None,
-                inject: inject.into_iter().map(|name| (name, None)).collect(),
-                apply,
-            },
-        );
+        let plugin = Plugin {
+            is_group: false,
+            name: None,
+            inject: inject.into_iter().map(|name| (name, None)).collect(),
+            apply,
+        };
+        let _guard = self.tree.write_lock.lock().unwrap();
+        let mut plugins = (*self.tree.plugins.load_full()).clone();
+        plugins.insert(name.to_string(), plugin);
+        self.tree.plugins.store(Arc::new(plugins));
         name.to_string()
     }
 
@@ -425,9 +433,11 @@ impl Loader {
         let handle = plugin
             .handle_ptr()
             .ok_or_else(|| "plugin instance is not created".to_string())?;
+        let handle = PluginHandlePtr(handle);
         let name = metadata.name.clone();
         let name_for_error = name.clone();
-        let apply: ApplyFn = Rc::new(move |ctx: &Context, config: &Rc<dyn Any>| {
+        let apply: ApplyFn = Arc::new(move |ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
+            let handle = handle.get();
             let config = config
                 .downcast_ref::<serde_yaml_ng::Value>()
                 .cloned()
@@ -466,17 +476,20 @@ impl Loader {
                 .collect(),
             apply,
         };
-        self.tree.plugins.borrow_mut().insert(name.clone(), plugin);
+        let _guard = self.tree.write_lock.lock().unwrap();
+        let mut plugins = (*self.tree.plugins.load_full()).clone();
+        plugins.insert(name.clone(), plugin);
+        self.tree.plugins.store(Arc::new(plugins));
         Ok(name)
     }
 
     /// The fiber of the entry with the given id (test helper).
-    pub fn expect_fiber(&self, id: &str) -> Rc<Fiber> {
+    pub fn expect_fiber(&self, id: &str) -> Arc<Fiber> {
         self.tree
             .entries()
             .into_iter()
             .find(|entry| entry.id() == id)
-            .and_then(|entry| entry.fiber.borrow().clone())
+            .and_then(|entry| entry.fiber.lock().unwrap().clone())
             .expect("entry fiber")
     }
 
@@ -485,18 +498,19 @@ impl Loader {
         self.tree
             .entries()
             .iter()
-            .map(|entry| entry.options.borrow().clone())
+            .map(|entry| entry.options.lock().unwrap().clone())
             .collect()
     }
 
     /// Locates the entry id owning `fiber` (mirrors `loader.locate`).
-    pub fn locate(&self, fiber: &Rc<Fiber>) -> Option<String> {
+    pub fn locate(&self, fiber: &Arc<Fiber>) -> Option<String> {
         self.tree.entries().into_iter().find_map(|entry| {
             let matches = entry
                 .fiber
-                .borrow()
+                .lock()
+                .unwrap()
                 .as_ref()
-                .is_some_and(|candidate| Rc::ptr_eq(candidate, fiber));
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, fiber));
             if matches { Some(entry.id()) } else { None }
         })
     }
@@ -513,20 +527,21 @@ impl Loader {
 
     /// Logs an apply/reload message when logs are enabled.
     pub fn show_log(&self, r#type: &str, entry: &Entry) {
-        if entry.options.borrow().group == Some(true) || !self.enable_logs {
+        let is_group = entry.options.lock().unwrap().group == Some(true);
+        if is_group || !self.enable_logs {
             return;
         }
-        self.ctx
-            .logger()
-            .named("loader")
-            .info(format!("{type} plugin {}", entry.options.borrow().name));
+        self.ctx.logger().named("loader").info(format!(
+            "{type} plugin {}",
+            entry.options.lock().unwrap().name
+        ));
     }
 }
 
 /// Returns the builtin group plugin bound to `loader` (the Rust counterpart
 /// of the `Group` class in the TS loader). Re-exported by
 /// `cordis-plugin-group`, mirroring the TS `@cordisjs/plugin-group` package.
-pub fn group_plugin(loader: &Rc<Loader>) -> Plugin {
+pub fn group_plugin(loader: &Arc<Loader>) -> Plugin {
     loader.group_plugin_inner()
 }
 

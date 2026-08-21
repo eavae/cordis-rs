@@ -1,10 +1,10 @@
 //! Include patch gap regressions (8 cases).
 
 use std::any::Any;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use cordis_core::{Context, Effect, LoggerLevel, SimpleExporter};
@@ -34,24 +34,26 @@ fn include_opts(config: IncludeConfig) -> EntryOptions {
 }
 
 fn setup_loader(loader: &Loader) {
-    loader
-        .builtins
-        .borrow_mut()
-        .insert("@cordisjs/plugin-include".to_string(), include_plugin());
+    {
+        let _guard = loader.tree.write_lock.lock().unwrap();
+        let mut builtins = (*loader.builtins.load_full()).clone();
+        builtins.insert("@cordisjs/plugin-include".to_string(), include_plugin());
+        loader.builtins.store(Arc::new(builtins));
+    }
     loader.mock(
         "greeter",
-        Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
+        Arc::new(|ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
             let value = config
                 .downcast_ref::<serde_yaml_ng::Value>()
                 .and_then(|value| value.get("value"))
                 .and_then(|value| value.as_str())
                 .unwrap_or("default")
                 .to_string();
-            drop(ctx.provide_str("greeting", Rc::new(value)).unwrap());
+            drop(ctx.provide_str("greeting", Arc::new(value)).unwrap());
             Effect::None
         }),
     );
-    loader.mock("noop", Rc::new(|_ctx: &Context, _config| Effect::None));
+    loader.mock("noop", Arc::new(|_ctx: &Context, _config| Effect::None));
 }
 
 fn greeting(root: &Context) -> Option<String> {
@@ -64,12 +66,12 @@ fn config_value(value: &str) -> Value {
     serde_yaml_ng::to_value(serde_json::json!({ "value": value })).unwrap()
 }
 
-fn entry_by_id(loader: &Loader, id: &str) -> Rc<cordis_loader::Entry> {
+fn entry_by_id(loader: &Loader, id: &str) -> Arc<cordis_loader::Entry> {
     loader
         .tree_handle()
         .entries()
         .into_iter()
-        .find(|entry| entry.options.borrow().id == id)
+        .find(|entry| entry.options.lock().unwrap().id == id)
         .unwrap_or_else(|| panic!("entry {id} not found"))
 }
 
@@ -87,7 +89,7 @@ async fn setup_include(
     dir: &std::path::Path,
     fixture: &str,
     patches: Vec<PatchOptions>,
-) -> (Context, Rc<Loader>, String) {
+) -> (Context, Arc<Loader>, String) {
     let path = write_fixture(dir, "base.yml", fixture);
     let root = Context::new();
     let loader = Loader::new(&root);
@@ -111,23 +113,25 @@ async fn mount_and_capture(
     dir: &std::path::Path,
     fixture: &str,
     patches: Vec<PatchOptions>,
-) -> (Context, Rc<Loader>, Rc<RefCell<Vec<String>>>, String) {
+) -> (Context, Arc<Loader>, Arc<Mutex<Vec<String>>>, String) {
     let path = write_fixture(dir, "base.yml", fixture);
     let root = Context::new();
-    let captured = Rc::new(RefCell::new(Vec::new()));
+    let captured = Arc::new(Mutex::new(Vec::new()));
     drop(
         root.logger()
-            .exporter(Rc::new(SimpleExporter {
+            .exporter(Arc::new(SimpleExporter {
                 colors: 0,
                 max_length: 10240,
-                levels: Some(Rc::new(HashMap::from([(
+                levels: Some(Arc::new(HashMap::from([(
                     "default".to_string(),
                     LoggerLevel::Debug,
                 )]))),
                 formatters: None,
                 handler: {
                     let captured = captured.clone();
-                    Rc::new(move |message| captured.borrow_mut().push(message.args[0].inspect()))
+                    Arc::new(move |message| {
+                        captured.lock().unwrap().push(message.args[0].inspect())
+                    })
                 },
             }))
             .unwrap(),
@@ -175,7 +179,7 @@ async fn patch_overrides_group_inject_intercept_isolate() {
             )
             .await;
 
-            let options = entry_by_id(&loader, "1").options.borrow().clone();
+            let options = entry_by_id(&loader, "1").options.lock().unwrap().clone();
             assert_eq!(options.group, Some(true));
             assert_eq!(options.inject.as_deref(), Some(&["foo".to_string()][..]));
             assert_eq!(
@@ -213,7 +217,7 @@ async fn patch_writes_arbitrary_extra_key_and_round_trips() {
             )
             .await;
 
-            let options = entry_by_id(&loader, "1").options.borrow().clone();
+            let options = entry_by_id(&loader, "1").options.lock().unwrap().clone();
             assert_eq!(
                 options.extra.get("custom"),
                 Some(&Value::String("x".to_string()))
@@ -311,7 +315,7 @@ async fn patch_inserts_into_nested_subgroup() {
                     .tree_handle()
                     .entries()
                     .iter()
-                    .any(|entry| entry.options.borrow().id == "added"),
+                    .any(|entry| entry.options.lock().unwrap().id == "added"),
                 "inserted entry missing"
             );
             assert_eq!(greeting(&root).as_deref(), Some("before"));
@@ -341,7 +345,7 @@ async fn patch_null_clears_disabled_and_config() {
             )
             .await;
 
-            let options = entry_by_id(&loader, "1").options.borrow().clone();
+            let options = entry_by_id(&loader, "1").options.lock().unwrap().clone();
             assert_eq!(options.disabled, None);
             assert_eq!(options.config, None);
             // Cleared config falls back to the plugin default.
@@ -394,7 +398,7 @@ async fn patch_after_root_insert_matches_js_semantics() {
             .await;
 
             assert_eq!(greeting(&root).as_deref(), Some("updated"));
-            let inserted = entry_by_id(&loader, "new1").options.borrow().clone();
+            let inserted = entry_by_id(&loader, "new1").options.lock().unwrap().clone();
             assert_eq!(
                 inserted.config,
                 Some(config_value("original")),
@@ -427,11 +431,12 @@ async fn patch_name_mismatch_warns_and_skips() {
             .await;
             assert!(
                 captured
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .iter()
                     .any(|line| line.contains("name mismatch")),
                 "{:?}",
-                captured.borrow()
+                captured.lock().unwrap()
             );
             assert_eq!(greeting(&root).as_deref(), Some("hello"), "patch skipped");
             drop(root);
@@ -461,11 +466,12 @@ async fn patch_matching_name_applies() {
             .await;
             assert!(
                 !captured
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .iter()
                     .any(|line| line.contains("name mismatch")),
                 "{:?}",
-                captured.borrow()
+                captured.lock().unwrap()
             );
             assert_eq!(greeting(&root), None, "matching-name patch must apply");
             drop(root);
@@ -494,11 +500,12 @@ async fn patch_nonexistent_id_warns() {
             .await;
             assert!(
                 captured
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .iter()
                     .any(|line| line.contains("entry nope not found")),
                 "{:?}",
-                captured.borrow()
+                captured.lock().unwrap()
             );
             assert_eq!(greeting(&root).as_deref(), Some("hello"));
             drop(root);
@@ -537,18 +544,20 @@ async fn patch_insert_into_non_group_warns() {
             .await;
             assert!(
                 captured
-                    .borrow()
+                    .lock()
+                    .unwrap()
                     .iter()
                     .any(|line| line.contains("is not a group")),
                 "{:?}",
-                captured.borrow()
+                captured.lock().unwrap()
             );
             assert!(
-                !loader
-                    .tree_handle()
-                    .entries()
-                    .iter()
-                    .any(|entry| entry.options.borrow().id == "extra"),
+                !loader.tree_handle().entries().iter().any(|entry| entry
+                    .options
+                    .lock()
+                    .unwrap()
+                    .id
+                    == "extra"),
                 "inserted entry must not be mounted"
             );
             assert_eq!(greeting(&root).as_deref(), Some("hello"));

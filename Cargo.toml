@@ -34,6 +34,7 @@ repository = "https://github.com/cordisjs/cordis-rs"
 [workspace.dependencies]
 # Runtime / async
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "signal"] }
+arc-swap = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # Serialization & config
@@ -59,7 +60,8 @@ missing_docs = "warn"
 [workspace.lints.clippy]
 # Curated pedantic/nursery lints that are mechanical and uncontroversial.
 # `scripts/quality.sh` promotes them to errors via `-D warnings`.
-all = "warn"
+all = { level = "warn", priority = -1 }
+await_holding_lock = "deny"
 cloned_instead_of_copied = "warn"
 default_trait_access = "warn"
 map_unwrap_or = "warn"

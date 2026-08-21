@@ -3,8 +3,8 @@
 //! Port of `@cordisjs/plugin-timer`: `ctx.timeout`, `ctx.interval`,
 //! `ctx.throttle` and `ctx.debounce`, all bound to the fiber lifecycle.
 
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cordis_core::{CordisError, Effect, EffectHandle, Service, sync_disposer};
@@ -22,9 +22,9 @@ impl TimerService {
     /// Runs `callback` once after `delay` milliseconds (dispose cancels).
     pub fn timeout(
         ctx: &cordis_core::Context,
-        callback: Rc<dyn Fn()>,
+        callback: Arc<dyn Fn() + Send + Sync>,
         delay: u64,
-    ) -> Result<Rc<EffectHandle>, CordisError> {
+    ) -> Result<Arc<EffectHandle>, CordisError> {
         ctx.fiber().effect(
             move || {
                 let join = tokio::task::spawn_local(async move {
@@ -57,9 +57,9 @@ impl TimerService {
     /// Runs `callback` every `delay` milliseconds (dispose cancels).
     pub fn interval(
         ctx: &cordis_core::Context,
-        callback: Rc<dyn Fn()>,
+        callback: Arc<dyn Fn() + Send + Sync>,
         delay: u64,
-    ) -> Result<Rc<EffectHandle>, CordisError> {
+    ) -> Result<Arc<EffectHandle>, CordisError> {
         ctx.fiber().effect(
             move || {
                 let join = tokio::task::spawn_local(async move {
@@ -102,49 +102,54 @@ impl TimerService {
     /// drops them).
     pub fn throttle(
         ctx: &cordis_core::Context,
-        callback: Rc<dyn Fn()>,
+        callback: Arc<dyn Fn() + Send + Sync>,
         delay: u64,
         no_trailing: bool,
-    ) -> Result<Rc<dyn Fn()>, CordisError> {
+    ) -> Result<Arc<dyn Fn() + Send + Sync>, CordisError> {
         struct State {
             last: Option<tokio::time::Instant>,
             pending: bool,
         }
-        let state = Rc::new(RefCell::new(State {
+        let state = Arc::new(Mutex::new(State {
             last: None,
             pending: false,
         }));
         let tracker = track_handles(ctx)?;
-        let throttled: Rc<dyn Fn()> = Rc::new(move || {
+        let throttled: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             let now = tokio::time::Instant::now();
             let elapsed_ok = state
-                .borrow()
+                .lock()
+                .unwrap()
                 .last
                 .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(delay));
             if elapsed_ok {
-                state.borrow_mut().last = Some(now);
-                state.borrow_mut().pending = false;
+                state.lock().unwrap().last = Some(now);
+                state.lock().unwrap().pending = false;
                 callback();
-            } else if !tracker.disposed.get() && !no_trailing && !state.borrow().pending {
-                state.borrow_mut().pending = true;
+            } else if !tracker.disposed.load(Ordering::Acquire)
+                && !no_trailing
+                && !state.lock().unwrap().pending
+            {
+                let mut state_guard = state.lock().unwrap();
+                state_guard.pending = true;
                 let deadline: tokio::time::Instant =
-                    state.borrow().last.unwrap() + Duration::from_millis(delay);
-                let state_for_task = Rc::clone(&state);
+                    state_guard.last.unwrap() + Duration::from_millis(delay);
+                drop(state_guard);
                 let callback = callback.clone();
-                let state = state_for_task;
+                let state = state.clone();
                 let disposed = tracker.disposed.clone();
                 let handle = tokio::task::spawn_local(async move {
                     tokio::time::sleep_until(deadline).await;
-                    if disposed.get() {
+                    if disposed.load(Ordering::Acquire) {
                         return;
                     }
-                    let mut state = state.borrow_mut();
+                    let mut state = state.lock().unwrap();
                     state.last = Some(tokio::time::Instant::now());
                     state.pending = false;
                     drop(state);
                     callback();
                 });
-                tracker.handles.borrow_mut().push(handle);
+                tracker.handles.lock().unwrap().push(handle);
             }
         });
         Ok(throttled)
@@ -153,27 +158,28 @@ impl TimerService {
     /// Returns a debounced callback: consecutive calls reset the timer.
     pub fn debounce(
         ctx: &cordis_core::Context,
-        callback: Rc<dyn Fn()>,
+        callback: Arc<dyn Fn() + Send + Sync>,
         delay: u64,
-    ) -> Result<Rc<dyn Fn()>, CordisError> {
-        let generation = Rc::new(Cell::new(0u64));
+    ) -> Result<Arc<dyn Fn() + Send + Sync>, CordisError> {
+        let generation = Arc::new(AtomicU64::new(0));
         let tracker = track_handles(ctx)?;
-        let debounced: Rc<dyn Fn()> = Rc::new(move || {
-            if tracker.disposed.get() {
+        let debounced: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if tracker.disposed.load(Ordering::Acquire) {
                 return;
             }
-            let next_gen = generation.get() + 1;
-            generation.set(next_gen);
+            let next_gen = generation.fetch_add(1, Ordering::AcqRel) + 1;
             let callback = callback.clone();
             let generation = generation.clone();
             let disposed = tracker.disposed.clone();
             let handle = tokio::task::spawn_local(async move {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
-                if !disposed.get() && generation.get() == next_gen {
+                if !disposed.load(Ordering::Acquire)
+                    && generation.load(Ordering::Acquire) == next_gen
+                {
                     callback();
                 }
             });
-            tracker.handles.borrow_mut().push(handle);
+            tracker.handles.lock().unwrap().push(handle);
         });
         Ok(debounced)
     }
@@ -182,20 +188,20 @@ impl TimerService {
 /// Tracks spawned timer tasks and the fiber-disposed flag (mirrors the TS
 /// `_schedule` disposer, which sets `isDisposed` and clears the timer).
 struct TimerTracker {
-    handles: Rc<RefCell<Vec<JoinHandle<()>>>>,
-    disposed: Rc<Cell<bool>>,
+    handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    disposed: Arc<AtomicBool>,
 }
 
 fn track_handles(ctx: &cordis_core::Context) -> Result<TimerTracker, CordisError> {
-    let handles: Rc<RefCell<Vec<JoinHandle<()>>>> = Rc::new(RefCell::new(Vec::new()));
-    let disposed = Rc::new(Cell::new(false));
+    let handles: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+    let disposed = Arc::new(AtomicBool::new(false));
     let tracked_handles = handles.clone();
     let tracked_disposed = disposed.clone();
     ctx.fiber().effect(
         move || {
             Effect::Disposer(sync_disposer(move || {
-                tracked_disposed.set(true);
-                for handle in tracked_handles.borrow().iter() {
+                tracked_disposed.store(true, Ordering::Release);
+                for handle in tracked_handles.lock().unwrap().iter() {
                     handle.abort();
                 }
             }))

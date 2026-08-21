@@ -10,8 +10,8 @@
 //! aligned.
 
 use std::any::Any;
-use std::cell::Cell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use cordis_core::{Context, Effect, FiberState, Plugin, Service, ShadowContext, service};
 
@@ -25,7 +25,11 @@ struct Callable;
 impl Service for Callable {
     const NAME: &'static str = "callable";
 
-    fn invoke(&self, ctx: &ShadowContext, _init: Option<&Rc<dyn Any>>) -> Option<Rc<dyn Any>> {
+    fn invoke(
+        &self,
+        ctx: &ShadowContext,
+        _init: Option<&Arc<dyn Any + Send + Sync>>,
+    ) -> Option<Arc<dyn Any + Send + Sync>> {
         // `get_str` routes to `own` — the callable's own realm, not the
         // caller's (JS: `this.ctx['dependency']` → the service shadow).
         ctx.get_str("dep")
@@ -41,7 +45,7 @@ struct Outer;
 
 #[service]
 impl Outer {
-    pub fn call(&self, ctx: &ShadowContext) -> Option<Rc<dyn Any>> {
+    pub fn call(&self, ctx: &ShadowContext) -> Option<Arc<dyn Any + Send + Sync>> {
         ctx.invoke::<Callable>(None)
     }
 }
@@ -70,24 +74,24 @@ struct Loader {
 
 #[service]
 impl Loader {
-    pub fn load(&self, ctx: &ShadowContext, plugin: &Plugin) -> Rc<cordis_core::Fiber> {
+    pub fn load(&self, ctx: &ShadowContext, plugin: &Plugin) -> Arc<cordis_core::Fiber> {
         // `plugin` derefs to the caller's context (JS: `this.ctx.plugin`
         // runs on the stripped caller ctx).
         ctx.plugin(plugin, None)
     }
 
-    pub fn load_own(&self, plugin: &Plugin) -> Rc<cordis_core::Fiber> {
+    pub fn load_own(&self, plugin: &Plugin) -> Arc<cordis_core::Fiber> {
         self.own_ctx.plugin(plugin, None)
     }
 }
 
-fn dep_string(value: &Rc<dyn Any>) -> &str {
+fn dep_string(value: &Arc<dyn Any + Send + Sync>) -> &str {
     value
         .downcast_ref::<String>()
         .map_or("<not a string>", String::as_str)
 }
 
-fn dep_owned(value: &Rc<dyn Any>) -> String {
+fn dep_owned(value: &Arc<dyn Any + Send + Sync>) -> String {
     dep_string(value).to_string()
 }
 
@@ -100,26 +104,26 @@ async fn invoke_uses_service_shadow() {
 
             let root = Context::new();
             drop(
-                root.provide_str("dep", Rc::new("root".to_string()))
+                root.provide_str("dep", Arc::new("root".to_string()))
                     .unwrap(),
             );
 
             // The callable lives in realm X, where `dep` = "x"; the callers
             // live in root / realm Y with their own `dep` values.
-            let realm_x = root.isolate("dep", Rc::from("scope-x"));
+            let realm_x = root.isolate("dep", Arc::from("scope-x"));
             drop(
                 realm_x
-                    .provide_str("dep", Rc::new("x".to_string()))
+                    .provide_str("dep", Arc::new("x".to_string()))
                     .unwrap(),
             );
-            drop(realm_x.provide::<Callable>(Rc::new(Callable)).unwrap());
-            let realm_y = root.isolate("dep", Rc::from("scope-y"));
+            drop(realm_x.provide::<Callable>(Arc::new(Callable)).unwrap());
+            let realm_y = root.isolate("dep", Arc::from("scope-y"));
             drop(
                 realm_y
-                    .provide_str("dep", Rc::new("y".to_string()))
+                    .provide_str("dep", Arc::new("y".to_string()))
                     .unwrap(),
             );
-            drop(realm_y.provide::<Outer>(Rc::new(Outer)).unwrap());
+            drop(realm_y.provide::<Outer>(Arc::new(Outer)).unwrap());
 
             // Framework entry: the callable's own shadow drives the DI
             // resolution regardless of the invoking context.
@@ -163,17 +167,17 @@ async fn bound_ctx_contract() {
 
             let root = Context::new();
             drop(
-                root.provide_str("dep", Rc::new("root".to_string()))
+                root.provide_str("dep", Arc::new("root".to_string()))
                     .unwrap(),
             );
 
-            let ctx_own = root.isolate("dep", Rc::from("own"));
+            let ctx_own = root.isolate("dep", Arc::from("own"));
             drop(
                 ctx_own
-                    .provide_str("dep", Rc::new("own".to_string()))
+                    .provide_str("dep", Arc::new("own".to_string()))
                     .unwrap(),
             );
-            drop(ctx_own.provide::<Probe>(Rc::new(Probe)).unwrap());
+            drop(ctx_own.provide::<Probe>(Arc::new(Probe)).unwrap());
 
             // The recorded shadow is the construction context.
             let shadow = root.shadow_of("probe").expect("shadow");
@@ -190,7 +194,7 @@ async fn bound_ctx_contract() {
             );
             // Isolate layers share the parent fiber, so the shadow's fiber
             // is the provider fiber (root's here).
-            assert!(Rc::ptr_eq(shadow.ctx.fiber(), root.fiber()));
+            assert!(Arc::ptr_eq(shadow.ctx.fiber(), root.fiber()));
 
             // Called through the traced handle from `root`: the accessor
             // built own from the recorded shadow, so the method resolves in
@@ -218,21 +222,21 @@ async fn caller_scoped_plugin() {
             let root = Context::new();
             #[derive(Debug)]
             struct Server;
-            drop(root.provide_str("server", Rc::new(Server)).unwrap());
+            drop(root.provide_str("server", Arc::new(Server)).unwrap());
 
             // The loader lives in a scope that cannot see `server`; only the
             // caller's scope can.
-            let loader_scope = root.isolate("server", Rc::from("loader"));
+            let loader_scope = root.isolate("server", Arc::from("loader"));
             drop(
                 loader_scope
-                    .provide::<Loader>(Rc::new(Loader {
+                    .provide::<Loader>(Arc::new(Loader {
                         own_ctx: loader_scope.clone(),
                     }))
                     .unwrap(),
             );
 
-            let applied = Rc::new(Cell::new(0u32));
-            let resolved = Rc::new(Cell::new(false));
+            let applied = Arc::new(AtomicU32::new(0));
+            let resolved = Arc::new(AtomicBool::new(false));
             let consumer = {
                 let applied = applied.clone();
                 let resolved = resolved.clone();
@@ -240,13 +244,14 @@ async fn caller_scoped_plugin() {
                     is_group: false,
                     name: None,
                     inject: vec![("server".to_string(), None)],
-                    apply: Rc::new(move |ctx: &Context, _config| {
-                        applied.set(applied.get() + 1);
+                    apply: Arc::new(move |ctx: &Context, _config| {
+                        applied.store(applied.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
                         // Mirror the `server instanceof Server` assertion in
                         // shadow.spec.ts: the resolved value must be the
                         // caller scope's Server instance.
                         if let Some(value) = ctx.get_str("server") {
-                            resolved.set(value.downcast_ref::<Server>().is_some());
+                            resolved
+                                .store(value.downcast_ref::<Server>().is_some(), Ordering::SeqCst);
                         }
                         Effect::None
                     }),
@@ -259,15 +264,18 @@ async fn caller_scoped_plugin() {
             let loader = root.loader().expect("loader");
             let fiber = loader.load(&consumer);
             fiber.wait().await.unwrap();
-            assert_eq!(applied.get(), 1);
-            assert!(resolved.get(), "server must resolve in the caller scope");
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
+            assert!(
+                resolved.load(Ordering::SeqCst),
+                "server must resolve in the caller scope"
+            );
 
             // Control: creating the plugin through the loader's own context
             // (the "un-stripped shadow" case in JS) leaves the inject
             // unresolved.
             let fiber = loader.load_own(&consumer);
-            assert_eq!(fiber.state.get(), FiberState::Pending);
-            assert_eq!(applied.get(), 1);
+            assert_eq!(fiber.state(), FiberState::Pending);
+            assert_eq!(applied.load(Ordering::SeqCst), 1);
 
             // The recorded shadow says where the loader itself belongs.
             let shadow = root.shadow_of("loader").expect("shadow");

@@ -1,9 +1,9 @@
 //! Loader-level isolate realms。
 
 use std::any::Any;
-use std::cell::Cell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{Context, Effect, sync_disposer};
 use cordis_loader::{EntryOptions, IsolateValue, Loader, PartialEntryOptions};
@@ -47,28 +47,31 @@ fn isolate_map(entries: &[(&str, IsolateValue)]) -> HashMap<String, IsolateValue
         .collect()
 }
 
-fn setup(loader: &Loader, foo_count: Rc<Cell<u32>>, dispose_count: Rc<Cell<u32>>) {
+fn setup(loader: &Loader, foo_count: Arc<AtomicU32>, dispose_count: Arc<AtomicU32>) {
     loader.mock(
         "bar",
-        Rc::new(|ctx: &Context, config: &Rc<dyn Any>| {
+        Arc::new(|ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
             let value = config
                 .downcast_ref::<serde_yaml_ng::Value>()
                 .and_then(|value| value.get("value"))
                 .and_then(|value| value.as_str())
                 .unwrap_or("default")
                 .to_string();
-            drop(ctx.provide_str("bar", Rc::new(BarValue { value })).unwrap());
+            drop(
+                ctx.provide_str("bar", Arc::new(BarValue { value }))
+                    .unwrap(),
+            );
             Effect::None
         }),
     );
     loader.mock_with_inject(
         "foo",
         vec!["bar".to_string()],
-        Rc::new(move |_ctx: &Context, _config| {
-            foo_count.set(foo_count.get() + 1);
+        Arc::new(move |_ctx: &Context, _config| {
+            foo_count.store(foo_count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
             let dispose_count = dispose_count.clone();
             Effect::Disposer(sync_disposer(move || {
-                dispose_count.set(dispose_count.get() + 1);
+                dispose_count.store(dispose_count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
             }))
         }),
     );
@@ -81,15 +84,15 @@ async fn injector_isolate_relevant_and_irrelevant() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let foo_count = Rc::new(Cell::new(0u32));
-            let dispose_count = Rc::new(Cell::new(0u32));
+            let foo_count = Arc::new(AtomicU32::new(0));
+            let dispose_count = Arc::new(AtomicU32::new(0));
             setup(&loader, foo_count.clone(), dispose_count.clone());
             let tree = loader.tree_handle();
             loader
                 .read(vec![bar_opts("1", "root"), opts("2", "foo")])
                 .await;
-            assert_eq!(foo_count.get(), 1);
-            assert_eq!(dispose_count.get(), 0);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 0);
 
             // Add isolate on the injector (relevant: bar).
             tree.update_entry(
@@ -101,8 +104,8 @@ async fn injector_isolate_relevant_and_irrelevant() {
             );
             tree.await_tree().await;
 
-            assert_eq!(foo_count.get(), 1);
-            assert_eq!(dispose_count.get(), 1);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
 
             // Add isolate (irrelevant: qux).
             tree.update_entry(
@@ -116,8 +119,8 @@ async fn injector_isolate_relevant_and_irrelevant() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(foo_count.get(), 1);
-            assert_eq!(dispose_count.get(), 1);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
 
             // Remove isolate (relevant: bar gone → re-applies).
             tree.update_entry(
@@ -128,8 +131,8 @@ async fn injector_isolate_relevant_and_irrelevant() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(foo_count.get(), 2);
-            assert_eq!(dispose_count.get(), 1);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
 
             // Remove isolate (irrelevant: qux only).
             tree.update_entry(
@@ -140,8 +143,8 @@ async fn injector_isolate_relevant_and_irrelevant() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(foo_count.get(), 2);
-            assert_eq!(dispose_count.get(), 1);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -153,14 +156,14 @@ async fn provider_isolate_relevant() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let foo_count = Rc::new(Cell::new(0u32));
-            let dispose_count = Rc::new(Cell::new(0u32));
+            let foo_count = Arc::new(AtomicU32::new(0));
+            let dispose_count = Arc::new(AtomicU32::new(0));
             setup(&loader, foo_count.clone(), dispose_count.clone());
             let tree = loader.tree_handle();
             loader
                 .read(vec![bar_opts("1", "root"), opts("2", "foo")])
                 .await;
-            assert_eq!(foo_count.get(), 1);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
 
             // Isolating the provider moves bar away from the root label.
             tree.update_entry(
@@ -171,8 +174,8 @@ async fn provider_isolate_relevant() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(foo_count.get(), 1);
-            assert_eq!(dispose_count.get(), 1);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
 
             // Removing the provider isolate restores access.
             tree.update_entry(
@@ -183,8 +186,8 @@ async fn provider_isolate_relevant() {
                 },
             );
             tree.await_tree().await;
-            assert_eq!(foo_count.get(), 2);
-            assert_eq!(dispose_count.get(), 1);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
+            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
         })
         .await;
 }
@@ -196,8 +199,8 @@ async fn realm_global_labels_share() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            let foo_count = Rc::new(Cell::new(0u32));
-            let dispose_count = Rc::new(Cell::new(0u32));
+            let foo_count = Arc::new(AtomicU32::new(0));
+            let dispose_count = Arc::new(AtomicU32::new(0));
             setup(&loader, foo_count.clone(), dispose_count.clone());
             let tree = loader.tree_handle();
 
@@ -229,9 +232,9 @@ async fn realm_global_labels_share() {
             let foo_alpha = tree.create(opts("", "foo"), Some(&alpha.id()), 0);
             let foo_beta = tree.create(opts("", "foo"), Some(&beta.id()), 0);
             tree.await_tree().await;
-            assert_eq!(foo_count.get(), 2);
+            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
 
-            let value = |fiber: &Rc<cordis_core::Fiber>| {
+            let value = |fiber: &Arc<cordis_core::Fiber>| {
                 fiber
                     .context()
                     .get_str("bar")
