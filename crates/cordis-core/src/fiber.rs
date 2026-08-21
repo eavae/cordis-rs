@@ -424,7 +424,10 @@ impl Fiber {
     /// Registers an effect on this fiber.
     ///
     /// The callback runs synchronously; async effects are awaited before the
-    /// disposer chain runs. Disposal is idempotent.
+    /// disposer chain runs. Disposal is idempotent. Panics in the callback
+    /// are contained at this boundary: the effect is disposed and the error
+    /// is returned to the caller instead of unwinding into framework state
+    /// (mirrors the `try/catch` around the TS effect registration).
     pub fn effect<F>(
         self: &Arc<Self>,
         execute: F,
@@ -909,6 +912,9 @@ impl Fiber {
     }
 
     /// Executes an effect callback and collects disposers into the handle.
+    ///
+    /// A panicking callback is converted into an error (see [`Self::effect`])
+    /// so the unwind never reaches framework state held by the caller.
     fn run_effect<F>(
         self: &Arc<Self>,
         execute: F,
@@ -930,7 +936,9 @@ impl Fiber {
             }
             handle.collect(item);
         };
-        match execute() {
+        let effect = std::panic::catch_unwind(std::panic::AssertUnwindSafe(execute))
+            .map_err(Self::panic_error)?;
+        match effect {
             Effect::None => Ok(None),
             Effect::Disposer(disposer) => {
                 collect(&fiber, handle, Disposable::Direct(disposer));
@@ -1017,7 +1025,7 @@ impl Fiber {
         };
         let effect =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(ctx, config)))
-                .map_err(Self::apply_panic_error)?;
+                .map_err(Self::panic_error)?;
         match effect {
             Effect::None => Ok(None),
             Effect::Disposer(disposer) => {
@@ -1099,14 +1107,14 @@ impl Fiber {
         }
     }
 
-    /// Converts a panicked apply callback into an error (mirrors the TS
-    /// try/catch around the plugin entry).
-    fn apply_panic_error(payload: Box<dyn Any + Send>) -> BoxError {
+    /// Converts a panicked user callback into an error (mirrors the TS
+    /// try/catch around the plugin entry and the effect registration).
+    fn panic_error(payload: Box<dyn Any + Send>) -> BoxError {
         let message = payload
             .downcast_ref::<&str>()
             .map(|message| message.to_string())
             .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "plugin apply panicked".to_string());
+            .unwrap_or_else(|| "plugin callback panicked".to_string());
         Box::new(FiberError::new(message))
     }
 }

@@ -476,6 +476,139 @@ async fn wait_survives_panicking_async_apply() {
         .await;
 }
 
+/// A panicking effect callback must be contained at the effect boundary:
+/// `effect` returns an error instead of unwinding into the caller (the TS
+/// reference rethrows inside `fiber.effect`, so callers observe the failure
+/// through the returned result).
+#[tokio::test(flavor = "current_thread")]
+async fn effect_callback_panic_is_contained() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                root.fiber().effect(|| panic!("boom"), "panicking")
+            }));
+            let result = result.expect("effect callback panic must not unwind");
+            assert!(
+                result.is_err(),
+                "a panicked effect callback must surface as an error"
+            );
+        })
+        .await;
+}
+
+/// A panicking effect callback registered from an event listener must not
+/// unwind into the dispatch machinery: the listener observes the error and
+/// later listeners still run.
+#[tokio::test(flavor = "current_thread")]
+async fn effect_callback_panic_contained_in_listener() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let seen = Arc::new(AtomicU32::new(0));
+            {
+                let root_for_listener = root.clone();
+                root.on(
+                    "ping",
+                    event_listener(move |_| {
+                        let _ = root_for_listener.effect(|| panic!("boom"), "panicking");
+                    }),
+                    EventOptions::default(),
+                )
+                .unwrap();
+            }
+            {
+                let seen = seen.clone();
+                root.on(
+                    "ping",
+                    event_listener(move |_| {
+                        seen.store(1, Ordering::SeqCst);
+                    }),
+                    EventOptions::default(),
+                )
+                .unwrap();
+            }
+            let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                root.emit("ping", &[]);
+            }));
+            assert!(
+                emitted.is_ok(),
+                "effect callback panic must not escape into emit"
+            );
+            assert_eq!(
+                seen.load(Ordering::SeqCst),
+                1,
+                "later listeners must still run"
+            );
+        })
+        .await;
+}
+
+/// A panicking effect callback inside an apply must fail only the owning
+/// fiber: its registrations are unloaded and unrelated fibers stay active.
+#[tokio::test(flavor = "current_thread")]
+async fn effect_callback_panic_fails_owning_fiber_only() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let other_applied = Arc::new(AtomicU32::new(0));
+            let fiber_a = root.plugin(
+                &Plugin {
+                    is_group: false,
+                    name: None,
+                    inject: Vec::new(),
+                    apply: Arc::new(|ctx: &Context, _config| {
+                        // Register a service first: it must be unloaded when
+                        // the fiber fails below.
+                        drop(ctx.provide::<Foo>(Arc::new(Foo)).unwrap());
+                        // An unhandled effect failure (mirrors the TS
+                        // rethrow) fails the whole apply.
+                        ctx.effect(|| panic!("boom"), "panicking").unwrap();
+                        Effect::None
+                    }),
+                },
+                None,
+            );
+            let fiber_b = {
+                let other_applied = other_applied.clone();
+                root.plugin(
+                    &Plugin {
+                        is_group: false,
+                        name: None,
+                        inject: Vec::new(),
+                        apply: Arc::new(move |_ctx: &Context, _config| {
+                            other_applied.store(1, Ordering::SeqCst);
+                            Effect::None
+                        }),
+                    },
+                    None,
+                )
+            };
+            let result =
+                tokio::time::timeout(std::time::Duration::from_millis(500), fiber_a.wait()).await;
+            assert!(
+                result.is_ok(),
+                "wait must resolve after an effect callback panic"
+            );
+            assert!(
+                result.unwrap().is_err(),
+                "a panicked effect callback must surface as an error"
+            );
+            assert_eq!(fiber_a.state(), FiberState::Failed);
+            assert!(
+                root.get_str_non_strict("foo").is_none(),
+                "a failed fiber must unload its services"
+            );
+            fiber_b.wait().await.unwrap();
+            assert_eq!(other_applied.load(Ordering::SeqCst), 1);
+            assert_eq!(fiber_b.state(), FiberState::Active);
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn fiber_update_config_while_injected_service_reloads() {
     let local = tokio::task::LocalSet::new();
