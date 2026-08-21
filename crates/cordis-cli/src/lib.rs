@@ -53,14 +53,14 @@ edition = "2024"
 [dependencies]
 cordis-cli = {{ path = "{repo}" }}
 anyhow = "1"
-tokio = {{ version = "1", features = ["rt", "macros", "time", "sync", "signal"] }}
+tokio = {{ version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "signal"] }}
 "#,
             repo = crate_path("cordis-cli")
         ),
     )?;
     std::fs::write(
         dir.join("app/src/main.rs"),
-        "fn main() -> anyhow::Result<()> {\n    // The default project watches `./plugins` and reads `./cordis.yml`.\n    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;\n    let local = tokio::task::LocalSet::new();\n    local.block_on(&runtime, async { cordis_cli::run(&Default::default()).await })\n}\n",
+        "fn main() -> anyhow::Result<()> {\n    // The default project watches `./plugins` and reads `./cordis.yml`.\n    // Phase 0 of the multithreading plan: a worker pool with a `LocalSet`,\n    // so existing `!Send` tasks stay pinned to this thread.\n    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;\n    let local = tokio::task::LocalSet::new();\n    local.block_on(&runtime, async { cordis_cli::run(&Default::default()).await })\n}\n",
     )?;
     std::fs::write(
         dir.join("cordis.yml"),

@@ -39,7 +39,10 @@ fn main() -> anyhow::Result<()> {
         config: cli.config,
         plugins_dir: cli.plugins_dir,
     };
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // Phase 0 of the multithreading plan: run the runtime on a worker pool
+    // but keep the `LocalSet`, so all existing `!Send` tasks stay pinned to
+    // this thread while blocking work can move to other workers.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let local = tokio::task::LocalSet::new();
