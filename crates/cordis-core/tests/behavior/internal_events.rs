@@ -11,8 +11,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cordis_core::{
-    Context, Effect, EventCallback, EventOptions, FiberState, Plugin, WaterfallNext,
-    event_callback, event_listener_async,
+    Context, Effect, EventCallback, EventOptions, FiberState, Plugin, event_callback,
+    event_listener_async,
 };
 
 /// Records `(mode, name, arg_count)` for `internal/dispatch` payloads.
@@ -66,9 +66,9 @@ fn internal_get_hook_overrides_dynamic_access() {
     let root = Context::new();
     assert!(root.get_str("loader").is_none(), "no loader without a hook");
 
-    let get_hook: EventCallback = event_listener_async(|args| async move {
+    let get_hook: EventCallback = event_listener_async(|args, next| async move {
         let name = args[1].downcast_ref::<String>().unwrap().clone();
-        let next = args[3].clone().downcast::<WaterfallNext>().unwrap();
+        let next = next.expect("internal/get listener invoked without `next`");
         match name.as_str() {
             "loader" => {
                 let value: Arc<dyn Any + Send + Sync> = Arc::new("mock loader".to_string());
@@ -120,11 +120,11 @@ fn internal_set_hook_intercepts_write() {
 
     let intercept = Arc::new(AtomicBool::new(false));
     let hook_intercept = intercept.clone();
-    let set_hook: EventCallback = event_listener_async(move |args| {
+    let set_hook: EventCallback = event_listener_async(move |args, next| {
         let intercept = hook_intercept.clone();
         async move {
             let name = args[1].downcast_ref::<String>().unwrap().clone();
-            let next = args[4].clone().downcast::<WaterfallNext>().unwrap();
+            let next = next.expect("internal/set listener invoked without `next`");
             match name.as_str() {
                 "foo" if intercept.load(Ordering::SeqCst) => {
                     let value: Arc<dyn Any + Send + Sync> = Arc::new(true);

@@ -260,7 +260,7 @@ async fn events_ctx_parallel_async_fan_out() {
         let log = log.clone();
         root.on(
             "async-event",
-            event_listener_async(move |_args| {
+            event_listener_async(move |_args, _next| {
                 let log = log.clone();
                 async move {
                     log.lock().unwrap().push(format!("start-{index}"));
@@ -290,7 +290,7 @@ async fn events_ctx_parallel_async_aggregates_errors() {
         let settled = settled.clone();
         root.on(
             "async-errors",
-            event_listener_async(move |_args| {
+            event_listener_async(move |_args, _next| {
                 let settled = settled.clone();
                 async move {
                     tokio::task::yield_now().await;
@@ -306,7 +306,7 @@ async fn events_ctx_parallel_async_aggregates_errors() {
     }
     root.on(
         "async-errors",
-        event_listener_async(|_args| async move {
+        event_listener_async(|_args, _next| async move {
             tokio::task::yield_now().await;
             Err(Box::<dyn Error + Send + Sync>::from(std::io::Error::other(
                 "test",
@@ -339,7 +339,7 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
         let log = log.clone();
         root.on(
             "async-serial",
-            event_listener_async(move |_args| {
+            event_listener_async(move |_args, _next| {
                 let log = log.clone();
                 async move {
                     log.lock().unwrap().push("one-start".to_string());
@@ -356,7 +356,7 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
         let log = log.clone();
         root.on(
             "async-serial",
-            event_listener_async(move |_args| {
+            event_listener_async(move |_args, _next| {
                 let log = log.clone();
                 async move {
                     log.lock().unwrap().push("two-start".to_string());
@@ -374,7 +374,7 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
         let log = log.clone();
         root.on(
             "async-serial",
-            event_listener_async(move |_args| {
+            event_listener_async(move |_args, _next| {
                 let log = log.clone();
                 async move {
                     log.lock().unwrap().push("three".to_string());
@@ -412,7 +412,7 @@ async fn events_ctx_emit_async_continues_in_background() {
                 let done = done.clone();
                 root.on(
                     "async-emit",
-                    event_listener_async(move |_args| {
+                    event_listener_async(move |_args, _next| {
                         let done = done.clone();
                         async move {
                             tokio::task::yield_now().await;
@@ -452,7 +452,7 @@ async fn events_ctx_emit_async_error_is_not_propagated() {
             let root = Context::new();
             root.on(
                 "async-emit-error",
-                event_listener_async(|_args| async move {
+                event_listener_async(|_args, _next| async move {
                     tokio::task::yield_now().await;
                     Err(Box::<dyn Error + Send + Sync>::from(std::io::Error::other(
                         "late failure",
@@ -475,7 +475,7 @@ async fn events_ctx_bail_rejects_async_listeners() {
     let root = Context::new();
     root.on(
         "async-bail",
-        event_listener_async(|_args| async move {
+        event_listener_async(|_args, _next| async move {
             tokio::task::yield_now().await;
             Ok(None)
         }),
@@ -500,7 +500,7 @@ async fn events_ctx_once_async() {
         let count = count.clone();
         root.once(
             "async-once",
-            event_listener_async(move |_args| {
+            event_listener_async(move |_args, _next| {
                 let count = count.clone();
                 async move {
                     count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
@@ -519,9 +519,9 @@ async fn events_ctx_once_async() {
 }
 
 fn waterfall_step() -> EventCallback {
-    event_listener_async(|args| async move {
+    event_listener_async(|args, next| async move {
         let value = args[0].downcast_ref::<i64>().expect("value");
-        let next = args[1].clone().downcast::<WaterfallNext>().expect("next");
+        let next = next.expect("next");
         let binding = next.next().await.expect("next result").expect("next value");
         let inner = binding.downcast_ref::<i64>().expect("i64");
         let result: Option<Arc<dyn Any + Send + Sync>> = Some(Arc::new(value + inner));
@@ -530,7 +530,7 @@ fn waterfall_step() -> EventCallback {
 }
 
 fn waterfall_stop() -> EventCallback {
-    event_listener_async(|args| async move {
+    event_listener_async(|args, _next| async move {
         let value = args[0].downcast_ref::<i64>().expect("value");
         let result: Option<Arc<dyn Any + Send + Sync>> = Some(Arc::new(*value));
         Ok(result)
@@ -546,17 +546,6 @@ fn tail_value<T: Any + Send + Sync>(value: T) -> WaterfallNext {
             )))
         })
     })
-}
-
-#[test]
-fn waterfall_next_is_one_shot() {
-    let next = tail_value(1i64);
-    drop(next.next());
-    let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| next.next()));
-    assert!(
-        second.is_err(),
-        "a waterfall `next` handle must be consumed once"
-    );
 }
 
 #[tokio::test]
@@ -600,7 +589,7 @@ async fn events_ctx_waterfall_filter() {
         let count = count.clone();
         root.on_filtered(
             "test/waterfall-filter",
-            event_listener_async(move |args| {
+            event_listener_async(move |args, _next| {
                 let count = count.clone();
                 async move {
                     count.store(count.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
@@ -666,9 +655,9 @@ async fn events_ctx_waterfall_async_chain() {
     // harness's waterfall listeners, which `await next()`).
     root.on(
         "async-waterfall",
-        event_listener_async(|args| async move {
+        event_listener_async(|args, next| async move {
             let input = args[0].downcast_ref::<String>().unwrap().clone();
-            let next = args[1].clone().downcast::<WaterfallNext>().unwrap();
+            let next = next.expect("next");
             let downstream = next.next().await.expect("next result").expect("next value");
             let value = downstream.downcast_ref::<String>().unwrap();
             tokio::task::yield_now().await;
@@ -682,9 +671,9 @@ async fn events_ctx_waterfall_async_chain() {
     // Listener 2 short-circuits without calling `next` for blocked input.
     root.on(
         "async-waterfall",
-        event_listener_async(|args| async move {
+        event_listener_async(|args, next| async move {
             let input = args[0].downcast_ref::<String>().unwrap().clone();
-            let next = args[1].clone().downcast::<WaterfallNext>().unwrap();
+            let next = next.expect("next");
             if input.contains("blocked") {
                 let result: Option<Arc<dyn Any + Send + Sync>> =
                     Some(Arc::new("** blocked **".to_string()));
@@ -753,12 +742,12 @@ async fn internal_update_hook() {
                 .context()
                 .on(
                     "internal/update",
-                    event_listener_async(move |args| {
+                    event_listener_async(move |args, next| {
                         let hook_seen = hook_seen.clone();
                         async move {
                             let config = args[0].downcast_ref::<Config>().expect("config").value;
                             hook_seen.lock().unwrap().push(("hook", config));
-                            let next = args[3].clone().downcast::<WaterfallNext>().expect("next");
+                            let next = next.expect("next");
                             let _ = next.next().await;
                             Ok(None)
                         }

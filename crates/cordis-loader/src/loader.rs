@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use cordis_core::{
-    ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service, WaterfallNext, event_callback,
+    ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service, event_callback,
     event_listener_async,
 };
 
@@ -113,12 +113,13 @@ impl Loader {
             self.ctx
                 .on(
                     "internal/update",
-                    event_listener_async(move |args| {
+                    event_listener_async(move |args, next| {
                         let loader = loader.clone();
                         async move {
                             let no_save = args[1].downcast_ref::<bool>().copied().unwrap_or(false);
                             let fiber = args[2].clone().downcast::<Fiber>().ok();
-                            let next = args[3].clone().downcast::<WaterfallNext>().expect("next");
+                            let next =
+                                next.expect("internal/update listener invoked without `next`");
                             if let Some(fiber) = fiber
                                 && !no_save
                                 && let Some(entry) = loader.find_entry_for_fiber(&fiber)
@@ -149,12 +150,13 @@ impl Loader {
             self.ctx
                 .on(
                     "internal/update",
-                    event_listener_async(move |args| {
+                    event_listener_async(move |args, next| {
                         let loader = loader.clone();
                         async move {
                             let no_save = args[1].downcast_ref::<bool>().copied().unwrap_or(false);
                             let fiber = args[2].clone().downcast::<Fiber>().ok();
-                            let next = args[3].clone().downcast::<WaterfallNext>().expect("next");
+                            let next =
+                                next.expect("internal/update listener invoked without `next`");
                             if !no_save
                                 && let Some(fiber) = fiber
                                 && let Some(entry) = loader.find_entry_for_fiber(&fiber)
