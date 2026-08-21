@@ -29,17 +29,10 @@ async fn create_remove_and_write() {
             let root = Context::new();
             let loader = Loader::new(&root);
             let writes = Arc::new(AtomicU32::new(0));
-            loader
-                .tree_handle()
-                .write_callback
-                .lock()
-                .unwrap()
-                .replace({
-                    let writes = writes.clone();
-                    Arc::new(move || {
-                        writes.store(writes.load(Ordering::SeqCst) + 1, Ordering::SeqCst)
-                    })
-                });
+            loader.tree_handle().write_callback.store(Arc::new(Some({
+                let writes = writes.clone();
+                Arc::new(move || writes.store(writes.load(Ordering::SeqCst) + 1, Ordering::SeqCst))
+            })));
             loader.mock("foo", Arc::new(|_ctx, _config| Effect::None));
 
             let tree = loader.tree_handle();

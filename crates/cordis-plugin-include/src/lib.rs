@@ -220,7 +220,7 @@ async fn mount_include(
     let tree = loader.tree_handle();
     let state_for_write = state;
     let subgroup_for_write = subgroup.clone();
-    *tree.write_callback.lock().unwrap() = Some(Arc::new(move || {
+    tree.write_callback.store(Arc::new(Some(Arc::new(move || {
         loader_ctx.emit("loader/config-update", &[]);
         if state_for_write.pending.load(Ordering::Acquire) {
             return;
@@ -235,7 +235,7 @@ async fn mount_include(
             let _ = state.write_once(&subgroup);
             state.pending.store(false, Ordering::Release);
         });
-    }));
+    }))));
 }
 
 /// Refreshes the include entry whose config file is `filename` (config file

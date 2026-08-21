@@ -112,7 +112,7 @@ pub struct EntryTree {
     /// `cordis:` builtin plugins.
     pub builtins: Arc<ArcSwap<HashMap<String, Plugin>>>,
     /// Called after every structural change (config write-back).
-    pub write_callback: Arc<Mutex<Option<WriteCallback>>>,
+    pub write_callback: ArcSwap<Option<WriteCallback>>,
     /// The root group of the tree.
     pub root: Arc<Mutex<Option<Arc<EntryGroup>>>>,
     /// Number of pending entry tasks (used by the `await` intercept).
@@ -134,7 +134,7 @@ impl EntryTree {
             enable_logs: true,
             plugins: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             builtins: Arc::new(ArcSwap::from_pointee(HashMap::new())),
-            write_callback: Arc::new(Mutex::new(None)),
+            write_callback: ArcSwap::from_pointee(None),
             root: Arc::new(Mutex::new(None)),
             tasks: Arc::new(AtomicUsize::new(0)),
             tasks_notify: Arc::new(Notify::new()),
@@ -177,9 +177,10 @@ impl EntryTree {
 
     /// Runs the write callback (mirrors `tree.write()`).
     pub fn write(&self) {
-        // Clone the callback out of the lock: user callbacks may re-enter the
-        // tree, and holding the guard across the call would self-deadlock.
-        if let Some(callback) = self.write_callback.lock().unwrap().clone() {
+        // Load the callback as a lock-free snapshot: user callbacks may
+        // re-enter the tree, and no lock is held while they run.
+        let callback = self.write_callback.load_full();
+        if let Some(callback) = callback.as_ref() {
             callback();
         }
     }
