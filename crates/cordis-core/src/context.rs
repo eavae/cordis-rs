@@ -599,9 +599,7 @@ impl Context {
         ];
         let this = self.clone();
         let name = name.to_string();
-        let tail: WaterfallNext = Arc::new(move || {
-            let this = this.clone();
-            let name = name.clone();
+        let tail = WaterfallNext::new(move || {
             Box::pin(async move {
                 Ok(this
                     .inner
@@ -791,10 +789,7 @@ impl Context {
         ];
         let this = self.clone();
         let name = name.to_string();
-        let tail: WaterfallNext = Arc::new(move || {
-            let this = this.clone();
-            let name = name.clone();
-            let value = value.clone();
+        let tail = WaterfallNext::new(move || {
             Box::pin(async move {
                 let result: Option<Arc<dyn Any + Send + Sync>> =
                     match this.set_str_impl(&name, value) {
@@ -1632,10 +1627,9 @@ impl Context {
 
     /// Runs listeners in a waterfall chain (mirrors `ctx.waterfall`).
     ///
-    /// The chain is awaited as a whole; async listeners may call the `next`
-    /// function and await it (mirrors the JS waterfall, where async
-    /// listeners make the whole chain awaitable). An optional `this_arg`
-    /// filters listeners by scope (mirrors the JS `thisArg`).
+    /// The chain is awaited as a whole; async listeners may await the
+    /// single-use `next` handle to continue the chain. An optional
+    /// `this_arg` filters listeners by scope (mirrors the JS `thisArg`).
     pub async fn waterfall(
         &self,
         event: &str,

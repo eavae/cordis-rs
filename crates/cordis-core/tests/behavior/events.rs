@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use cordis_core::{
-    AnyNext, Context, Effect, EventCallback, EventFilter, EventOptions, ListenerFilter, Plugin,
+    Context, Effect, EventCallback, EventFilter, EventOptions, ListenerFilter, Plugin,
     WaterfallNext, event_callback, event_listener, event_listener_async,
 };
 
@@ -521,8 +521,8 @@ async fn events_ctx_once_async() {
 fn waterfall_step() -> EventCallback {
     event_listener_async(|args| async move {
         let value = args[0].downcast_ref::<i64>().expect("value");
-        let next = args[1].downcast_ref::<AnyNext>().expect("next").0.clone();
-        let binding = next().await.expect("next result").expect("next value");
+        let next = args[1].clone().downcast::<WaterfallNext>().expect("next");
+        let binding = next.next().await.expect("next result").expect("next value");
         let inner = binding.downcast_ref::<i64>().expect("i64");
         let result: Option<Arc<dyn Any + Send + Sync>> = Some(Arc::new(value + inner));
         Ok(result)
@@ -537,6 +537,28 @@ fn waterfall_stop() -> EventCallback {
     })
 }
 
+/// Builds a fresh one-shot waterfall tail that resolves to `value`.
+fn tail_value<T: Any + Send + Sync>(value: T) -> WaterfallNext {
+    WaterfallNext::new(move || {
+        Box::pin(async move {
+            Ok::<Option<Arc<dyn Any + Send + Sync>>, Box<dyn Error + Send + Sync>>(Some(Arc::new(
+                value,
+            )))
+        })
+    })
+}
+
+#[test]
+fn waterfall_next_is_one_shot() {
+    let next = tail_value(1i64);
+    drop(next.next());
+    let second = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| next.next()));
+    assert!(
+        second.is_err(),
+        "a waterfall `next` handle must be consumed once"
+    );
+}
+
 #[tokio::test]
 async fn events_ctx_waterfall() {
     let root = Context::new();
@@ -548,18 +570,7 @@ async fn events_ctx_waterfall() {
         .unwrap();
 
     let result = root
-        .waterfall(
-            "test/waterfall",
-            &[Arc::new(1i64)],
-            None,
-            Arc::new(|| {
-                Box::pin(async {
-                    Ok::<Option<Arc<dyn Any + Send + Sync>>, Box<dyn Error + Send + Sync>>(Some(
-                        Arc::new(2i64),
-                    ))
-                })
-            }),
-        )
+        .waterfall("test/waterfall", &[Arc::new(1i64)], None, tail_value(2i64))
         .await
         .unwrap()
         .expect("result");
@@ -574,18 +585,7 @@ async fn events_ctx_waterfall() {
     root.on("test/waterfall", cb4, EventOptions::default())
         .unwrap();
     let result = root
-        .waterfall(
-            "test/waterfall",
-            &[Arc::new(1i64)],
-            None,
-            Arc::new(|| {
-                Box::pin(async {
-                    Ok::<Option<Arc<dyn Any + Send + Sync>>, Box<dyn Error + Send + Sync>>(Some(
-                        Arc::new(2i64),
-                    ))
-                })
-            }),
-        )
+        .waterfall("test/waterfall", &[Arc::new(1i64)], None, tail_value(2i64))
         .await
         .unwrap()
         .expect("result");
@@ -615,21 +615,13 @@ async fn events_ctx_waterfall_filter() {
         .unwrap();
     }
 
-    let tail: WaterfallNext = Arc::new(|| {
-        Box::pin(async {
-            Ok::<Option<Arc<dyn Any + Send + Sync>>, Box<dyn Error + Send + Sync>>(Some(Arc::new(
-                1i64,
-            )))
-        })
-    });
-
     // Unfiltered: the scoped listener receives the event.
     let result = root
         .waterfall(
             "test/waterfall-filter",
             &[Arc::new(1i64)],
             None,
-            tail.clone(),
+            tail_value(1i64),
         )
         .await
         .unwrap()
@@ -644,7 +636,7 @@ async fn events_ctx_waterfall_filter() {
             "test/waterfall-filter",
             &[Arc::new(1i64)],
             Some(&Session { flag: false }),
-            tail.clone(),
+            tail_value(1i64),
         )
         .await
         .unwrap()
@@ -658,7 +650,7 @@ async fn events_ctx_waterfall_filter() {
             "test/waterfall-filter",
             &[Arc::new(1i64)],
             Some(&Session { flag: true }),
-            tail,
+            tail_value(1i64),
         )
         .await
         .unwrap()
@@ -676,8 +668,8 @@ async fn events_ctx_waterfall_async_chain() {
         "async-waterfall",
         event_listener_async(|args| async move {
             let input = args[0].downcast_ref::<String>().unwrap().clone();
-            let next = args[1].downcast_ref::<AnyNext>().unwrap().0.clone();
-            let downstream = next().await.expect("next result").expect("next value");
+            let next = args[1].clone().downcast::<WaterfallNext>().unwrap();
+            let downstream = next.next().await.expect("next result").expect("next value");
             let value = downstream.downcast_ref::<String>().unwrap();
             tokio::task::yield_now().await;
             let result: Option<Arc<dyn Any + Send + Sync>> =
@@ -692,51 +684,37 @@ async fn events_ctx_waterfall_async_chain() {
         "async-waterfall",
         event_listener_async(|args| async move {
             let input = args[0].downcast_ref::<String>().unwrap().clone();
-            let next = args[1].downcast_ref::<AnyNext>().unwrap().0.clone();
+            let next = args[1].clone().downcast::<WaterfallNext>().unwrap();
             if input.contains("blocked") {
                 let result: Option<Arc<dyn Any + Send + Sync>> =
                     Some(Arc::new("** blocked **".to_string()));
                 Ok(result)
             } else {
-                next().await
+                next.next().await
             }
         }),
         EventOptions::default(),
     )
     .unwrap();
 
-    let tail: WaterfallNext = Arc::new(|| {
-        Box::pin(async {
-            Ok::<Option<Arc<dyn Any + Send + Sync>>, Box<dyn Error + Send + Sync>>(Some(Arc::new(
-                "hello".to_string(),
-            )))
-        })
-    });
     let result = root
         .waterfall(
             "async-waterfall",
             &[Arc::new("hello".to_string())],
             None,
-            tail,
+            tail_value("hello".to_string()),
         )
         .await
         .unwrap()
         .expect("result");
     assert_eq!(result.downcast_ref::<String>().unwrap(), "[hello] hello");
 
-    let tail: WaterfallNext = Arc::new(|| {
-        Box::pin(async {
-            Ok::<Option<Arc<dyn Any + Send + Sync>>, Box<dyn Error + Send + Sync>>(Some(Arc::new(
-                "fallback".to_string(),
-            )))
-        })
-    });
     let result = root
         .waterfall(
             "async-waterfall",
             &[Arc::new("blocked words".to_string())],
             None,
-            tail,
+            tail_value("fallback".to_string()),
         )
         .await
         .unwrap()
@@ -780,8 +758,8 @@ async fn internal_update_hook() {
                         async move {
                             let config = args[0].downcast_ref::<Config>().expect("config").value;
                             hook_seen.lock().unwrap().push(("hook", config));
-                            let next = args[3].downcast_ref::<AnyNext>().expect("next").0.clone();
-                            let _ = next().await;
+                            let next = args[3].clone().downcast::<WaterfallNext>().expect("next");
+                            let _ = next.next().await;
                             Ok(None)
                         }
                     }),

@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use cordis_core::{
-    AnyNext, ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service, event_callback,
+    ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service, WaterfallNext, event_callback,
     event_listener_async,
 };
 
@@ -118,7 +118,7 @@ impl Loader {
                         async move {
                             let no_save = args[1].downcast_ref::<bool>().copied().unwrap_or(false);
                             let fiber = args[2].clone().downcast::<Fiber>().ok();
-                            let next = args[3].downcast_ref::<AnyNext>().expect("next").0.clone();
+                            let next = args[3].clone().downcast::<WaterfallNext>().expect("next");
                             if let Some(fiber) = fiber
                                 && !no_save
                                 && let Some(entry) = loader.find_entry_for_fiber(&fiber)
@@ -131,7 +131,7 @@ impl Loader {
                                 *entry.options.lock().unwrap() = options;
                                 entry.tree.write();
                             }
-                            let _ = next().await;
+                            let _ = next.next().await;
                             Ok(None)
                         }
                     }),
@@ -154,7 +154,7 @@ impl Loader {
                         async move {
                             let no_save = args[1].downcast_ref::<bool>().copied().unwrap_or(false);
                             let fiber = args[2].clone().downcast::<Fiber>().ok();
-                            let next = args[3].downcast_ref::<AnyNext>().expect("next").0.clone();
+                            let next = args[3].clone().downcast::<WaterfallNext>().expect("next");
                             if !no_save
                                 && let Some(fiber) = fiber
                                 && let Some(entry) = loader.find_entry_for_fiber(&fiber)
@@ -162,7 +162,7 @@ impl Loader {
                             {
                                 loader.show_log("reload", &entry);
                             }
-                            let _ = next().await;
+                            let _ = next.next().await;
                             Ok(None)
                         }
                     }),

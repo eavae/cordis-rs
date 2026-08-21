@@ -11,8 +11,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cordis_core::{
-    AnyNext, Context, Effect, EventCallback, EventOptions, FiberState, Plugin, event_callback,
-    event_listener_async,
+    Context, Effect, EventCallback, EventOptions, FiberState, Plugin, WaterfallNext,
+    event_callback, event_listener_async,
 };
 
 /// Records `(mode, name, arg_count)` for `internal/dispatch` payloads.
@@ -68,7 +68,7 @@ fn internal_get_hook_overrides_dynamic_access() {
 
     let get_hook: EventCallback = event_listener_async(|args| async move {
         let name = args[1].downcast_ref::<String>().unwrap().clone();
-        let next = args[3].downcast_ref::<AnyNext>().unwrap().0.clone();
+        let next = args[3].clone().downcast::<WaterfallNext>().unwrap();
         match name.as_str() {
             "loader" => {
                 let value: Arc<dyn Any + Send + Sync> = Arc::new("mock loader".to_string());
@@ -78,7 +78,7 @@ fn internal_get_hook_overrides_dynamic_access() {
                 let value: Arc<dyn Any + Send + Sync> = Arc::new("overridden".to_string());
                 Ok(Some(value))
             }
-            _ => next().await,
+            _ => next.next().await,
         }
     });
     drop(
@@ -124,7 +124,7 @@ fn internal_set_hook_intercepts_write() {
         let intercept = hook_intercept.clone();
         async move {
             let name = args[1].downcast_ref::<String>().unwrap().clone();
-            let next = args[4].downcast_ref::<AnyNext>().unwrap().0.clone();
+            let next = args[4].clone().downcast::<WaterfallNext>().unwrap();
             match name.as_str() {
                 "foo" if intercept.load(Ordering::SeqCst) => {
                     let value: Arc<dyn Any + Send + Sync> = Arc::new(true);
@@ -134,7 +134,7 @@ fn internal_set_hook_intercepts_write() {
                     let value: Arc<dyn Any + Send + Sync> = Arc::new(false);
                     Ok(Some(value))
                 }
-                _ => next().await,
+                _ => next.next().await,
             }
         }
     });

@@ -4,10 +4,13 @@
 //! Listeners may be synchronous or asynchronous. `parallel` starts every
 //! listener before awaiting any of them, `serial` awaits them in order and
 //! `waterfall` awaits the whole chain; `emit` and `bail` stay synchronous
-//! (as in Cordis) and consume only the first poll of a listener future.
+//! (as in Cordis) and consume only the first poll of a listener future. In
+//! `waterfall` each listener receives a single-use `next` handle: calling it
+//! consumes the continuation and forwards to the next listener, so a
+//! listener either continues the chain or terminates it.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
@@ -93,14 +96,49 @@ where
     })
 }
 
-/// The `next` function handed to waterfall listeners.
-///
-/// Resolves to the downstream listener's result; the chain is driven by
-/// whoever awaits the returned future.
-pub type WaterfallNext = Arc<dyn Fn() -> BoxFuture<'static, ListenerResult> + Send + Sync>;
-
 /// The result type of a listener invocation.
-type ListenerResult = Result<Option<Arc<dyn Any + Send + Sync>>, BoxError>;
+pub type ListenerResult = Result<Option<Arc<dyn Any + Send + Sync>>, BoxError>;
+
+/// A one-shot waterfall continuation.
+type WaterfallContinuation = Box<dyn FnOnce() -> BoxFuture<'static, ListenerResult> + Send>;
+
+/// The single-use `next` handle handed to waterfall listeners.
+///
+/// Calling [`next`](Self::next) consumes the continuation and resolves to
+/// the downstream listener's result; the chain is driven by whoever awaits
+/// the returned future. Unlike the JS `next`, the handle is one-shot: a
+/// waterfall listener either forwards to the next listener or terminates
+/// the chain, never both. Calling it twice is a programming error.
+pub struct WaterfallNext {
+    inner: Mutex<Option<WaterfallContinuation>>,
+}
+
+impl WaterfallNext {
+    /// Wraps a one-shot continuation.
+    pub fn new<F>(inner: F) -> Self
+    where
+        F: FnOnce() -> BoxFuture<'static, ListenerResult> + Send + 'static,
+    {
+        Self {
+            inner: Mutex::new(Some(Box::new(inner))),
+        }
+    }
+
+    /// Runs the continuation, consuming the handle's payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called more than once on the same handle.
+    pub fn next(&self) -> BoxFuture<'static, ListenerResult> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap()
+            .take()
+            .expect("waterfall `next` called more than once");
+        inner()
+    }
+}
 
 /// Polls a listener future once with a no-op waker.
 ///
@@ -111,10 +149,6 @@ pub(crate) fn poll_once(future: &mut BoxFuture<'static, ListenerResult>) -> Poll
     let mut cx = TaskContext::from_waker(waker);
     future.as_mut().poll(&mut cx)
 }
-
-/// Boxes a [`WaterfallNext`] so it can travel inside `Arc<dyn Any + Send + Sync>` args.
-#[derive(Clone)]
-pub struct AnyNext(pub WaterfallNext);
 
 /// Event name → listeners table.
 type HookTable = Arc<ArcSwap<HashMap<String, Vec<Hook>>>>;
@@ -425,11 +459,14 @@ impl EventsService {
     }
 
     /// Runs listeners in a waterfall chain; each listener receives `args`
-    /// plus a `next` function, and the last call falls back to `tail`.
+    /// plus a single-use `next` handle, and the last call falls back to
+    /// `tail`.
     ///
     /// The chain is awaited as a whole: listeners may be asynchronous and
-    /// `next()` returns a future (mirrors the JS waterfall, where async
-    /// listeners make the whole chain awaitable). An optional `this_arg`
+    /// awaiting `next` continues the chain. The handle is one-shot: a
+    /// listener either calls it (forwarding to the next listener) or
+    /// terminates the chain by returning without calling it (unlike the JS
+    /// `next`, which could be invoked repeatedly). An optional `this_arg`
     /// filters listeners by scope (mirrors the JS `thisArg`).
     pub fn waterfall(
         &self,
@@ -442,27 +479,21 @@ impl EventsService {
         let mut callbacks = self
             .resolve("waterfall", event, args, this_arg, ctx)
             .into_iter()
-            .collect::<Vec<_>>();
-        let first = if callbacks.is_empty() {
-            None
-        } else {
-            Some(callbacks.remove(0))
-        };
-        let callbacks = Arc::new(Mutex::new(callbacks));
+            .collect::<VecDeque<_>>();
+        let first = callbacks.pop_front();
         let args = args.to_vec();
-        let args_for_inner = args.clone();
         Box::pin(async move {
             match first {
                 Some(callback) => {
-                    let inner: WaterfallNext = Arc::new(move || {
-                        run_waterfall_step(callbacks.clone(), args_for_inner.clone(), tail.clone())
+                    let args_for_inner = args.clone();
+                    let next = WaterfallNext::new(move || {
+                        run_waterfall_step(callbacks, args_for_inner, tail)
                     });
                     let mut next_args = args.clone();
-                    let next_any: Arc<dyn Any + Send + Sync> = Arc::new(AnyNext(inner));
-                    next_args.push(next_any);
+                    next_args.push(Arc::new(next));
                     callback(&next_args).await
                 }
-                None => tail().await,
+                None => tail.next().await,
             }
         })
     }
@@ -630,24 +661,21 @@ impl EventsService {
 }
 
 pub(crate) fn run_waterfall_step(
-    callbacks: Arc<Mutex<Vec<EventCallback>>>,
+    mut callbacks: VecDeque<EventCallback>,
     args: Vec<Arc<dyn Any + Send + Sync>>,
     tail: WaterfallNext,
 ) -> BoxFuture<'static, ListenerResult> {
+    let next_callback = callbacks.pop_front();
     Box::pin(async move {
-        let next_callback = callbacks.lock().unwrap().first().cloned();
         if let Some(callback) = next_callback {
-            callbacks.lock().unwrap().remove(0);
             let args_for_inner = args.clone();
-            let inner: WaterfallNext = Arc::new(move || {
-                run_waterfall_step(callbacks.clone(), args_for_inner.clone(), tail.clone())
-            });
+            let next =
+                WaterfallNext::new(move || run_waterfall_step(callbacks, args_for_inner, tail));
             let mut next_args = args.clone();
-            let next_any: Arc<dyn Any + Send + Sync> = Arc::new(AnyNext(inner));
-            next_args.push(next_any);
+            next_args.push(Arc::new(next));
             callback(&next_args).await
         } else {
-            tail().await
+            tail.next().await
         }
     })
 }

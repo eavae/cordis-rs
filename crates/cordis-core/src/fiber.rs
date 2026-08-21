@@ -1,7 +1,7 @@
 //! Fiber lifecycle state machine and effect executor.
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::future::poll_fn;
@@ -564,11 +564,11 @@ impl Fiber {
             }
             // Service-level global hooks first (e.g. the loader's write-back
             // hooks), then fiber-level hooks.
-            let mut callbacks: Vec<EventCallback> = {
+            let mut callbacks: VecDeque<EventCallback> = {
                 let events = this.ctx.get_service::<crate::EventsService>("events");
                 match events {
-                    Some(events) => events.global_internal_update_hooks(),
-                    None => Vec::new(),
+                    Some(events) => VecDeque::from(events.global_internal_update_hooks()),
+                    None => VecDeque::new(),
                 }
             };
             let fiber_hooks = this
@@ -583,14 +583,11 @@ impl Fiber {
             let this_for_tail = this.clone();
             let config_for_tail = config.clone();
             let applied_for_tail = applied.clone();
-            let tail: WaterfallNext = Arc::new(move || {
-                let this = this_for_tail.clone();
-                let config = config_for_tail.clone();
-                let applied = applied_for_tail.clone();
+            let tail = WaterfallNext::new(move || {
                 Box::pin(async move {
-                    *this.config.lock().unwrap() = config;
-                    *this.error.lock().unwrap() = None;
-                    applied.store(true, Ordering::Release);
+                    *this_for_tail.config.lock().unwrap() = config_for_tail;
+                    *this_for_tail.error.lock().unwrap() = None;
+                    applied_for_tail.store(true, Ordering::Release);
                     Ok(None)
                 })
             });
@@ -602,7 +599,6 @@ impl Fiber {
                     fiber_any
                 },
             ];
-            let callbacks = Arc::new(Mutex::new(callbacks));
             let _ = run_waterfall_step(callbacks, args, tail).await;
             if applied.load(Ordering::Acquire) {
                 this.restart().await
