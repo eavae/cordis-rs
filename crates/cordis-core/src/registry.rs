@@ -157,7 +157,7 @@ impl RegistryService {
                     .map(|(name, config)| (name.clone(), config.clone()))
                     .collect(),
             ),
-            runtime: Mutex::new(Some(runtime.clone())),
+            runtime: Some(runtime.clone()),
             error: Mutex::new(None),
             epoch: Mutex::new(Epoch::Inactive),
             resolved: Mutex::new(HashMap::new()),
@@ -379,7 +379,7 @@ async fn unregister_dispose(fiber: Arc<Fiber>) {
         let _ = parent_events_emit(parent, &fiber);
     }
     let remove = {
-        let runtime = fiber.runtime.lock().unwrap().clone();
+        let runtime = fiber.runtime.clone();
         let Some(runtime) = runtime else {
             return;
         };
@@ -392,8 +392,9 @@ async fn unregister_dispose(fiber: Arc<Fiber>) {
         (fibers.is_empty(), registry, key)
     };
     if remove.0 {
-        // All guards are dropped before touching the registry again, so the
-        // runtime removal never re-locks `fiber.runtime` while it is held.
+        // The `fibers` and `registry` guards are scoped to the block above,
+        // so the runtime removal below never touches them while they are
+        // held.
         if let Some(registry) = remove.1.as_ref().and_then(Weak::upgrade) {
             registry.remove_runtime_by_key(remove.2);
         }

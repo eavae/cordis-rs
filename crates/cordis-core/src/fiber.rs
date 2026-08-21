@@ -326,7 +326,7 @@ pub struct Fiber {
     /// Declared inject dependencies: name → config.
     pub inject: Mutex<HashMap<String, Option<Arc<dyn Any + Send + Sync>>>>,
     /// The plugin runtime this fiber belongs to.
-    pub(crate) runtime: Mutex<Option<Arc<Runtime>>>,
+    pub(crate) runtime: Option<Arc<Runtime>>,
     /// Error captured from the last apply attempt.
     pub error: Mutex<Option<BoxError>>,
     /// Current inject-resolution epoch.
@@ -357,7 +357,7 @@ impl Fiber {
             config: Mutex::new(None),
             state: AtomicU8::new(FiberState::Active as u8),
             inject: Mutex::new(HashMap::new()),
-            runtime: Mutex::new(None),
+            runtime: None,
             error: Mutex::new(None),
             epoch: Mutex::new(Epoch::Active(String::new())),
             resolved: Mutex::new(HashMap::new()),
@@ -396,13 +396,7 @@ impl Fiber {
     pub fn name(&self) -> String {
         let mut fiber: Option<&Self> = Some(self);
         while let Some(current) = fiber {
-            if let Some(name) = current
-                .runtime
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|r| r.name.clone())
-            {
+            if let Some(name) = current.runtime.as_ref().and_then(|r| r.name.clone()) {
                 return name;
             }
             fiber = current.parent.as_ref().map(|parent| &**parent.fiber());
@@ -754,7 +748,7 @@ impl Fiber {
     async fn reload(self: Arc<Self>) {
         let target = self.epoch.lock().unwrap().clone();
         let task = {
-            let runtime = self.runtime.lock().unwrap().clone();
+            let runtime = self.runtime.clone();
             match runtime {
                 Some(runtime) => {
                     let ctx = Context {
