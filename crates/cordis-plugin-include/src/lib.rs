@@ -158,7 +158,7 @@ pub fn include_plugin() -> Plugin {
                 } else {
                     let subgroup = EntryGroup::new(
                         loader.tree_handle(),
-                        entry.ctx.lock().unwrap().clone(),
+                        entry.ctx.clone(),
                         Some(entry.parent.lock().unwrap().clone()),
                     );
                     *subgroup.entry.lock().unwrap() = Some(entry.clone());
@@ -193,8 +193,6 @@ async fn mount_include(
             } else {
                 entry
                     .ctx
-                    .lock()
-                    .unwrap()
                     .logger()
                     .error(format!("config file not found: {}", filename.display()));
                 Vec::new()
@@ -204,7 +202,7 @@ async fn mount_include(
     let patched = apply_patches(
         data,
         config.patches.as_deref().unwrap_or_default(),
-        &entry.ctx.lock().unwrap(),
+        &entry.ctx,
     );
     loader.read_group(subgroup, patched).await;
 
@@ -269,7 +267,7 @@ pub async fn refresh_include_file(loader: &Loader, filename: &Path) -> bool {
         let patched = apply_patches(
             data,
             config.patches.as_deref().unwrap_or_default(),
-            &entry.ctx.lock().unwrap(),
+            &entry.ctx,
         );
 
         loader.read_group(&subgroup, patched).await;

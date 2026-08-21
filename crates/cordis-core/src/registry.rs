@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use crate::context::{Context, ContextInner, InterceptLayer};
+use crate::context::{Context, ContextInner, OverlayLayer};
 use crate::error::ConfigValidator;
 use crate::events::EventFilter;
 use crate::fiber::{Epoch, Fiber, FiberState};
@@ -348,8 +348,8 @@ fn build_child_inner(
     parent: &Context,
     inject: &[(String, Option<Arc<dyn Any + Send + Sync>>)],
 ) -> Arc<ContextInner> {
-    let intercept = if inject.is_empty() {
-        parent.inner.intercept.clone()
+    let overlay = if inject.is_empty() {
+        parent.inner.overlay.clone()
     } else {
         let entries = inject
             .iter()
@@ -358,11 +358,10 @@ fn build_child_inner(
                 Some((name.clone(), config))
             })
             .collect();
-        InterceptLayer::with(entries, Some(parent.inner.intercept.clone()))
+        OverlayLayer::with(HashMap::new(), entries, Some(parent.inner.overlay.clone()))
     };
     Arc::new(ContextInner {
-        isolate: parent.inner.isolate.clone(),
-        intercept,
+        overlay,
         store: parent.inner.store.clone(),
         write_lock: parent.inner.write_lock.clone(),
         meta: Mutex::new(parent.inner.meta.lock().unwrap().clone()),

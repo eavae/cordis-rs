@@ -232,7 +232,7 @@ impl Loader {
         self.tree
             .entries()
             .into_iter()
-            .find(|entry| parent.shares_inner(&entry.ctx.lock().unwrap()))
+            .find(|entry| parent.shares_inner(&entry.ctx))
     }
 
     /// Whether `fiber` is the root fiber of `entry` (mirrors
@@ -271,7 +271,7 @@ impl Loader {
                         } else {
                             let subgroup = EntryGroup::new(
                                 loader.tree_handle(),
-                                entry.ctx.lock().unwrap().clone(),
+                                entry.ctx.clone(),
                                 Some(entry.parent.lock().unwrap().clone()),
                             );
                             *subgroup.entry.lock().unwrap() = Some(entry.clone());

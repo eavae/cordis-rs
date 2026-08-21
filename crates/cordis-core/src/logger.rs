@@ -371,10 +371,10 @@ impl LoggerService {
     /// Resolves the effective level from the intercept config.
     pub(crate) fn intercept_config(&self, ctx: &Context) -> LoggerIntercept {
         let mut configs: Vec<Arc<dyn Any + Send + Sync>> = Vec::new();
-        let mut layer = Some(ctx.inner.intercept.clone());
+        let mut layer = Some(ctx.inner.overlay.clone());
         while let Some(current) = layer {
             let state = current.load();
-            if let Some(config) = state.entries.get("logger") {
+            if let Some(config) = state.intercept.get("logger") {
                 configs.push(config.clone());
             }
             layer = state.parent.clone();

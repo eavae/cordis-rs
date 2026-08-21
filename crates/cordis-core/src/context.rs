@@ -1,12 +1,14 @@
 //! Context: the object every plugin receives.
 //!
-//! A [`Context`] owns a shareable [`Fiber`], a shared service
-//! store and two immutable chain layers:
+//! A [`Context`] owns a shareable [`Fiber`], a shared service store and one
+//! shared *overlay* chain.
 //!
-//! - the *isolate* chain maps service names to labels. Services provided in
-//!   an isolated context are only visible to contexts that share the label;
-//! - the *intercept* chain collects per-service config overrides that are
-//!   merged by [`Context::resolve_config`].
+//! Each overlay layer carries both the isolate labels (service names → labels;
+//! services provided in an isolated context are only visible to contexts that
+//! share the label) and the intercept overrides (per-service config merged by
+//! [`Context::resolve_config`]). Keeping the two maps in a single layer lets
+//! an overlay reconfiguration publish one atomic snapshot instead of two
+//! independent stores.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -68,41 +70,64 @@ struct SetError(String);
 /// in the TS reference).
 pub type Label = Arc<str>;
 
-/// One immutable layer of the isolate chain.
-pub(crate) struct IsolateLayer {
-    state: ArcSwap<IsolateState>,
+/// One shared layer of the overlay chain: both the isolate labels and the
+/// intercept overrides visible from a context.
+pub(crate) struct OverlayLayer {
+    state: ArcSwap<OverlayState>,
 }
 
-/// The mutable part of an isolate layer; replaced atomically on change.
+/// The mutable part of an overlay layer; replaced atomically on change.
 #[derive(Clone, Debug, Default)]
-struct IsolateState {
-    entries: HashMap<String, Label>,
-    parent: Option<Arc<IsolateLayer>>,
+pub(crate) struct OverlayState {
+    pub(crate) isolate: HashMap<String, Label>,
+    pub(crate) intercept: HashMap<String, Arc<dyn Any + Send + Sync>>,
+    pub(crate) parent: Option<Arc<OverlayLayer>>,
 }
 
-impl Default for IsolateLayer {
+impl Default for OverlayLayer {
     fn default() -> Self {
         Self {
-            state: ArcSwap::from_pointee(IsolateState::default()),
+            state: ArcSwap::from_pointee(OverlayState::default()),
         }
     }
 }
 
-impl std::fmt::Debug for IsolateLayer {
+impl std::fmt::Debug for OverlayLayer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IsolateLayer")
+        f.debug_struct("OverlayLayer")
             .field("state", &self.state.load_full())
             .finish()
     }
 }
 
-impl IsolateLayer {
-    fn lookup(&self, name: &str) -> Option<Label> {
+impl OverlayLayer {
+    /// Loads the current snapshot.
+    pub(crate) fn load(&self) -> Arc<OverlayState> {
+        self.state.load_full()
+    }
+
+    /// Creates a layer with the given entries and parent chain.
+    pub(crate) fn with(
+        isolate: HashMap<String, Label>,
+        intercept: HashMap<String, Arc<dyn Any + Send + Sync>>,
+        parent: Option<Arc<Self>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            state: ArcSwap::from_pointee(OverlayState {
+                isolate,
+                intercept,
+                parent,
+            }),
+        })
+    }
+
+    /// Resolves the isolate label for `name` along the chain.
+    fn lookup_isolate(&self, name: &str) -> Option<Label> {
         let state = self.state.load_full();
-        if let Some(label) = state.entries.get(name) {
+        if let Some(label) = state.isolate.get(name) {
             return Some(label.clone());
         }
-        state.parent.as_ref()?.lookup(name)
+        state.parent.as_ref()?.lookup_isolate(name)
     }
 
     /// Returns the bottom-most (root) layer of the chain.
@@ -117,103 +142,57 @@ impl IsolateLayer {
         }
     }
 
-    fn insert(&self, name: &str, label: Label) {
+    fn insert_isolate(&self, name: &str, label: Label) {
         let mut state = (*self.state.load_full()).clone();
-        state.entries.insert(name.to_string(), label);
+        state.isolate.insert(name.to_string(), label);
         self.state.store(Arc::new(state));
     }
 
-    fn remove(&self, name: &str) {
+    fn remove_isolate(&self, name: &str) {
         let mut state = (*self.state.load_full()).clone();
-        state.entries.remove(name);
+        state.isolate.remove(name);
         self.state.store(Arc::new(state));
     }
 
-    fn clear(&self) {
+    fn clear_isolate(&self) {
         let mut state = (*self.state.load_full()).clone();
-        state.entries.clear();
+        state.isolate.clear();
         self.state.store(Arc::new(state));
     }
 
-    /// Creates a layer with the given entries and parent chain.
-    fn with(entries: HashMap<String, Label>, parent: Option<Arc<Self>>) -> Arc<Self> {
-        Arc::new(Self {
-            state: ArcSwap::from_pointee(IsolateState { entries, parent }),
-        })
+    fn insert_intercept(&self, name: &str, config: Arc<dyn Any + Send + Sync>) {
+        let mut state = (*self.state.load_full()).clone();
+        state.intercept.insert(name.to_string(), config);
+        self.state.store(Arc::new(state));
+    }
+
+    fn remove_intercept(&self, name: &str) {
+        let mut state = (*self.state.load_full()).clone();
+        state.intercept.remove(name);
+        self.state.store(Arc::new(state));
+    }
+
+    fn clear_intercept(&self) {
+        let mut state = (*self.state.load_full()).clone();
+        state.intercept.clear();
+        self.state.store(Arc::new(state));
+    }
+
+    /// Atomically replaces both maps of the top layer (single snapshot
+    /// store: readers never observe a half-applied reconfiguration).
+    fn replace(
+        &self,
+        isolate: HashMap<String, Label>,
+        intercept: HashMap<String, Arc<dyn Any + Send + Sync>>,
+    ) {
+        let mut state = (*self.state.load_full()).clone();
+        state.isolate = isolate;
+        state.intercept = intercept;
+        self.state.store(Arc::new(state));
     }
 
     /// Re-points the parent chain (mirrors `Object.setPrototypeOf`).
     fn set_parent(&self, parent: Option<Arc<Self>>) {
-        let mut state = (*self.state.load_full()).clone();
-        state.parent = parent;
-        self.state.store(Arc::new(state));
-    }
-}
-
-/// One immutable layer of the intercept chain.
-pub(crate) struct InterceptLayer {
-    state: ArcSwap<InterceptState>,
-}
-
-/// The mutable part of an intercept layer; replaced atomically on change.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct InterceptState {
-    pub(crate) entries: HashMap<String, Arc<dyn Any + Send + Sync>>,
-    pub(crate) parent: Option<Arc<InterceptLayer>>,
-}
-
-impl Default for InterceptLayer {
-    fn default() -> Self {
-        Self {
-            state: ArcSwap::from_pointee(InterceptState::default()),
-        }
-    }
-}
-
-impl std::fmt::Debug for InterceptLayer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InterceptLayer")
-            .field("state", &self.state.load_full())
-            .finish()
-    }
-}
-
-impl InterceptLayer {
-    /// Loads the current snapshot.
-    pub(crate) fn load(&self) -> Arc<InterceptState> {
-        self.state.load_full()
-    }
-
-    /// Creates a layer with the given entries and parent chain.
-    pub(crate) fn with(
-        entries: HashMap<String, Arc<dyn Any + Send + Sync>>,
-        parent: Option<Arc<Self>>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            state: ArcSwap::from_pointee(InterceptState { entries, parent }),
-        })
-    }
-
-    pub(crate) fn insert(&self, name: &str, config: Arc<dyn Any + Send + Sync>) {
-        let mut state = (*self.state.load_full()).clone();
-        state.entries.insert(name.to_string(), config);
-        self.state.store(Arc::new(state));
-    }
-
-    pub(crate) fn remove(&self, name: &str) {
-        let mut state = (*self.state.load_full()).clone();
-        state.entries.remove(name);
-        self.state.store(Arc::new(state));
-    }
-
-    pub(crate) fn clear(&self) {
-        let mut state = (*self.state.load_full()).clone();
-        state.entries.clear();
-        self.state.store(Arc::new(state));
-    }
-
-    /// Re-points the parent chain (mirrors `Object.setPrototypeOf`).
-    pub(crate) fn set_parent(&self, parent: Option<Arc<Self>>) {
         let mut state = (*self.state.load_full()).clone();
         state.parent = parent;
         self.state.store(Arc::new(state));
@@ -252,8 +231,7 @@ pub(crate) struct Store {
 
 /// Shared inner state of a [`Context`].
 pub(crate) struct ContextInner {
-    pub isolate: Arc<IsolateLayer>,
-    pub intercept: Arc<InterceptLayer>,
+    pub overlay: Arc<OverlayLayer>,
     pub store: Arc<ArcSwap<Store>>,
     /// Serializes compound snapshot mutations (store / props / layer writes).
     /// Never held while dispatching events or running effects. Reads stay
@@ -269,8 +247,7 @@ pub(crate) struct ContextInner {
 impl std::fmt::Debug for ContextInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ContextInner")
-            .field("isolate", &self.isolate)
-            .field("intercept", &self.intercept)
+            .field("overlay", &self.overlay)
             .field("store", &self.store.load_full())
             .field("meta", &self.meta.lock().unwrap())
             .finish_non_exhaustive()
@@ -280,13 +257,13 @@ impl std::fmt::Debug for ContextInner {
 impl ContextInner {
     /// Resolves the isolate label for `name` along the chain.
     pub(crate) fn isolate_label(&self, name: &str) -> Option<Label> {
-        self.isolate.lookup(name)
+        self.overlay.lookup_isolate(name)
     }
 
     /// Strict store lookup: the entry must exist and its fiber must be
     /// `ACTIVE` (mirrors `_getImpl(name, true)` in reflect.ts).
     pub(crate) fn lookup_strict(&self, name: &str) -> Option<Arc<StoreEntry>> {
-        let label = self.isolate.lookup(name)?;
+        let label = self.overlay.lookup_isolate(name)?;
         let entry = self.store.load_full().by_label.get(&label)?.clone();
         let active = entry
             .fiber
@@ -300,7 +277,7 @@ impl ContextInner {
     /// registry) stay reachable even while their fiber is unloading, mirroring
     /// the TS prototype properties.
     pub(crate) fn lookup_non_strict(&self, name: &str) -> Option<Arc<StoreEntry>> {
-        let label = self.isolate.lookup(name)?;
+        let label = self.overlay.lookup_isolate(name)?;
         self.store.load_full().by_label.get(&label).cloned()
     }
 
@@ -510,12 +487,10 @@ impl Context {
     /// The root owns an `ACTIVE` fiber and provides the four framework
     /// services (`events`, `logger`, `reflect`, `registry`).
     pub fn new() -> Self {
-        let isolate = Arc::new(IsolateLayer::default());
-        let intercept = Arc::new(InterceptLayer::default());
+        let overlay = Arc::new(OverlayLayer::default());
         let store = Arc::new(ArcSwap::from_pointee(Store::default()));
         let inner = Arc::new(ContextInner {
-            isolate,
-            intercept,
+            overlay,
             store,
             write_lock: Arc::new(Mutex::new(())),
             meta: Mutex::new(Vec::new()),
@@ -808,8 +783,8 @@ impl Context {
     fn set_str_impl(&self, name: &str, value: Arc<dyn Any + Send + Sync>) -> Result<(), String> {
         let label = self
             .inner
-            .isolate
-            .lookup(name)
+            .overlay
+            .lookup_isolate(name)
             .ok_or_else(|| format!("cannot set property \"{name}\" without provide"))?;
         let _guard = self.inner.write_lock.lock().unwrap();
         let mut store = (*self.inner.store.load_full()).clone();
@@ -1036,60 +1011,69 @@ impl Context {
     /// while services already visible to the parent remain visible to the
     /// child unless the child isolates the same name with a different label.
     pub fn isolate(&self, name: &str, label: Label) -> Self {
-        let layer = IsolateLayer::with(
+        let layer = OverlayLayer::with(
             HashMap::from([(name.to_string(), label)]),
-            Some(self.inner.isolate.clone()),
+            HashMap::new(),
+            Some(self.inner.overlay.clone()),
         );
-        self.spawn(layer, self.inner.intercept.clone())
+        self.spawn(layer)
     }
 
     /// Returns a context with an empty isolate layer on top (used by the
     /// loader to scope entry services per-realm).
     pub fn with_isolate_layer(&self) -> Self {
-        let layer = IsolateLayer::with(HashMap::new(), Some(self.inner.isolate.clone()));
-        self.spawn(layer, self.inner.intercept.clone())
+        let layer = OverlayLayer::with(
+            HashMap::new(),
+            HashMap::new(),
+            Some(self.inner.overlay.clone()),
+        );
+        self.spawn(layer)
     }
 
     /// Sets an isolate label on this context's top layer.
     pub fn set_isolate(&self, name: &str, label: Label) {
         let _guard = self.inner.write_lock.lock().unwrap();
-        self.inner.isolate.insert(name, label);
+        self.inner.overlay.insert_isolate(name, label);
     }
 
     /// Removes an isolate label from this context's top layer.
     pub fn remove_isolate(&self, name: &str) {
         let _guard = self.inner.write_lock.lock().unwrap();
-        self.inner.isolate.remove(name);
+        self.inner.overlay.remove_isolate(name);
     }
 
     /// Clears all entries on this context's top isolate layer.
     pub fn clear_isolate_layer(&self) {
         let _guard = self.inner.write_lock.lock().unwrap();
-        self.inner.isolate.clear();
+        self.inner.overlay.clear_isolate();
     }
 
     /// Returns a context with an empty intercept layer on top.
     pub fn with_intercept_layer(&self) -> Self {
-        let layer = InterceptLayer::with(HashMap::new(), Some(self.inner.intercept.clone()));
-        self.spawn(self.inner.isolate.clone(), layer)
+        let layer = OverlayLayer::with(
+            HashMap::new(),
+            HashMap::new(),
+            Some(self.inner.overlay.clone()),
+        );
+        self.spawn(layer)
     }
 
     /// Sets an intercept config on this context's top layer.
     pub fn set_intercept(&self, name: &str, config: Arc<dyn Any + Send + Sync>) {
         let _guard = self.inner.write_lock.lock().unwrap();
-        self.inner.intercept.insert(name, config);
+        self.inner.overlay.insert_intercept(name, config);
     }
 
     /// Removes an intercept config from this context's top layer.
     pub fn remove_intercept(&self, name: &str) {
         let _guard = self.inner.write_lock.lock().unwrap();
-        self.inner.intercept.remove(name);
+        self.inner.overlay.remove_intercept(name);
     }
 
     /// Clears all entries on this context's top intercept layer.
     pub fn clear_intercept_layer(&self) {
         let _guard = self.inner.write_lock.lock().unwrap();
-        self.inner.intercept.clear();
+        self.inner.overlay.clear_intercept();
     }
 
     /// Returns a new context with an additional intercept layer.
@@ -1097,14 +1081,15 @@ impl Context {
     /// Config entries registered here override entries from parent layers
     /// when [`Context::resolve_config`] merges the chain.
     pub fn intercept<C: Config + Send + Sync>(&self, name: &str, config: C) -> Self {
-        let layer = InterceptLayer::with(
+        let layer = OverlayLayer::with(
+            HashMap::new(),
             HashMap::from([(
                 name.to_string(),
                 Arc::new(config) as Arc<dyn Any + Send + Sync>,
             )]),
-            Some(self.inner.intercept.clone()),
+            Some(self.inner.overlay.clone()),
         );
-        self.spawn(self.inner.isolate.clone(), layer)
+        self.spawn(layer)
     }
 
     /// Returns a new context carrying arbitrary metadata.
@@ -1112,7 +1097,7 @@ impl Context {
     /// Metadata entries are appended to those of the parent; lookups prefer
     /// the nearest entry with the same key.
     pub fn extend(&self, meta: &[(&str, Arc<dyn Any + Send + Sync>)]) -> Self {
-        let ctx = self.spawn(self.inner.isolate.clone(), self.inner.intercept.clone());
+        let ctx = self.spawn(self.inner.overlay.clone());
         let mut entries = self.inner.meta.lock().unwrap().clone();
         for (key, value) in meta {
             entries.push((key.to_string(), value.clone()));
@@ -1138,10 +1123,10 @@ impl Context {
     /// `Service::resolveConfig` in the TS reference).
     pub fn resolve_config<C: Config>(&self, name: &str, base: Option<&C>, head: Option<&C>) -> C {
         let mut configs: Vec<Arc<dyn Any + Send + Sync>> = Vec::new();
-        let mut layer = Some(self.inner.intercept.clone());
+        let mut layer = Some(self.inner.overlay.clone());
         while let Some(current) = layer {
             let state = current.load();
-            if let Some(config) = state.entries.get(name) {
+            if let Some(config) = state.intercept.get(name) {
                 configs.push(config.clone());
             }
             layer = state.parent.clone();
@@ -1169,10 +1154,10 @@ impl Context {
     /// `ctx[Context.intercept]` and walking its prototype chain).
     pub fn intercept_chain(&self, name: &str) -> Vec<Arc<dyn Any + Send + Sync>> {
         let mut result = Vec::new();
-        let mut layer = Some(self.inner.intercept.clone());
+        let mut layer = Some(self.inner.overlay.clone());
         while let Some(current) = layer {
             let state = current.load();
-            if let Some(config) = state.entries.get(name) {
+            if let Some(config) = state.intercept.get(name) {
                 result.push(config.clone());
             }
             layer = state.parent.clone();
@@ -1180,17 +1165,29 @@ impl Context {
         result
     }
 
-    /// Re-points the top isolate and intercept layers at `new_parent`'s
-    /// chains (mirrors `Object.setPrototypeOf(ctx, parent.ctx)` when an entry
-    /// moves between groups; the fiber keeps running).
+    /// Atomically replaces the top overlay layer: both the isolate labels and
+    /// the intercept overrides are published in a single snapshot store, so
+    /// concurrent readers never observe a half-applied reconfiguration
+    /// (used by the loader when an entry's overlay options change).
+    pub fn apply_overlay(
+        &self,
+        isolate: &HashMap<String, Label>,
+        intercept: &HashMap<String, Arc<dyn Any + Send + Sync>>,
+    ) {
+        let _guard = self.inner.write_lock.lock().unwrap();
+        self.inner
+            .overlay
+            .replace(isolate.clone(), intercept.clone());
+    }
+
+    /// Re-points the top overlay layer at `new_parent`'s chain (mirrors
+    /// `Object.setPrototypeOf(ctx, parent.ctx)` when an entry moves between
+    /// groups; the fiber keeps running).
     pub fn reparent(&self, new_parent: &Self) {
         let _guard = self.inner.write_lock.lock().unwrap();
         self.inner
-            .isolate
-            .set_parent(Some(new_parent.inner.isolate.clone()));
-        self.inner
-            .intercept
-            .set_parent(Some(new_parent.inner.intercept.clone()));
+            .overlay
+            .set_parent(Some(new_parent.inner.overlay.clone()));
     }
 
     /// Registers mixin accessors (mirrors `ctx.mixin(source, map)`).
@@ -1621,11 +1618,10 @@ impl Context {
         registry.notify_with_labels(name, labels)
     }
 
-    fn spawn(&self, isolate: Arc<IsolateLayer>, intercept: Arc<InterceptLayer>) -> Self {
+    fn spawn(&self, overlay: Arc<OverlayLayer>) -> Self {
         Self {
             inner: Arc::new(ContextInner {
-                isolate,
-                intercept,
+                overlay,
                 store: self.inner.store.clone(),
                 write_lock: self.inner.write_lock.clone(),
                 meta: Mutex::new(self.inner.meta.lock().unwrap().clone()),
@@ -1637,12 +1633,15 @@ impl Context {
 
     fn ensure_label(&self, name: &str) -> Label {
         let _guard = self.inner.write_lock.lock().unwrap();
-        if let Some(label) = self.inner.isolate.lookup(name) {
+        if let Some(label) = self.inner.overlay.lookup_isolate(name) {
             return label;
         }
         let id = NEXT_LABEL_ID.fetch_add(1, Ordering::Relaxed);
         let label: Label = Arc::from(format!("{name}#{id}"));
-        self.inner.isolate.bottom().insert(name, label.clone());
+        self.inner
+            .overlay
+            .bottom()
+            .insert_isolate(name, label.clone());
         label
     }
 

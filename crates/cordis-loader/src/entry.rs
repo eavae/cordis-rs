@@ -389,7 +389,7 @@ impl EntryTree {
         }
         let old_labels: HashMap<String, Option<cordis_core::Label>> = names
             .iter()
-            .map(|name| (name.clone(), entry.ctx.lock().unwrap().isolate_label(name)))
+            .map(|name| (name.clone(), entry.ctx.isolate_label(name)))
             .collect();
 
         source
@@ -401,13 +401,9 @@ impl EntryTree {
         *entry.parent.lock().unwrap() = target;
 
         // Re-point the context chain at the new parent and re-apply the
-        // entry's own realm layers.
-        entry
-            .ctx
-            .lock()
-            .unwrap()
-            .reparent(&entry.parent.lock().unwrap().ctx);
-        entry.apply_realm_layers();
+        // entry's own overlay layers.
+        entry.ctx.reparent(&entry.parent.lock().unwrap().ctx);
+        entry.apply_overlay_layers();
         self.write();
 
         let changed: Vec<(
@@ -418,7 +414,7 @@ impl EntryTree {
             .into_iter()
             .filter_map(|name| {
                 let old = old_labels.get(&name).cloned().flatten();
-                let new = entry.ctx.lock().unwrap().isolate_label(&name);
+                let new = entry.ctx.isolate_label(&name);
                 (old != new).then_some((name, old, new))
             })
             .collect();
@@ -453,7 +449,7 @@ impl EntryTree {
                     this.init_inner().await;
                     this.init_task.store(false, Ordering::Release);
                     for (name, labels) in notify {
-                        let _ = this.ctx.lock().unwrap().notify_with_labels(&name, &labels);
+                        let _ = this.ctx.notify_with_labels(&name, &labels);
                     }
                 });
             }
@@ -581,8 +577,10 @@ fn collect_entries(group: &Arc<EntryGroup>, result: &mut Vec<Arc<Entry>>) {
 pub struct Entry {
     /// The owning tree.
     pub tree: Arc<EntryTree>,
-    /// The entry's context; rebuilt when the entry moves between groups.
-    pub ctx: Mutex<Context>,
+    /// The entry's context; re-parented when the entry moves between groups.
+    /// The handle is immutable; overlay changes are atomic snapshot stores on
+    /// the shared inner, so no lock is needed around it.
+    pub ctx: Context,
     /// The owning group; updated when the entry moves between groups.
     pub parent: Mutex<Arc<EntryGroup>>,
     /// The entry's resolved options.
@@ -601,14 +599,14 @@ impl Entry {
         let ctx = ctx.with_isolate_layer().with_intercept_layer();
         let entry = Arc::new(Self {
             tree,
-            ctx: Mutex::new(ctx),
+            ctx,
             parent: Mutex::new(parent),
             options: Mutex::new(options),
             fiber: Mutex::new(None),
             subgroup: Mutex::new(None),
             init_task: AtomicBool::new(false),
         });
-        entry.apply_realm_layers();
+        entry.apply_overlay_layers();
         entry
     }
 
@@ -625,8 +623,12 @@ impl Entry {
         }
     }
 
-    /// Rebuilds the entry's top isolate/intercept layers from its options.
-    fn apply_realm_layers(&self) {
+    /// Rebuilds the entry's top overlay layer from its options.
+    ///
+    /// The isolate labels and intercept overrides are published together in a
+    /// single atomic snapshot store ([`Context::apply_overlay`]), so readers
+    /// never observe a half-applied overlay reconfiguration.
+    fn apply_overlay_layers(&self) {
         let isolate = self
             .options
             .lock()
@@ -642,27 +644,27 @@ impl Entry {
             .intercept
             .clone()
             .unwrap_or_default();
-        let ctx = self.ctx.lock().unwrap();
-        ctx.clear_isolate_layer();
-        ctx.clear_intercept_layer();
+        let mut isolate_map: HashMap<String, cordis_core::Label> = HashMap::new();
         for (name, value) in isolate {
             let label = match value {
                 IsolateValue::Flag(true) => Arc::<str>::from(format!("{name}#{id}")),
                 IsolateValue::Label(label) => Arc::<str>::from(format!("{name}@{label}")),
                 IsolateValue::Flag(false) => continue,
             };
-            ctx.set_isolate(&name, label);
+            isolate_map.insert(name, label);
         }
-        // The entry's own intercept overrides fill its top intercept layer;
+        // The entry's own intercept overrides fill its top overlay layer;
         // parent layers stay reachable through the context chain (mirrors
         // the TS `entry.ctx[Context.intercept]` prototype chain).
+        let mut intercept_map: HashMap<String, Arc<dyn Any + Send + Sync>> = HashMap::new();
         if let serde_yaml_ng::Value::Mapping(map) = intercept {
             for (name, value) in map {
                 if let Some(name) = name.as_str() {
-                    ctx.set_intercept(name, Arc::new(value));
+                    intercept_map.insert(name.to_string(), Arc::new(value));
                 }
             }
         }
+        self.ctx.apply_overlay(&isolate_map, &intercept_map);
     }
 
     /// The full id, prefixed by ancestor entry ids (mirrors `entry.id`).
@@ -752,14 +754,12 @@ impl Entry {
                 .map(|name| {
                     let label = self
                         .ctx
-                        .lock()
-                        .unwrap()
                         .isolate_label(name)
                         .unwrap_or_else(|| Arc::from("") as cordis_core::Label);
                     (name.clone(), label)
                 })
                 .collect();
-            self.apply_realm_layers();
+            self.apply_overlay_layers();
             let fiber = self.fiber.lock().unwrap().clone();
             let is_group = self.options.lock().unwrap().group == Some(true);
             if is_group
@@ -774,12 +774,9 @@ impl Entry {
                 // labels (mirrors the loader's store migration; the provider
                 // may be a child entry living under the changed realm).
                 for (name, old_label) in &old_labels {
-                    let new_label = self.ctx.lock().unwrap().isolate_label(name);
+                    let new_label = self.ctx.isolate_label(name);
                     if let Some(new_label) = new_label {
-                        self.ctx
-                            .lock()
-                            .unwrap()
-                            .migrate_label(name, old_label, &new_label);
+                        self.ctx.migrate_label(name, old_label, &new_label);
                     }
                 }
             }
@@ -789,11 +786,11 @@ impl Entry {
                 if let Some(old) = old_labels.get(name) {
                     labels.push(old.clone());
                 }
-                let new = self.ctx.lock().unwrap().isolate_label(name);
+                let new = self.ctx.isolate_label(name);
                 if let Some(new) = new {
                     labels.push(new);
                 }
-                let _ = self.ctx.lock().unwrap().notify_with_labels(name, &labels);
+                let _ = self.ctx.notify_with_labels(name, &labels);
             }
             return;
         }
@@ -906,7 +903,7 @@ impl Entry {
     pub(crate) async fn init_inner(self: &Arc<Self>) {
         let result = self.import_and_apply().await;
         if let Err(error) = result {
-            self.ctx.lock().unwrap().logger().error(error);
+            self.ctx.logger().error(error);
         }
         // The current init task is finishing; clear its flag so the settle
         // check below sees a quiet tree (mirrors the TS `entry.init`, which
@@ -914,7 +911,7 @@ impl Entry {
         self.init_task.store(false, Ordering::Release);
         self.tree.tasks_notify.notify_waiters();
         if self.tree.get_tasks() == 0 {
-            let _ = self.ctx.lock().unwrap().notify("loader");
+            let _ = self.ctx.notify("loader");
         }
     }
 
@@ -931,7 +928,7 @@ impl Entry {
         // Clone the context out of the lock before registering: the plugin
         // registration emits `internal/plugin`, whose loader callback
         // re-enters this entry's context (self-deadlock if the guard is held).
-        let ctx = self.ctx.lock().unwrap().clone();
+        let ctx = self.ctx.clone();
         let fiber = ctx.registry_plugin(&plugin, config);
         *self.fiber.lock().unwrap() = Some(fiber.clone());
         if let Some(loader) = ctx.get::<crate::Loader>() {
