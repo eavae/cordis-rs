@@ -265,24 +265,35 @@ impl RegistryService {
 
     /// Re-checks every fiber that injects `name` and applies the same-label
     /// filter (mirrors `ReflectService.notify`).
+    ///
+    /// Lock discipline: the registry and fiber-list locks only protect the
+    /// affected-fiber snapshot below. The per-fiber re-checks run afterwards
+    /// with every lock released, so a user-provided `check` closure that
+    /// re-enters the registry (e.g. `ctx.plugin()` or a nested
+    /// `ctx.notify()`) cannot self-deadlock on `runtimes`.
     pub(crate) fn notify(&self, name: &str, provider: &Context) -> Vec<Arc<Fiber>> {
         let provider_label = provider.inner.isolate_label(name);
-        let runtimes = self.runtimes.lock().unwrap();
-        let mut affected = Vec::new();
-        for runtime in runtimes.values() {
-            for fiber in runtime.fibers.lock().unwrap().iter() {
-                if !fiber.inject.lock().unwrap().contains_key(name) {
-                    continue;
+        let affected = {
+            let runtimes = self.runtimes.lock().unwrap();
+            let mut affected = Vec::new();
+            for runtime in runtimes.values() {
+                let fibers = runtime.fibers.lock().unwrap();
+                for fiber in fibers.iter() {
+                    if !fiber.inject.lock().unwrap().contains_key(name) {
+                        continue;
+                    }
+                    if provider_label != fiber.ctx.isolate_label(name) {
+                        continue;
+                    }
+                    affected.push(fiber.clone());
                 }
-                if provider_label != fiber.ctx.isolate_label(name) {
-                    continue;
-                }
-                fiber.check_impl(name);
-                fiber.refresh();
-                affected.push(fiber.clone());
             }
+            affected
+        };
+        for fiber in &affected {
+            fiber.check_impl(name);
+            fiber.refresh();
         }
-        drop(runtimes);
         // `internal/service`: filter-directed broadcast on provide/remove
         // (mirrors `ReflectService.notify`). The payload is the current value
         // (or `()` when the service was just removed).
@@ -311,29 +322,39 @@ impl RegistryService {
     }
 
     /// Notifies fibers whose isolate label for `name` matches `labels`.
+    ///
+    /// The affected-fiber snapshot is collected under the registry locks;
+    /// the per-fiber re-checks (which may run user-provided `check` closures)
+    /// execute after the locks are released (see [`Self::notify`]).
     pub(crate) fn notify_with_labels(
         &self,
         name: &str,
         labels: &[crate::Label],
     ) -> Vec<Arc<Fiber>> {
-        let runtimes = self.runtimes.lock().unwrap();
-        let mut affected = Vec::new();
-        for runtime in runtimes.values() {
-            for fiber in runtime.fibers.lock().unwrap().iter() {
-                if !fiber.inject.lock().unwrap().contains_key(name) {
-                    continue;
+        let affected = {
+            let runtimes = self.runtimes.lock().unwrap();
+            let mut affected = Vec::new();
+            for runtime in runtimes.values() {
+                let fibers = runtime.fibers.lock().unwrap();
+                for fiber in fibers.iter() {
+                    if !fiber.inject.lock().unwrap().contains_key(name) {
+                        continue;
+                    }
+                    let label = fiber.ctx.isolate_label(name);
+                    if !labels
+                        .iter()
+                        .any(|candidate| label.as_ref() == Some(candidate))
+                    {
+                        continue;
+                    }
+                    affected.push(fiber.clone());
                 }
-                let label = fiber.ctx.isolate_label(name);
-                if !labels
-                    .iter()
-                    .any(|candidate| label.as_ref() == Some(candidate))
-                {
-                    continue;
-                }
-                fiber.check_impl(name);
-                fiber.refresh();
-                affected.push(fiber.clone());
             }
+            affected
+        };
+        for fiber in &affected {
+            fiber.check_impl(name);
+            fiber.refresh();
         }
         affected
     }

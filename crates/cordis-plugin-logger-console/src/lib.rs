@@ -150,7 +150,11 @@ impl ConsoleExporter {
             }
         }
 
-        let formatters = self.formatters.lock().unwrap();
+        // Snapshot the formatter table before rendering: user-supplied
+        // `LogFormatter` closures run inside `format_message`, and calling
+        // them while holding the lock would self-deadlock if a formatter
+        // touches the exporter again.
+        let formatters = self.formatters.lock().unwrap().clone();
         let formatted = format_message(message, self, &formatters);
         output.push_str(&formatted.replace('\n', &format!("\n{}", " ".repeat(indent))));
 

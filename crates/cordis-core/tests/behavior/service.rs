@@ -169,6 +169,49 @@ async fn service_check_gates_injector() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn service_check_may_reenter_notify() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let callback = Arc::new(AtomicU32::new(0));
+            let consumer = {
+                let callback = callback.clone();
+                root.inject(
+                    &["foo"],
+                    Arc::new(move |_ctx: &Context, _config| {
+                        callback.store(callback.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        Effect::None
+                    }),
+                )
+            };
+            // The check re-enters the registry notify path while the
+            // framework is itself inside `notify`. Before the
+            // snapshot-collection refactor, `notify` held the `runtimes`
+            // lock while running this closure, so the nested `ctx.notify()`
+            // self-deadlocked (std `Mutex` is not reentrant). The guard
+            // keeps the re-entry one-shot so the nested notify terminates.
+            let reentered = Arc::new(AtomicBool::new(false));
+            let check = {
+                let reentered = reentered.clone();
+                Arc::new(move |ctx: &Context| {
+                    if !reentered.swap(true, Ordering::SeqCst) {
+                        let _ = ctx.notify("foo");
+                    }
+                    true
+                }) as Arc<dyn Fn(&Context) -> bool + Send + Sync>
+            };
+            let _handle = root
+                .provide_str_with_check("foo", Arc::new(Foo), Some(check))
+                .unwrap();
+            consumer.wait().await.unwrap();
+            assert_eq!(callback.load(Ordering::SeqCst), 1);
+            assert!(reentered.load(Ordering::SeqCst));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn service_multiple_injects() {
     let local = tokio::task::LocalSet::new();
     local
