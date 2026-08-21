@@ -63,11 +63,11 @@ impl Loader {
             ),
         });
         let group_plugin = group_plugin(&loader);
-        let _guard = loader.tree.write_lock.lock().unwrap();
-        let mut builtins = (*loader.tree.builtins.load_full()).clone();
-        builtins.insert("@cordisjs/plugin-group".to_string(), group_plugin);
-        loader.tree.builtins.store(Arc::new(builtins));
-        drop(_guard);
+        loader.tree.builtins.rcu(|builtins| {
+            let mut next = (**builtins).clone();
+            next.insert("@cordisjs/plugin-group".to_string(), group_plugin.clone());
+            Arc::new(next)
+        });
 
         // The loader service carries its availability check: while tasks are
         // pending under the `await` intercept, dependent fibers stay pending
@@ -414,10 +414,11 @@ impl Loader {
             inject: inject.into_iter().map(|name| (name, None)).collect(),
             apply,
         };
-        let _guard = self.tree.write_lock.lock().unwrap();
-        let mut plugins = (*self.tree.plugins.load_full()).clone();
-        plugins.insert(name.to_string(), plugin);
-        self.tree.plugins.store(Arc::new(plugins));
+        self.tree.plugins.rcu(|plugins| {
+            let mut next = (**plugins).clone();
+            next.insert(name.to_string(), plugin.clone());
+            Arc::new(next)
+        });
         name.to_string()
     }
 
@@ -476,10 +477,11 @@ impl Loader {
                 .collect(),
             apply,
         };
-        let _guard = self.tree.write_lock.lock().unwrap();
-        let mut plugins = (*self.tree.plugins.load_full()).clone();
-        plugins.insert(name.clone(), plugin);
-        self.tree.plugins.store(Arc::new(plugins));
+        self.tree.plugins.rcu(|plugins| {
+            let mut next = (**plugins).clone();
+            next.insert(name.clone(), plugin.clone());
+            Arc::new(next)
+        });
         Ok(name)
     }
 

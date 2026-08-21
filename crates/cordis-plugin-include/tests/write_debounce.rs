@@ -24,12 +24,11 @@ fn include_opts(config: IncludeConfig) -> EntryOptions {
 }
 
 fn setup_loader(loader: &Loader) {
-    {
-        let _guard = loader.tree.write_lock.lock().unwrap();
-        let mut builtins = (*loader.builtins.load_full()).clone();
-        builtins.insert("@cordisjs/plugin-include".to_string(), include_plugin());
-        loader.builtins.store(Arc::new(builtins));
-    }
+    loader.tree.builtins.rcu(|builtins| {
+        let mut next = (**builtins).clone();
+        next.insert("@cordisjs/plugin-include".to_string(), include_plugin());
+        Arc::new(next)
+    });
     loader.mock("greeter", Arc::new(|_ctx: &Context, _config| Effect::None));
 }
 

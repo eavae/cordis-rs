@@ -65,6 +65,23 @@ pub struct MixinAccessor {
 /// provide" message instead of the real reason.
 struct SetError(String);
 
+/// Optimistically replaces a snapshot slot (read-copy-update).
+///
+/// The closure returns the next snapshot or an abort reason. When a
+/// concurrent writer wins the race the closure is retried with the fresh
+/// snapshot; an aborted decision is returned as-is and nothing is stored.
+/// The closure must be free of side effects.
+fn update_or<T, R>(slot: &ArcSwap<T>, f: impl Fn(&Arc<T>) -> Result<Arc<T>, R>) -> Result<(), R> {
+    loop {
+        let current = slot.load_full();
+        let next = f(&current)?;
+        let prev = slot.compare_and_swap(&current, next);
+        if Arc::ptr_eq(&current, &prev) {
+            return Ok(());
+        }
+    }
+}
+
 /// A service label. Labels compare by value: contexts isolated with the same
 /// label share the same service instance (mirrors `Symbol('name')` equality
 /// in the TS reference).
@@ -143,39 +160,51 @@ impl OverlayLayer {
     }
 
     fn insert_isolate(&self, name: &str, label: Label) {
-        let mut state = (*self.state.load_full()).clone();
-        state.isolate.insert(name.to_string(), label);
-        self.state.store(Arc::new(state));
+        self.state.rcu(|state| {
+            let mut next = (**state).clone();
+            next.isolate.insert(name.to_string(), label.clone());
+            Arc::new(next)
+        });
     }
 
     fn remove_isolate(&self, name: &str) {
-        let mut state = (*self.state.load_full()).clone();
-        state.isolate.remove(name);
-        self.state.store(Arc::new(state));
+        self.state.rcu(|state| {
+            let mut next = (**state).clone();
+            next.isolate.remove(name);
+            Arc::new(next)
+        });
     }
 
     fn clear_isolate(&self) {
-        let mut state = (*self.state.load_full()).clone();
-        state.isolate.clear();
-        self.state.store(Arc::new(state));
+        self.state.rcu(|state| {
+            let mut next = (**state).clone();
+            next.isolate.clear();
+            Arc::new(next)
+        });
     }
 
     fn insert_intercept(&self, name: &str, config: Arc<dyn Any + Send + Sync>) {
-        let mut state = (*self.state.load_full()).clone();
-        state.intercept.insert(name.to_string(), config);
-        self.state.store(Arc::new(state));
+        self.state.rcu(|state| {
+            let mut next = (**state).clone();
+            next.intercept.insert(name.to_string(), config.clone());
+            Arc::new(next)
+        });
     }
 
     fn remove_intercept(&self, name: &str) {
-        let mut state = (*self.state.load_full()).clone();
-        state.intercept.remove(name);
-        self.state.store(Arc::new(state));
+        self.state.rcu(|state| {
+            let mut next = (**state).clone();
+            next.intercept.remove(name);
+            Arc::new(next)
+        });
     }
 
     fn clear_intercept(&self) {
-        let mut state = (*self.state.load_full()).clone();
-        state.intercept.clear();
-        self.state.store(Arc::new(state));
+        self.state.rcu(|state| {
+            let mut next = (**state).clone();
+            next.intercept.clear();
+            Arc::new(next)
+        });
     }
 
     /// Atomically replaces both maps of the top layer (single snapshot
@@ -185,17 +214,41 @@ impl OverlayLayer {
         isolate: HashMap<String, Label>,
         intercept: HashMap<String, Arc<dyn Any + Send + Sync>>,
     ) {
-        let mut state = (*self.state.load_full()).clone();
-        state.isolate = isolate;
-        state.intercept = intercept;
-        self.state.store(Arc::new(state));
+        self.state.rcu(|state| {
+            let mut next = (**state).clone();
+            next.isolate = isolate.clone();
+            next.intercept = intercept.clone();
+            Arc::new(next)
+        });
     }
 
     /// Re-points the parent chain (mirrors `Object.setPrototypeOf`).
     fn set_parent(&self, parent: Option<Arc<Self>>) {
-        let mut state = (*self.state.load_full()).clone();
-        state.parent = parent;
-        self.state.store(Arc::new(state));
+        self.state.rcu(|state| {
+            let mut next = (**state).clone();
+            next.parent = parent.clone();
+            Arc::new(next)
+        });
+    }
+
+    /// Atomically resolves `name` on this layer: returns the existing label,
+    /// or inserts `label` through a compare-and-swap loop. Concurrent
+    /// callers converge on a single label for the same name (the layer is
+    /// the shared bottom of every chain, so this serializes label creation
+    /// without a global lock).
+    fn ensure_isolate(&self, name: &str, label: Label) -> Label {
+        loop {
+            let state = self.state.load_full();
+            if let Some(existing) = state.isolate.get(name) {
+                return existing.clone();
+            }
+            let mut next = (*state).clone();
+            next.isolate.insert(name.to_string(), label.clone());
+            let prev = self.state.compare_and_swap(&state, Arc::new(next));
+            if Arc::ptr_eq(&state, &prev) {
+                return label;
+            }
+        }
     }
 }
 
@@ -233,10 +286,6 @@ pub(crate) struct Store {
 pub(crate) struct ContextInner {
     pub overlay: Arc<OverlayLayer>,
     pub store: Arc<ArcSwap<Store>>,
-    /// Serializes compound snapshot mutations (store / props / layer writes).
-    /// Never held while dispatching events or running effects. Reads stay
-    /// lock-free via `ArcSwap` / atomics.
-    pub write_lock: Arc<Mutex<()>>,
     pub meta: Mutex<Vec<(String, Arc<dyn Any + Send + Sync>)>>,
     /// Shared accessor table for the whole context tree (mirrors the single
     /// `ReflectService.props` in the TS reference; accessors registered by
@@ -492,7 +541,6 @@ impl Context {
         let inner = Arc::new(ContextInner {
             overlay,
             store,
-            write_lock: Arc::new(Mutex::new(())),
             meta: Mutex::new(Vec::new()),
             props: Arc::new(ArcSwap::from_pointee(HashMap::new())),
         });
@@ -624,33 +672,34 @@ impl Context {
         new_label: &Label,
         provider: &Arc<Fiber>,
     ) -> bool {
-        let _guard = self.inner.write_lock.lock().unwrap();
-        let mut store = (*self.inner.store.load_full()).clone();
-        let Some(entry) = store.by_label.get(old_label).cloned() else {
-            return false;
-        };
-        if entry.name != name {
-            return false;
-        }
-        let owned_by = entry
-            .fiber
-            .upgrade()
-            .is_some_and(|fiber| Arc::ptr_eq(&fiber, provider));
-        if !owned_by || store.by_label.contains_key(new_label) {
-            return false;
-        }
-        store.by_label.remove(old_label);
-        store.by_label.insert(new_label.clone(), entry);
-        self.inner.store.store(Arc::new(store));
-        true
+        update_or(&self.inner.store, |store| {
+            let Some(entry) = store.by_label.get(old_label).cloned() else {
+                return Err(());
+            };
+            if entry.name != name {
+                return Err(());
+            }
+            let owned_by = entry
+                .fiber
+                .upgrade()
+                .is_some_and(|fiber| Arc::ptr_eq(&fiber, provider));
+            if !owned_by || store.by_label.contains_key(new_label) {
+                return Err(());
+            }
+            let mut next = (**store).clone();
+            next.by_label.remove(old_label);
+            next.by_label.insert(new_label.clone(), entry);
+            Ok(Arc::new(next))
+        })
+        .is_ok()
     }
 
     /// Moves a store entry from `old_label` to `new_label` when the provider
     /// itself now resolves `new_label` (mirrors the TS isolate patch-context
     /// delimiter guard: the impl's fiber realm moved with it).
     pub fn migrate_label(&self, name: &str, old_label: &Label, new_label: &Label) -> bool {
-        // Lock-order discipline: resolve the isolate label before taking the
-        // write lock, so no path holds the store lock while touching isolate.
+        // The isolate label is resolved lock-free before the store update,
+        // so no path touches the overlay while updating the store.
         let provider_moved = self
             .inner
             .store
@@ -670,18 +719,19 @@ impl Context {
         if !provider_moved {
             return false;
         }
-        let _guard = self.inner.write_lock.lock().unwrap();
-        let mut store = (*self.inner.store.load_full()).clone();
-        let Some(entry) = store.by_label.remove(old_label) else {
-            return false;
-        };
-        if store.by_label.contains_key(new_label) {
-            store.by_label.insert(old_label.clone(), entry);
-            return false;
-        }
-        store.by_label.insert(new_label.clone(), entry);
-        self.inner.store.store(Arc::new(store));
-        true
+        update_or(&self.inner.store, |store| {
+            let Some(entry) = store.by_label.get(old_label).cloned() else {
+                return Err(());
+            };
+            if store.by_label.contains_key(new_label) {
+                return Err(());
+            }
+            let mut next = (**store).clone();
+            next.by_label.remove(old_label);
+            next.by_label.insert(new_label.clone(), entry);
+            Ok(Arc::new(next))
+        })
+        .is_ok()
     }
 
     /// Strict dynamic access (mirrors the throwing `ctx[name]` access in the
@@ -786,41 +836,41 @@ impl Context {
             .overlay
             .lookup_isolate(name)
             .ok_or_else(|| format!("cannot set property \"{name}\" without provide"))?;
-        let _guard = self.inner.write_lock.lock().unwrap();
-        let mut store = (*self.inner.store.load_full()).clone();
-        match store.by_label.get(&label).cloned() {
-            Some(entry) => {
-                // Ownership: only the providing fiber may update the value
-                // (mirrors reflect.set "cannot set property in multiple
-                // fibers").
-                let owned = entry
-                    .fiber
-                    .upgrade()
-                    .is_some_and(|fiber| Arc::ptr_eq(&fiber, &self.fiber));
-                if !owned {
-                    return Err(format!("cannot set property \"{name}\" in multiple fibers"));
+        update_or(&self.inner.store, |store| {
+            match store.by_label.get(&label).cloned() {
+                Some(entry) => {
+                    // Ownership: only the providing fiber may update the
+                    // value (mirrors reflect.set "cannot set property in
+                    // multiple fibers").
+                    let owned = entry
+                        .fiber
+                        .upgrade()
+                        .is_some_and(|fiber| Arc::ptr_eq(&fiber, &self.fiber));
+                    if !owned {
+                        return Err(format!("cannot set property \"{name}\" in multiple fibers"));
+                    }
+                    let name = entry.name.clone();
+                    let fiber = entry.fiber.clone();
+                    let shadow_inner = entry.shadow_inner.clone();
+                    let check = entry.check.clone();
+                    let invoke = entry.invoke.clone();
+                    let mut next = (**store).clone();
+                    next.by_label.insert(
+                        label.clone(),
+                        Arc::new(StoreEntry {
+                            name,
+                            value: value.clone(),
+                            fiber,
+                            shadow_inner,
+                            check,
+                            invoke,
+                        }),
+                    );
+                    Ok(Arc::new(next))
                 }
-                let name = entry.name.clone();
-                let fiber = entry.fiber.clone();
-                let shadow_inner = entry.shadow_inner.clone();
-                let check = entry.check.clone();
-                let invoke = entry.invoke.clone();
-                store.by_label.insert(
-                    label,
-                    Arc::new(StoreEntry {
-                        name,
-                        value,
-                        fiber,
-                        shadow_inner,
-                        check,
-                        invoke,
-                    }),
-                );
+                None => Err(format!("cannot set property \"{name}\" without provide")),
             }
-            None => return Err(format!("cannot set property \"{name}\" without provide")),
-        }
-        self.inner.store.store(Arc::new(store));
-        drop(_guard);
+        })?;
         // Notify injectors that the service value changed.
         drop(self.notify(name));
         Ok(())
@@ -904,48 +954,52 @@ impl Context {
                         check: check.clone(),
                         invoke: invoke.clone(),
                     });
-                    let _guard = ctx.inner.write_lock.lock().unwrap();
-                    let mut store = (*ctx.inner.store.load_full()).clone();
-                    // Re-check under the write lock: a concurrent registration
-                    // may have won the race since the pre-check above.
-                    if store.by_label.contains_key(&label) {
-                        drop(_guard);
-                        return Effect::Error(
-                            format!("service \"{name}\" is already registered").into(),
-                        );
+                    // Re-check against the latest snapshot inside the
+                    // compare-and-swap loop: a concurrent registration may
+                    // have won the race since the pre-check above.
+                    let result = update_or(&ctx.inner.store, |store| {
+                        if store.by_label.contains_key(&label) {
+                            return Err(format!("service \"{name}\" is already registered"));
+                        }
+                        let mut next = (**store).clone();
+                        next.by_label.insert(label.clone(), entry.clone());
+                        Ok(Arc::new(next))
+                    });
+                    match result {
+                        Err(message) => Effect::Error(message.into()),
+                        Ok(()) => {
+                            ctx.fiber
+                                .resolved
+                                .lock()
+                                .unwrap()
+                                .insert(name.clone(), entry);
+                            if ctx.fiber.state() == FiberState::Active {
+                                ctx.notify(&name);
+                            }
+                            let ctx = ctx.clone();
+                            Effect::Disposer(Box::new(move || {
+                                let ctx = ctx.clone();
+                                let name = name.clone();
+                                let label = label;
+                                Box::pin(async move {
+                                    ctx.inner.store.rcu(|store| {
+                                        let mut next = (**store).clone();
+                                        next.by_label.remove(&label);
+                                        Arc::new(next)
+                                    });
+                                    let fibers = ctx.notify(&name);
+                                    // The TS reference awaits the affected
+                                    // fibers here; the current implementation
+                                    // keeps the removal and notify
+                                    // synchronous, which matches the fiber
+                                    // spec expectations under fake timers.
+                                    let _ = fibers;
+                                    ctx.fiber.resolved.lock().unwrap().remove(&name);
+                                    Ok(())
+                                })
+                            }))
+                        }
                     }
-                    store.by_label.insert(label.clone(), entry.clone());
-                    ctx.inner.store.store(Arc::new(store));
-                    drop(_guard);
-                    ctx.fiber
-                        .resolved
-                        .lock()
-                        .unwrap()
-                        .insert(name.clone(), entry);
-                    if ctx.fiber.state() == FiberState::Active {
-                        ctx.notify(&name);
-                    }
-                    let ctx = ctx.clone();
-                    Effect::Disposer(Box::new(move || {
-                        let ctx = ctx.clone();
-                        let name = name.clone();
-                        let label = label;
-                        Box::pin(async move {
-                            let _guard = ctx.inner.write_lock.lock().unwrap();
-                            let mut store = (*ctx.inner.store.load_full()).clone();
-                            store.by_label.remove(&label);
-                            ctx.inner.store.store(Arc::new(store));
-                            drop(_guard);
-                            let fibers = ctx.notify(&name);
-                            // The TS reference awaits the affected fibers
-                            // here; the current implementation keeps the
-                            // removal and notify synchronous, which matches
-                            // the fiber spec expectations under fake timers.
-                            let _ = fibers;
-                            ctx.fiber.resolved.lock().unwrap().remove(&name);
-                            Ok(())
-                        })
-                    }))
                 },
                 &effect_label,
             )
@@ -1032,19 +1086,16 @@ impl Context {
 
     /// Sets an isolate label on this context's top layer.
     pub fn set_isolate(&self, name: &str, label: Label) {
-        let _guard = self.inner.write_lock.lock().unwrap();
         self.inner.overlay.insert_isolate(name, label);
     }
 
     /// Removes an isolate label from this context's top layer.
     pub fn remove_isolate(&self, name: &str) {
-        let _guard = self.inner.write_lock.lock().unwrap();
         self.inner.overlay.remove_isolate(name);
     }
 
     /// Clears all entries on this context's top isolate layer.
     pub fn clear_isolate_layer(&self) {
-        let _guard = self.inner.write_lock.lock().unwrap();
         self.inner.overlay.clear_isolate();
     }
 
@@ -1060,19 +1111,16 @@ impl Context {
 
     /// Sets an intercept config on this context's top layer.
     pub fn set_intercept(&self, name: &str, config: Arc<dyn Any + Send + Sync>) {
-        let _guard = self.inner.write_lock.lock().unwrap();
         self.inner.overlay.insert_intercept(name, config);
     }
 
     /// Removes an intercept config from this context's top layer.
     pub fn remove_intercept(&self, name: &str) {
-        let _guard = self.inner.write_lock.lock().unwrap();
         self.inner.overlay.remove_intercept(name);
     }
 
     /// Clears all entries on this context's top intercept layer.
     pub fn clear_intercept_layer(&self) {
-        let _guard = self.inner.write_lock.lock().unwrap();
         self.inner.overlay.clear_intercept();
     }
 
@@ -1174,7 +1222,6 @@ impl Context {
         isolate: &HashMap<String, Label>,
         intercept: &HashMap<String, Arc<dyn Any + Send + Sync>>,
     ) {
-        let _guard = self.inner.write_lock.lock().unwrap();
         self.inner
             .overlay
             .replace(isolate.clone(), intercept.clone());
@@ -1184,7 +1231,6 @@ impl Context {
     /// `Object.setPrototypeOf(ctx, parent.ctx)` when an entry moves between
     /// groups; the fiber keeps running).
     pub fn reparent(&self, new_parent: &Self) {
-        let _guard = self.inner.write_lock.lock().unwrap();
         self.inner
             .overlay
             .set_parent(Some(new_parent.inner.overlay.clone()));
@@ -1254,24 +1300,31 @@ impl Context {
                             format!("property \"{name}\" is already declared").into(),
                         );
                     }
-                    let _guard = this.inner.write_lock.lock().unwrap();
-                    let mut props = (*this.inner.props.load_full()).clone();
-                    if props.contains_key(&name) {
-                        drop(_guard);
-                        return Effect::Error(
-                            format!("property \"{name}\" is already declared").into(),
+                    let result = update_or(&this.inner.props, |props| {
+                        if props.contains_key(&name) {
+                            return Err(format!("property \"{name}\" is already declared"));
+                        }
+                        let mut next = (**props).clone();
+                        next.insert(
+                            name.clone(),
+                            Arc::new(MixinAccessor {
+                                get: get.clone(),
+                                set: set.clone(),
+                            }),
                         );
+                        Ok(Arc::new(next))
+                    });
+                    if let Err(message) = result {
+                        return Effect::Error(message.into());
                     }
-                    props.insert(name.clone(), Arc::new(MixinAccessor { get, set }));
-                    this.inner.props.store(Arc::new(props));
-                    drop(_guard);
                     let this_for_dispose = this.clone();
                     let name_for_dispose = name;
                     Effect::Disposer(sync_disposer(move || {
-                        let _guard = this_for_dispose.inner.write_lock.lock().unwrap();
-                        let mut props = (*this_for_dispose.inner.props.load_full()).clone();
-                        props.remove(&name_for_dispose);
-                        this_for_dispose.inner.props.store(Arc::new(props));
+                        this_for_dispose.inner.props.rcu(|props| {
+                            let mut next = (**props).clone();
+                            next.remove(&name_for_dispose);
+                            Arc::new(next)
+                        });
                     }))
                 },
                 &label,
@@ -1291,34 +1344,29 @@ impl Context {
         self.fiber
             .effect(
                 move || {
-                    let conflict = {
-                        let _guard = this.inner.write_lock.lock().unwrap();
-                        let mut props = (*this.inner.props.load_full()).clone();
-                        let mut conflict = None;
-                        for (key, accessor) in entries {
+                    let conflict = update_or(&this.inner.props, |props| {
+                        let mut next = (**props).clone();
+                        for (key, accessor) in &entries {
                             let full = format!("{source}.{key}");
-                            if props.contains_key(&key) {
-                                conflict = Some(format!("property \"{full}\" is already declared"));
-                                break;
+                            if props.contains_key(key) {
+                                return Err(format!("property \"{full}\" is already declared"));
                             }
-                            props.insert(key, accessor);
+                            next.insert(key.clone(), accessor.clone());
                         }
-                        if conflict.is_none() {
-                            this.inner.props.store(Arc::new(props));
-                        }
-                        conflict
-                    };
-                    if let Some(message) = conflict {
+                        Ok(Arc::new(next))
+                    });
+                    if let Err(message) = conflict {
                         return Effect::Error(message.into());
                     }
                     let this_for_dispose = this.clone();
                     Effect::Disposer(sync_disposer(move || {
-                        let _guard = this_for_dispose.inner.write_lock.lock().unwrap();
-                        let mut props = (*this_for_dispose.inner.props.load_full()).clone();
-                        for key in keys {
-                            props.remove(&key);
-                        }
-                        this_for_dispose.inner.props.store(Arc::new(props));
+                        this_for_dispose.inner.props.rcu(|props| {
+                            let mut next = (**props).clone();
+                            for key in &keys {
+                                next.remove(key);
+                            }
+                            Arc::new(next)
+                        });
                     }))
                 },
                 &label,
@@ -1623,7 +1671,6 @@ impl Context {
             inner: Arc::new(ContextInner {
                 overlay,
                 store: self.inner.store.clone(),
-                write_lock: self.inner.write_lock.clone(),
                 meta: Mutex::new(self.inner.meta.lock().unwrap().clone()),
                 props: self.inner.props.clone(),
             }),
@@ -1632,17 +1679,13 @@ impl Context {
     }
 
     fn ensure_label(&self, name: &str) -> Label {
-        let _guard = self.inner.write_lock.lock().unwrap();
+        // Fast path: a label already resolves somewhere along the chain.
         if let Some(label) = self.inner.overlay.lookup_isolate(name) {
             return label;
         }
         let id = NEXT_LABEL_ID.fetch_add(1, Ordering::Relaxed);
         let label: Label = Arc::from(format!("{name}#{id}"));
-        self.inner
-            .overlay
-            .bottom()
-            .insert_isolate(name, label.clone());
-        label
+        self.inner.overlay.bottom().ensure_isolate(name, label)
     }
 
     fn provide_inner<S: Service>(&self, value: S) {

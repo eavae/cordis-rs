@@ -275,7 +275,6 @@ pub struct LoggerService {
     pub(crate) buffer: Arc<Mutex<Vec<Message>>>,
     pub(crate) buffer_size: Arc<AtomicUsize>,
     exporters: Arc<ArcSwap<HashMap<u64, Arc<dyn LoggerExporter + Send + Sync>>>>,
-    write_lock: Arc<Mutex<()>>,
     sn_message: AtomicU64,
     sn_exporter: AtomicU64,
 }
@@ -286,7 +285,6 @@ impl Default for LoggerService {
             buffer: Arc::new(Mutex::new(Vec::new())),
             buffer_size: Arc::new(AtomicUsize::new(1000)),
             exporters: Arc::new(ArcSwap::from_pointee(HashMap::new())),
-            write_lock: Arc::new(Mutex::new(())),
             sn_message: AtomicU64::new(0),
             sn_exporter: AtomicU64::new(0),
         };
@@ -318,21 +316,20 @@ impl LoggerService {
     ) -> Result<Arc<EffectHandle>, crate::fiber::CordisError> {
         let id = { self.sn_exporter.fetch_add(1, Ordering::Relaxed) + 1 };
         let exporters = self.exporters.clone();
-        let write_lock = self.write_lock.clone();
         ctx.fiber().effect(
             move || {
-                let _guard = write_lock.lock().unwrap();
-                let mut table = (*exporters.load_full()).clone();
-                table.insert(id, exporter.clone());
-                exporters.store(Arc::new(table));
-                drop(_guard);
+                exporters.rcu(|table| {
+                    let mut next = (**table).clone();
+                    next.insert(id, exporter.clone());
+                    Arc::new(next)
+                });
                 let exporters = exporters.clone();
-                let write_lock = write_lock.clone();
                 Effect::Disposer(sync_disposer(move || {
-                    let _guard = write_lock.lock().unwrap();
-                    let mut table = (*exporters.load_full()).clone();
-                    table.remove(&id);
-                    exporters.store(Arc::new(table));
+                    exporters.rcu(|table| {
+                        let mut next = (**table).clone();
+                        next.remove(&id);
+                        Arc::new(next)
+                    });
                 }))
             },
             "ctx.logger.exporter()",

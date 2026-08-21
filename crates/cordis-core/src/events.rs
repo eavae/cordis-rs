@@ -175,15 +175,12 @@ impl Error for ParallelError {}
 /// Event dispatch service, available on every context as `ctx.events`.
 pub struct EventsService {
     hooks: HookTable,
-    /// Serializes hook-table mutations (registration / removal).
-    write_lock: Arc<Mutex<()>>,
 }
 
 impl Default for EventsService {
     fn default() -> Self {
         Self {
             hooks: Arc::new(ArcSwap::from_pointee(HashMap::new())),
-            write_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -260,7 +257,6 @@ impl EventsService {
         effect_label: &str,
     ) -> Result<Arc<EffectHandle>, CordisError> {
         let hooks = self.hooks.clone();
-        let hooks_write = self.write_lock.clone();
         ctx.fiber().effect(
             move || {
                 let hook = Hook {
@@ -270,29 +266,30 @@ impl EventsService {
                     callback: callback.clone(),
                     filter: filter.clone(),
                 };
-                let _guard = hooks_write.lock().unwrap();
-                let mut table = (*hooks.load_full()).clone();
-                let list = table.entry(event.clone()).or_default();
-                if options.prepend {
-                    list.insert(0, hook);
-                } else {
-                    list.push(hook);
-                }
-                hooks.store(Arc::new(table));
-                drop(_guard);
+                hooks.rcu(|table| {
+                    let mut next = (**table).clone();
+                    let list = next.entry(event.clone()).or_default();
+                    if options.prepend {
+                        list.insert(0, hook.clone());
+                    } else {
+                        list.push(hook.clone());
+                    }
+                    Arc::new(next)
+                });
                 let hooks = hooks.clone();
                 let event = event.clone();
                 Effect::Disposer(sync_disposer(move || {
-                    let _guard = hooks_write.lock().unwrap();
-                    let mut table = (*hooks.load_full()).clone();
-                    if let Some(list) = table.get_mut(&event)
-                        && let Some(position) = list
-                            .iter()
-                            .position(|hook| Arc::ptr_eq(&hook.callback, &callback))
-                    {
-                        list.remove(position);
-                    }
-                    hooks.store(Arc::new(table));
+                    hooks.rcu(|table| {
+                        let mut next = (**table).clone();
+                        if let Some(list) = next.get_mut(&event)
+                            && let Some(position) = list
+                                .iter()
+                                .position(|hook| Arc::ptr_eq(&hook.callback, &callback))
+                        {
+                            list.remove(position);
+                        }
+                        Arc::new(next)
+                    });
                 }))
             },
             effect_label,

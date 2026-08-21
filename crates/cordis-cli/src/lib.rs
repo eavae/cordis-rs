@@ -220,19 +220,18 @@ pub async fn run(options: &CliOptions) -> anyhow::Result<()> {
     .expect("console exporter");
 
     // Builtins (mirrors the TS loader's builtin table).
-    {
-        let _guard = loader.tree.write_lock.lock().unwrap();
-        let mut builtins = (*loader.builtins.load_full()).clone();
-        builtins.insert(
+    loader.builtins.rcu(|builtins| {
+        let mut next = (**builtins).clone();
+        next.insert(
             "@cordisjs/plugin-include".to_string(),
             cordis_plugin_include::include_plugin(),
         );
-        builtins.insert(
+        next.insert(
             "@cordisjs/plugin-hmr".to_string(),
             cordis_plugin_hmr::hmr_plugin(),
         );
-        loader.builtins.store(Arc::new(builtins));
-    }
+        Arc::new(next)
+    });
 
     // Load `.so` plugins from the plugins directory.
     // Keep the loaded libraries alive for the whole run: their plugin

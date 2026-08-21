@@ -119,8 +119,6 @@ pub struct EntryTree {
     pub tasks: Arc<AtomicUsize>,
     /// Notifies waiters when a pending entry task settles.
     pub tasks_notify: Arc<Notify>,
-    /// Serializes structural tree mutations (plugin tables, root).
-    pub write_lock: Arc<Mutex<()>>,
 }
 
 impl EntryTree {
@@ -138,7 +136,6 @@ impl EntryTree {
             root: Arc::new(Mutex::new(None)),
             tasks: Arc::new(AtomicUsize::new(0)),
             tasks_notify: Arc::new(Notify::new()),
-            write_lock: Arc::new(Mutex::new(())),
         });
         let root = EntryGroup::new(tree.clone(), ctx.clone(), None);
         *tree.root.lock().unwrap() = Some(root);
@@ -169,10 +166,11 @@ impl EntryTree {
 
     /// Registers a plugin under a name (mock/builtin table).
     pub fn register_plugin(&self, name: &str, plugin: Plugin) {
-        let _guard = self.write_lock.lock().unwrap();
-        let mut table = (*self.plugins.load_full()).clone();
-        table.insert(name.to_string(), plugin);
-        self.plugins.store(Arc::new(table));
+        self.plugins.rcu(|table| {
+            let mut next = (**table).clone();
+            next.insert(name.to_string(), plugin.clone());
+            Arc::new(next)
+        });
     }
 
     /// Runs the write callback (mirrors `tree.write()`).

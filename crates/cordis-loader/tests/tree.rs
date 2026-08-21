@@ -125,10 +125,9 @@ async fn builtins_import() {
         .run_until(async {
             let root = Context::new();
             let loader = Loader::new(&root);
-            {
-                let _guard = loader.tree.write_lock.lock().unwrap();
-                let mut builtins = (*loader.builtins.load_full()).clone();
-                builtins.insert(
+            loader.builtins.rcu(|builtins| {
+                let mut next = (**builtins).clone();
+                next.insert(
                     "demo".to_string(),
                     cordis_core::Plugin {
                         is_group: false,
@@ -137,8 +136,8 @@ async fn builtins_import() {
                         apply: Arc::new(|_ctx, _config| Effect::None),
                     },
                 );
-                loader.builtins.store(Arc::new(builtins));
-            }
+                Arc::new(next)
+            });
             let tree = loader.tree_handle();
             assert!(tree.import("cordis:demo").is_ok());
             assert!(tree.import("cordis:missing").is_err());

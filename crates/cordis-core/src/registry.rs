@@ -384,7 +384,6 @@ fn build_child_inner(
     Arc::new(ContextInner {
         overlay,
         store: parent.inner.store.clone(),
-        write_lock: parent.inner.write_lock.clone(),
         meta: Mutex::new(parent.inner.meta.lock().unwrap().clone()),
         props: parent.inner.props.clone(),
     })

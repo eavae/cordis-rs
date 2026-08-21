@@ -43,12 +43,11 @@ async fn entry_reload_reapplies_with_new_plugin() {
             let root = Context::new();
             let loader = Loader::new(&root);
             let applied = Arc::new(AtomicU32::new(0));
-            {
-                let _guard = loader.tree.write_lock.lock().unwrap();
-                let mut plugins = (*loader.tree.plugins.load_full()).clone();
-                plugins.insert("p".to_string(), plugin(applied.clone()));
-                loader.tree.plugins.store(Arc::new(plugins));
-            }
+            loader.tree.plugins.rcu(|plugins| {
+                let mut next = (**plugins).clone();
+                next.insert("p".to_string(), plugin(applied.clone()));
+                Arc::new(next)
+            });
             let tree = loader.tree_handle();
             let entry = tree.create(opts("p"), None, 0);
             tree.await_tree().await;
@@ -56,12 +55,11 @@ async fn entry_reload_reapplies_with_new_plugin() {
             let config_before = entry.options.lock().unwrap().config.clone();
 
             // Swap in a new apply and reload the entry.
-            {
-                let _guard = loader.tree.write_lock.lock().unwrap();
-                let mut plugins = (*loader.tree.plugins.load_full()).clone();
-                plugins.insert("p".to_string(), plugin(applied.clone()));
-                loader.tree.plugins.store(Arc::new(plugins));
-            }
+            loader.tree.plugins.rcu(|plugins| {
+                let mut next = (**plugins).clone();
+                next.insert("p".to_string(), plugin(applied.clone()));
+                Arc::new(next)
+            });
             entry.reload().await.expect("reload");
             assert_eq!(
                 applied.load(Ordering::SeqCst),
@@ -86,22 +84,20 @@ async fn reload_rolls_back_on_failure() {
             let root = Context::new();
             let loader = Loader::new(&root);
             let applied = Arc::new(AtomicU32::new(0));
-            {
-                let _guard = loader.tree.write_lock.lock().unwrap();
-                let mut plugins = (*loader.tree.plugins.load_full()).clone();
-                plugins.insert("p".to_string(), plugin(applied.clone()));
-                loader.tree.plugins.store(Arc::new(plugins));
-            }
+            loader.tree.plugins.rcu(|plugins| {
+                let mut next = (**plugins).clone();
+                next.insert("p".to_string(), plugin(applied.clone()));
+                Arc::new(next)
+            });
             let tree = loader.tree_handle();
             let entry = tree.create(opts("p"), None, 0);
             tree.await_tree().await;
             assert_eq!(applied.load(Ordering::SeqCst), 1);
 
             // The "new artifact" fails on apply.
-            {
-                let _guard = loader.tree.write_lock.lock().unwrap();
-                let mut plugins = (*loader.tree.plugins.load_full()).clone();
-                plugins.insert(
+            loader.tree.plugins.rcu(|plugins| {
+                let mut next = (**plugins).clone();
+                next.insert(
                     "p".to_string(),
                     Plugin {
                         is_group: false,
@@ -112,17 +108,16 @@ async fn reload_rolls_back_on_failure() {
                         }),
                     },
                 );
-                loader.tree.plugins.store(Arc::new(plugins));
-            }
+                Arc::new(next)
+            });
             assert!(entry.reload().await.is_err(), "reload must fail");
 
             // Roll back to the previous plugin and re-apply.
-            {
-                let _guard = loader.tree.write_lock.lock().unwrap();
-                let mut plugins = (*loader.tree.plugins.load_full()).clone();
-                plugins.insert("p".to_string(), plugin(applied.clone()));
-                loader.tree.plugins.store(Arc::new(plugins));
-            }
+            loader.tree.plugins.rcu(|plugins| {
+                let mut next = (**plugins).clone();
+                next.insert("p".to_string(), plugin(applied.clone()));
+                Arc::new(next)
+            });
             entry.reload().await.expect("rollback reload");
             assert_eq!(
                 applied.load(Ordering::SeqCst),
