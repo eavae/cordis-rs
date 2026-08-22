@@ -20,6 +20,7 @@ members = [
     "fixtures/meta",
     "fixtures/context",
     "fixtures/builder",
+    "fixtures/macro",
 ]
 
 [workspace.package]

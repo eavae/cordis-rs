@@ -255,6 +255,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cordis-fixture-macro"
+version = "0.1.0"
+dependencies = [
+ "cordis-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cordis-fixture-meta"
 version = "0.1.0"
 dependencies = [

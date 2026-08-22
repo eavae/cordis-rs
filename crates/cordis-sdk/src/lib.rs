@@ -5,7 +5,8 @@
 
 pub use cordis_core::{
     ApplyFn, Context, CordisError, Effect, EffectHandle, Fiber, FiberError, FiberState, Plugin,
-    Service, async_disposer, disposer, sync_disposer,
+    PluginOutput, PluginSpec, Service, async_disposer, disposer, plugin_async, plugin_sync,
+    sync_disposer, typed_validator,
 };
 pub use cordis_macros::{inject, service};
 

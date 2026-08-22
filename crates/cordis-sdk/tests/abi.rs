@@ -25,6 +25,27 @@ fn fixture_path(name: &str) -> PathBuf {
 type ApiVersion = unsafe extern "C" fn() -> u32;
 type Create = unsafe extern "C" fn(*const HostVtable) -> *mut PluginHandle;
 type Dispose = unsafe extern "C" fn(*mut PluginHandle);
+type ValidateConfig = unsafe extern "C" fn(*const c_char) -> i32;
+type ApplyConfig = unsafe extern "C" fn(*mut PluginHandle, *const c_char) -> i32;
+type Count = extern "C" fn() -> u32;
+
+static PROVIDED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+unsafe extern "C" fn capture_provide(
+    _handle: *mut PluginHandle,
+    name: *const c_char,
+    payload: *const c_char,
+) -> i32 {
+    // SAFETY: the plugin passes NUL-terminated strings.
+    let name = unsafe { std::ffi::CStr::from_ptr(name) }
+        .to_string_lossy()
+        .to_string();
+    let payload = unsafe { std::ffi::CStr::from_ptr(payload) }
+        .to_string_lossy()
+        .to_string();
+    PROVIDED.lock().push((name, payload));
+    0
+}
 
 #[test]
 fn host_loads_fixture_and_round_trips() {
@@ -112,6 +133,63 @@ fn host_rejects_version_mismatch() {
         handle.is_null(),
         "host must reject a plugin with an unsupported version"
     );
+}
+
+/// A plugin written with the `cordis_plugin!` macro exports the full ABI and
+/// routes config parsing, validation and apply correctly.
+#[test]
+fn macro_plugin_exports_abi_and_applies() {
+    // SAFETY: the fixture library is built by the workspace before tests.
+    let library = unsafe { Library::new(fixture_path("cordis_fixture_macro")) }.unwrap();
+    let version: libloading::Symbol<ApiVersion> =
+        unsafe { library.get(b"plugin_api_version") }.unwrap();
+    assert_eq!(unsafe { version() }, PLUGIN_API_VERSION);
+
+    let create: libloading::Symbol<Create> = unsafe { library.get(b"plugin_create") }.unwrap();
+    let dispose: libloading::Symbol<Dispose> = unsafe { library.get(b"plugin_dispose") }.unwrap();
+    let validate: libloading::Symbol<ValidateConfig> =
+        unsafe { library.get(b"plugin_validate_config") }.unwrap();
+    let apply: libloading::Symbol<ApplyConfig> = unsafe { library.get(b"plugin_apply") }.unwrap();
+    let apply_count: libloading::Symbol<Count> =
+        unsafe { library.get(b"macro_apply_count") }.unwrap();
+    let validate_count: libloading::Symbol<Count> =
+        unsafe { library.get(b"macro_validate_count") }.unwrap();
+
+    let vtable = HostVtable {
+        log: noop_log,
+        spawn: noop_spawn,
+        sleep: noop_sleep,
+        spawn_blocking: noop_spawn_blocking,
+        provide: capture_provide,
+        get: noop_get,
+        on: noop_on,
+        emit: noop_emit,
+        effect_disposer: noop_effect_disposer,
+        data: std::ptr::null_mut(),
+        host_version: PLUGIN_API_VERSION,
+    };
+    let handle = unsafe { create(&vtable) };
+    assert!(!handle.is_null(), "macro plugin_create must succeed");
+
+    // Bad JSON fails at parse; an empty greeting fails the user validator; a
+    // valid config passes.
+    assert_eq!(unsafe { validate(c"not json".as_ptr()) }, 1);
+    assert_eq!(unsafe { validate(c"{\"greeting\":\"\"}".as_ptr()) }, 1);
+    assert_eq!(unsafe { validate(c"{\"greeting\":\"hi\"}".as_ptr()) }, 0);
+
+    PROVIDED.lock().clear();
+    assert_eq!(
+        unsafe { apply(handle, c"{\"greeting\":\"hi\"}".as_ptr()) },
+        0
+    );
+    assert_eq!(
+        PROVIDED.lock().as_slice(),
+        &[("greeting".to_string(), "\"hi\"".to_string())]
+    );
+    assert_eq!(apply_count(), 1);
+    assert_eq!(validate_count(), 2);
+
+    unsafe { dispose(handle) };
 }
 
 extern "C" fn noop_log(_message: *const c_char) {}

@@ -218,6 +218,161 @@ pub struct Spawned<T> {
     receiver: Option<oneshot::Receiver<T>>,
 }
 
+/// Declares a `.so` plugin from a typed config and an apply function.
+///
+/// Generates the full C ABI surface (`plugin_api_version`, `plugin_create`,
+/// `plugin_dispose`, `plugin_meta`, `plugin_validate_config`, `plugin_apply`)
+/// so plugin authors only write the metadata, a `Deserialize` config type and
+/// an apply function:
+///
+/// ```rust,ignore
+/// use cordis_sdk::{ContextBridge, cordis_plugin};
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct Config { greeting: String }
+///
+/// fn apply(bridge: &ContextBridge, config: &Config) -> Result<(), String> {
+///     let payload = serde_json::to_string(&config.greeting).map_err(|error| error.to_string())?;
+///     bridge.provide("greeting", &payload)?;
+///     Ok(())
+/// }
+///
+/// cordis_plugin! {
+///     meta: c"{\"name\":\"cordis-hello\",\"version\":\"0.1.0\",\"inject\":[],\"provide\":[\"greeting\"]}",
+///     config: Config,
+///     apply: apply,
+/// }
+/// ```
+///
+/// The generated `plugin_apply` parses the JSON config into `$config` and
+/// calls `$apply` with a [`ContextBridge`]; a non-zero return means failure.
+/// With the optional `validate:` arm, `plugin_validate_config` parses the
+/// config and delegates to the given function (signature
+/// `fn(&$config) -> Result<(), E>`).
+///
+/// The plugin crate must depend on `serde_json` (it already needs it for the
+/// `Deserialize` derive) and re-allow `unsafe_code`, because the generated
+/// entry points are inherently unsafe FFI.
+#[macro_export]
+macro_rules! cordis_plugin {
+    (
+        meta: $meta:expr,
+        config: $config:ty,
+        apply: $apply:path
+        $(, validate: $validate:path)?
+        $(,)?
+    ) => {
+        /// Returns the plugin ABI version the host must match.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn plugin_api_version() -> u32 {
+            $crate::PLUGIN_API_VERSION
+        }
+
+        /// Returns the plugin metadata as a NUL-terminated JSON string.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn plugin_meta() -> *const std::ffi::c_char {
+            $meta.as_ptr()
+        }
+
+        /// A plugin instance: keeps the host vtable alive for the handle's
+        /// lifetime.
+        struct CordisMacroPluginInstance {
+            vtable: *const $crate::HostVtable,
+        }
+
+        /// Creates a plugin instance bound to the host vtable.
+        ///
+        /// # Safety
+        ///
+        /// `host` must point to a valid vtable.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn plugin_create(
+            host: *const $crate::HostVtable,
+        ) -> *mut $crate::PluginHandle {
+            if host.is_null() {
+                return std::ptr::null_mut();
+            }
+            // SAFETY: the caller promises a valid vtable; we only read the
+            // version.
+            if unsafe { (*host).host_version } != $crate::PLUGIN_API_VERSION {
+                return std::ptr::null_mut();
+            }
+            let instance = Box::new(CordisMacroPluginInstance { vtable: host });
+            Box::into_raw(instance).cast::<$crate::PluginHandle>()
+        }
+
+        /// Tears down a plugin instance.
+        ///
+        /// # Safety
+        ///
+        /// `handle` must come from a matching `plugin_create` call.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn plugin_dispose(handle: *mut $crate::PluginHandle) {
+            if !handle.is_null() {
+                // SAFETY: the handle came from `plugin_create`.
+                drop(unsafe { Box::from_raw(handle as *mut CordisMacroPluginInstance) });
+            }
+        }
+
+        /// Validates a config payload (JSON string); 0 = valid.
+        ///
+        /// # Safety
+        ///
+        /// `config` must be a NUL-terminated UTF-8 string.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn plugin_validate_config(config: *const std::ffi::c_char) -> i32 {
+            if config.is_null() {
+                return 1;
+            }
+            // SAFETY: the caller passes a NUL-terminated string.
+            let raw = unsafe { std::ffi::CStr::from_ptr(config) };
+            let config: $config = match serde_json::from_str(raw.to_str().unwrap_or_default()) {
+                Ok(config) => config,
+                Err(_) => return 1,
+            };
+            $(if $validate(&config).is_err() {
+                return 1;
+            })?
+            0
+        }
+
+        /// Applies a config payload (JSON string); 0 = ok, non-zero = failed.
+        ///
+        /// # Safety
+        ///
+        /// `handle` must come from `plugin_create`; `config` must be
+        /// NUL-terminated.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn plugin_apply(
+            handle: *mut $crate::PluginHandle,
+            config: *const std::ffi::c_char,
+        ) -> i32 {
+            if handle.is_null() || config.is_null() {
+                return 1;
+            }
+            // SAFETY: the handle came from `plugin_create` and is alive until
+            // `plugin_dispose`.
+            let instance = unsafe { &*(handle as *mut CordisMacroPluginInstance) };
+            // SAFETY: the host vtable outlives the plugin instance.
+            let vtable = unsafe { &*instance.vtable };
+            // SAFETY: the caller passes a NUL-terminated string.
+            let raw = unsafe { std::ffi::CStr::from_ptr(config) }.to_string_lossy();
+            let config: $config = match serde_json::from_str(&raw) {
+                Ok(config) => config,
+                Err(_) => return 1,
+            };
+            // SAFETY: the vtable/handle pair is the one the host provided for
+            // this instance.
+            let bridge = unsafe { $crate::ContextBridge::new(vtable, handle) };
+            match $apply(&bridge, &config) {
+                Ok(()) => 0,
+                Err(_) => 1,
+            }
+        }
+    };
+}
+
 impl<T> Future for Spawned<T> {
     type Output = Result<T, String>;
 
