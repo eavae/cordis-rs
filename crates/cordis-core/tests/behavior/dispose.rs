@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context as TaskContext, Poll};
 
 use cordis_core::{
-    AsyncDisposerStream, Context, Effect, EffectItem, EffectMeta, EventOptions, Plugin,
-    async_disposer, event_listener, sync_disposer,
+    AsyncDisposerStream, Context, Effect, EffectItem, EffectMeta, EventOptions, LoggerService,
+    Plugin, async_disposer, event_listener, sync_disposer,
 };
 
 use super::Timers;
@@ -609,4 +609,61 @@ impl AsyncDisposerStream for ErrorStream {
             _ => Poll::Ready(Some(Err(Box::new(std::io::Error::other("test"))))),
         }
     }
+}
+
+/// A disposer that fails must not break teardown: the fiber still disposes,
+/// every other disposer still runs in reverse registration order, and the
+/// failure is routed to the logger instead of propagating.
+#[tokio::test(flavor = "current_thread")]
+async fn failing_disposer_does_not_stop_teardown() {
+    async {
+        let root = Context::new();
+        let seq = Seq::new();
+        let fiber = root.plugin(
+            &Plugin {
+                is_group: false,
+                name: None,
+                inject: Vec::new(),
+                apply: {
+                    let seq = seq.clone();
+                    Arc::new(move |ctx: &Context, _config| {
+                        // Registered first, so LIFO teardown reaches it last.
+                        ctx.effect(
+                            || {
+                                Effect::Disposer(async_disposer(move || async move {
+                                    Err::<(), Box<dyn std::error::Error + Send + Sync>>(Box::new(
+                                        std::io::Error::other("boom"),
+                                    ))
+                                }))
+                            },
+                            "boom",
+                        )
+                        .unwrap();
+                        for value in 1..=3 {
+                            let seq = seq.clone();
+                            ctx.effect(
+                                move || {
+                                    Effect::Disposer(sync_disposer(move || {
+                                        seq.push(value);
+                                    }))
+                                },
+                                "effect",
+                            )
+                            .unwrap();
+                        }
+                        Effect::None
+                    })
+                },
+            },
+            None,
+        );
+        fiber.wait().await.unwrap();
+
+        fiber.dispose().await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(seq.get(), vec![3, 2, 1]);
+        assert_eq!(root.get::<LoggerService>().unwrap().error_count(), 1);
+    }
+    .await;
 }

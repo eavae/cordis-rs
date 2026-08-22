@@ -762,3 +762,103 @@ async fn internal_update_hook() {
     }
     .await;
 }
+
+/// Upstream parity: a once listener is removed on invocation, so an earlier
+/// bail must not unregister listeners that never ran.
+#[tokio::test(flavor = "current_thread")]
+async fn once_survives_earlier_bail() {
+    async {
+        let root = Context::new();
+        let bailing = root
+            .on(
+                "stop",
+                Arc::new(
+                    |_args: &[Arc<dyn Any + Send + Sync>], _next: Option<WaterfallNext>| {
+                        Box::pin(
+                            async move { Ok(Some(Arc::new(1_u32) as Arc<dyn Any + Send + Sync>)) },
+                        )
+                    },
+                ),
+                EventOptions::default(),
+            )
+            .unwrap();
+        let hits = Arc::new(AtomicU32::new(0));
+        root.once(
+            "stop",
+            event_listener({
+                let hits = hits.clone();
+                move |_| {
+                    hits.store(hits.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                }
+            }),
+            EventOptions::default(),
+        )
+        .unwrap();
+
+        // The earlier listener bails; the once listener never runs and stays
+        // registered.
+        root.bail("stop", &[], None).unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+        // With the bailing listener gone, the once listener fires exactly
+        // once.
+        bailing.dispose().await.unwrap();
+        root.bail("stop", &[], None).unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        root.bail("stop", &[], None).unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+    .await;
+}
+
+/// A ContextFilter re-entering the events API from inside dispatch
+/// resolution must not deadlock (the listener snapshot is resolved before
+/// filters run).
+struct ReenteringFilter {
+    root: Context,
+    reentered: Arc<AtomicU32>,
+}
+
+impl EventFilter for ReenteringFilter {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn filter(&self, _hook_ctx: &Context) -> bool {
+        self.reentered.fetch_add(1, Ordering::SeqCst);
+        self.root.emit("other", &[]);
+        true
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn filter_may_reenter_events_api() {
+    async {
+        let root = Context::new();
+        let other_hits = Arc::new(AtomicU32::new(0));
+        root.on(
+            "other",
+            event_listener({
+                let other_hits = other_hits.clone();
+                move |_| {
+                    other_hits.store(other_hits.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                }
+            }),
+            EventOptions::default(),
+        )
+        .unwrap();
+
+        let reentered = Arc::new(AtomicU32::new(0));
+        let filter = ReenteringFilter {
+            root: root.clone(),
+            reentered: reentered.clone(),
+        };
+        root.on("reentry", event_listener(|_| {}), EventOptions::default())
+            .unwrap();
+
+        root.parallel("reentry", &[], Some(&filter)).await.unwrap();
+        assert_eq!(reentered.load(Ordering::SeqCst), 1);
+        assert_eq!(other_hits.load(Ordering::SeqCst), 1);
+    }
+    .await;
+}

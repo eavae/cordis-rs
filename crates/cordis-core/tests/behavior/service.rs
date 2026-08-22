@@ -119,6 +119,20 @@ async fn service_pending_inject() {
     .await;
 }
 
+/// provide() stores the given Arc without double-wrapping, so get() returns
+/// the very same allocation (mirrors provide_service_arc identity).
+#[tokio::test(flavor = "current_thread")]
+async fn provide_keeps_arc_identity() {
+    async {
+        let root = Context::new();
+        let service = Arc::new(Foo);
+        let _handle = root.provide(service.clone()).unwrap();
+        let fetched = root.get::<Foo>().unwrap();
+        assert!(Arc::ptr_eq(&service, &fetched));
+    }
+    .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn service_check_gates_injector() {
     async {

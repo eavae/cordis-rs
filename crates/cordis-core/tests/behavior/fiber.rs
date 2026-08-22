@@ -643,3 +643,126 @@ async fn fiber_update_config_while_injected_service_reloads() {
     }
     .await;
 }
+
+/// Upstream parity: `update()` on a Pending fiber stores the config; the
+/// plugin activates with the new config once its dependencies arrive.
+#[tokio::test(flavor = "current_thread")]
+async fn update_on_pending_fiber_applies_config_on_activation() {
+    async {
+        let root = Context::new();
+        let applied = Arc::new(Mutex::new(Vec::new()));
+        let apply = {
+            let applied = applied.clone();
+            Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
+                let msg = config.downcast_ref::<Msg>().expect("config").msg;
+                applied.lock().push(msg);
+                Effect::None
+            })
+        };
+        let fiber = root.plugin(
+            &Plugin {
+                is_group: false,
+                name: None,
+                inject: vec![("database".to_string(), None)],
+                apply,
+            },
+            Some(Arc::new(Msg { msg: "first" })),
+        );
+        assert_eq!(fiber.state(), FiberState::Pending);
+
+        fiber
+            .update(Some(Arc::new(Msg { msg: "second" })))
+            .await
+            .unwrap();
+        assert_eq!(fiber.state(), FiberState::Pending);
+        assert!(applied.lock().is_empty());
+
+        drop(root.provide_str("database", Arc::new(7_u32)).unwrap());
+        fiber.wait().await.unwrap();
+        assert_eq!(fiber.state(), FiberState::Active);
+        assert_eq!(applied.lock().as_slice(), &["second"]);
+    }
+    .await;
+}
+
+/// Upstream parity: `update()` on a Failed fiber clears the failure and
+/// retries startup with the new config; a config that still fails leaves the
+/// fiber Failed, and that outcome is reported to the caller.
+#[tokio::test(flavor = "current_thread")]
+async fn update_on_failed_fiber_retries_with_new_config() {
+    async {
+        let root = Context::new();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let apply = {
+            let attempts = attempts.clone();
+            Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                if !*config.downcast_ref::<bool>().expect("config") {
+                    Effect::Error(Box::new(std::io::Error::other("startup failed")))
+                } else {
+                    Effect::None
+                }
+            })
+        };
+        let fiber = root.plugin(
+            &Plugin {
+                is_group: false,
+                name: None,
+                inject: Vec::new(),
+                apply,
+            },
+            Some(Arc::new(false)),
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(fiber.state(), FiberState::Failed);
+        assert!(fiber.wait().await.is_err());
+
+        // A config that still fails leaves the fiber Failed; the retry is
+        // attempted and the outcome reported instead of being swallowed.
+        assert!(fiber.update(Some(Arc::new(false))).await.is_err());
+        assert_eq!(fiber.state(), FiberState::Failed);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+        fiber.update(Some(Arc::new(true))).await.unwrap();
+        assert_eq!(fiber.state(), FiberState::Active);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+    .await;
+}
+
+/// restart() on a Failed fiber clears the failure epoch and retries startup.
+#[tokio::test(flavor = "current_thread")]
+async fn restart_retries_failed_startup() {
+    async {
+        let root = Context::new();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let apply = {
+            let attempts = attempts.clone();
+            Arc::new(
+                move |_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Effect::Error(Box::new(std::io::Error::other("startup failed")))
+                    } else {
+                        Effect::None
+                    }
+                },
+            )
+        };
+        let fiber = root.plugin(
+            &Plugin {
+                is_group: false,
+                name: None,
+                inject: Vec::new(),
+                apply,
+            },
+            None,
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(fiber.state(), FiberState::Failed);
+
+        fiber.restart().await.unwrap();
+        assert_eq!(fiber.state(), FiberState::Active);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+    .await;
+}
