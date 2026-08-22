@@ -71,12 +71,7 @@ async fn group_initialize_and_disable_chain() {
             );
             eprintln!(
                 "[test] outer subgroup len: {:?}",
-                outer
-                    .subgroup
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|sg| sg.entries.lock().unwrap().len())
+                outer.subgroup().map(|sg| sg.entries.len())
             );
             let inner = tree.create(group_opts("", vec![foo_opts()]), Some(&outer.id()), 0);
             tree.await_tree().await;
@@ -116,11 +111,7 @@ async fn group_initialize_and_disable_chain() {
             let outer_entry = tree.resolve(&outer.id()).unwrap();
             eprintln!(
                 "[test] outer subgroup: {:?}",
-                outer_entry.subgroup.lock().unwrap().as_ref().map(|sg| sg
-                    .entries
-                    .lock()
-                    .unwrap()
-                    .len())
+                outer_entry.subgroup().map(|sg| sg.entries.len())
             );
             assert_eq!(tree.entries().len(), 4);
 
@@ -218,7 +209,7 @@ async fn group_plugin_selection_follows_entry_name() {
             tree.await_tree().await;
             assert_eq!(applied.load(Ordering::SeqCst), 1);
             assert!(
-                flagged.subgroup.lock().unwrap().is_none(),
+                flagged.subgroup().is_none(),
                 "the group builtin must not apply for a non-group name"
             );
 
@@ -237,7 +228,7 @@ async fn group_plugin_selection_follows_entry_name() {
             tree.await_tree().await;
             assert_eq!(applied.load(Ordering::SeqCst), 1);
             assert!(
-                named.subgroup.lock().unwrap().is_some(),
+                named.subgroup().is_some(),
                 "the group builtin must apply when selected by name"
             );
         })
@@ -274,7 +265,7 @@ async fn user_plugin_overrides_builtin_group_alias() {
             tree.await_tree().await;
             assert_eq!(applied.load(Ordering::SeqCst), 1);
             assert!(
-                entry.subgroup.lock().unwrap().is_none(),
+                entry.subgroup().is_none(),
                 "a user-registered plugin must shadow the builtin group alias"
             );
         })
@@ -315,8 +306,46 @@ async fn group_config_stays_raw_and_children_evaluate() {
             // applies.
             assert_eq!(sink.lock().unwrap().as_deref(), Some("Hi"));
             assert!(
-                outer.subgroup.lock().unwrap().is_some(),
+                outer.subgroup().is_some(),
                 "the group builtin must still apply"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn remove_before_init_poll_skips_fiber_start() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let root = Context::new();
+            let loader = Loader::new(&root);
+            let applied = Arc::new(AtomicU32::new(0));
+            let applied_apply = applied.clone();
+            loader.mock(
+                "foo",
+                Arc::new(move |_ctx: &Context, _config| {
+                    applied_apply.fetch_add(1, Ordering::SeqCst);
+                    Effect::None
+                }),
+            );
+            let tree = loader.tree_handle();
+            let entry = tree.create(foo_opts(), None, 0);
+            // Remove before the spawned init task gets polled: the detached
+            // flag must prevent the entry from starting a fiber, and
+            // `await_tree` must still settle.
+            tree.remove(&entry.id());
+            tree.await_tree().await;
+            assert_eq!(
+                applied.load(Ordering::SeqCst),
+                0,
+                "a detached entry must not apply"
+            );
+            assert!(
+                tree.entries()
+                    .iter()
+                    .all(|candidate| !Arc::ptr_eq(candidate, &entry)),
+                "the removed entry must not be reachable"
             );
         })
         .await;

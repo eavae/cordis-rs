@@ -10,7 +10,10 @@ use cordis_core::{
 };
 
 use crate::context_bridge::PluginHandlePtr;
-use crate::entry::{Entry, EntryGroup, EntryOptions, EntryTree, PartialEntryOptions};
+use crate::entry::{
+    Entry, EntryGroup, EntryOptions, EntryTree, PartialEntryOptions, StructuralChange, TreeState,
+    current_group_chain, rebuild_group, rebuild_tree,
+};
 use crate::evaluator::EvalEnv;
 use crate::so::SoPlugin;
 
@@ -267,27 +270,26 @@ impl Loader {
                         None => Vec::new(),
                     };
                     let subgroup = {
-                        let existing = entry.subgroup.lock().unwrap().clone();
+                        let existing = entry.subgroup();
                         if let Some(subgroup) = existing {
                             subgroup
                         } else {
-                            let subgroup = EntryGroup::new(
-                                loader.tree_handle(),
-                                entry.ctx.clone(),
-                                Some(entry.parent.lock().unwrap().clone()),
-                            );
-                            *subgroup.entry.lock().unwrap() = Some(entry.clone());
-                            *entry.subgroup.lock().unwrap() = Some(subgroup.clone());
-                            subgroup
+                            loader.tree_handle().attach_subgroup(&entry)
                         }
                     };
                     // `Service.init` registers the stop disposer first.
+                    // The disposer resolves the current subgroup node at
+                    // stop time: structural snapshots are immutable, so the
+                    // captured handle may be stale.
                     let stop_subgroup = subgroup.clone();
+                    let stop_loader = loader.clone();
                     let _ = ctx.fiber().effect(
                         move || {
                             Effect::Disposer(cordis_core::sync_disposer(move || {
+                                let subgroup =
+                                    stop_loader.tree_handle().current_group(&stop_subgroup);
                                 let entries: Vec<Arc<Entry>> =
-                                    stop_subgroup.entries.lock().unwrap().clone();
+                                    subgroup.entries.iter().cloned().collect();
                                 for entry in entries {
                                     let fiber = entry.fiber.lock().unwrap().clone();
                                     if let Some(fiber) = fiber {
@@ -313,7 +315,7 @@ impl Loader {
 
     /// Reads a config list and reconciles the tree (mirrors `tree.read`).
     pub async fn read(&self, configs: Vec<EntryOptions>) {
-        let root = self.tree.root.lock().unwrap().clone().expect("root");
+        let root = self.tree.state.load_full().root.clone();
         self.read_group(&root, configs).await;
     }
 
@@ -321,65 +323,107 @@ impl Loader {
     /// updating and disposing entries as needed (mirrors `tree.read` applied
     /// to a subgroup).
     pub async fn read_group(&self, group: &Arc<EntryGroup>, configs: Vec<EntryOptions>) {
-        let mut next_entries: Vec<Arc<Entry>> = Vec::new();
-        for options in configs {
-            if options.group == Some(true) {
-                let mut options = options;
-                self.tree.ensure_id(&mut options);
-                // Group entry: ensure the entry and its subgroup, then process
-                // the nested config.
-                let entry = if let Some(existing) = self.find_matching(group, &options) {
-                    existing.update(PartialEntryOptions::from_options(&options), false, true);
-                    existing
-                } else {
-                    let entry = Entry::new(self.tree_handle(), group.clone(), options.clone());
-                    entry.update(PartialEntryOptions::from_options(&options), true, false);
-                    group.entries.lock().unwrap().push(entry.clone());
-                    entry
-                };
-                next_entries.push(entry.clone());
-                let needs_init = entry.fiber.lock().unwrap().is_none() && !entry.disabled();
-                if needs_init {
-                    entry.init().await;
+        // Structural phase: reconcile membership in a single atomic commit.
+        let (updates, created, removed, to_init) = {
+            let mut updates: Vec<(Arc<Entry>, PartialEntryOptions)> = Vec::new();
+            let mut created: Vec<Arc<Entry>> = Vec::new();
+            let mut removed: Vec<Arc<Entry>> = Vec::new();
+            let mut to_init: Vec<Arc<Entry>> = Vec::new();
+            self.tree.state.rcu(|old| {
+                updates.clear();
+                created.clear();
+                removed.clear();
+                to_init.clear();
+                let (group, chain) = current_group_chain(old, group).expect("group");
+                let mut next_entries: Vec<Arc<Entry>> = Vec::new();
+                for options in &configs {
+                    if options.group == Some(true) {
+                        let mut options = options.clone();
+                        self.tree.ensure_id(&mut options);
+                        if let Some(existing) = self.find_matching(&group, &options) {
+                            updates.push((
+                                existing.clone(),
+                                PartialEntryOptions::from_options(&options),
+                            ));
+                            next_entries.push(existing);
+                        } else {
+                            let entry =
+                                Entry::new(self.tree_handle(), group.clone(), options.clone());
+                            created.push(entry.clone());
+                            next_entries.push(entry);
+                        }
+                        continue;
+                    }
+                    if let Some(existing) = self.find_matching(&group, options) {
+                        updates
+                            .push((existing.clone(), PartialEntryOptions::from_options(options)));
+                        next_entries.push(existing);
+                    } else {
+                        let mut options = options.clone();
+                        self.tree.ensure_id(&mut options);
+                        let entry = Entry::new(self.tree_handle(), group.clone(), options.clone());
+                        created.push(entry.clone());
+                        next_entries.push(entry);
+                    }
                 }
-                continue;
-            }
-            if let Some(existing) = self.find_matching(group, &options) {
-                existing.update(PartialEntryOptions::from_options(&options), false, true);
-                next_entries.push(existing);
-            } else {
-                let mut options = options;
-                self.tree.ensure_id(&mut options);
-                let entry = Entry::new(self.tree_handle(), group.clone(), options.clone());
+                let local_removed: Vec<Arc<Entry>> = group
+                    .entries
+                    .iter()
+                    .filter(|entry| !next_entries.iter().any(|next| Arc::ptr_eq(next, entry)))
+                    .cloned()
+                    .collect();
+                let mut final_entries: Vec<Arc<Entry>> = group
+                    .entries
+                    .iter()
+                    .filter(|entry| !local_removed.iter().any(|gone| Arc::ptr_eq(gone, entry)))
+                    .cloned()
+                    .collect();
+                for entry in &created {
+                    final_entries.push(entry.clone());
+                }
+                let final_entries = Arc::new(final_entries);
+                let change = StructuralChange {
+                    chain,
+                    apply: Box::new(move |node| {
+                        rebuild_group(node, final_entries.clone(), node.subgroups.clone())
+                    }),
+                };
+                let mut parent_of = old.parent_of.clone();
+                for entry in &local_removed {
+                    parent_of.remove(&entry.key);
+                }
+                let new_root = rebuild_tree(&old.root, &[change], &mut parent_of);
+                removed.extend(local_removed);
+                to_init.extend(
+                    next_entries
+                        .iter()
+                        .filter(|entry| entry.fiber.lock().unwrap().is_none())
+                        .cloned(),
+                );
+                Arc::new(TreeState {
+                    root: new_root,
+                    parent_of,
+                })
+            });
+            (updates, created, removed, to_init)
+        };
 
-                entry.update(PartialEntryOptions::from_options(&options), true, false);
-                group.entries.lock().unwrap().push(entry.clone());
-                next_entries.push(entry);
+        // Post-commit phase (no lock): option updates may run user callbacks,
+        // removed fibers are disposed as counted tasks, new entries init.
+        for (entry, options) in updates {
+            entry.update(options, false, true);
+        }
+        for entry in &created {
+            let options = PartialEntryOptions::from_options(&entry.options.lock().unwrap().clone());
+            entry.update(options, true, false);
+        }
+        for entry in &removed {
+            let fiber = entry.detach_and_clear_fiber();
+            if let Some(fiber) = fiber {
+                self.tree.spawn_dispose(fiber);
             }
         }
-
-        let removed: Vec<Arc<Entry>> = group
-            .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|entry| !next_entries.iter().any(|next| Arc::ptr_eq(next, entry)))
-            .cloned()
-            .collect();
-        for entry in removed {
-            if let Some(fiber) = entry.fiber.lock().unwrap().clone() {
-                tokio::task::spawn_local(fiber.dispose());
-            }
-            group
-                .entries
-                .lock()
-                .unwrap()
-                .retain(|item| !Arc::ptr_eq(item, &entry));
-        }
-        for entry in next_entries
-            .into_iter()
-            .filter(|entry| entry.fiber.lock().unwrap().is_none())
-        {
+        for entry in to_init {
             entry.init().await;
         }
     }
@@ -389,8 +433,6 @@ impl Loader {
     fn find_matching(&self, group: &Arc<EntryGroup>, options: &EntryOptions) -> Option<Arc<Entry>> {
         group
             .entries
-            .lock()
-            .unwrap()
             .iter()
             .find(|entry| {
                 if !options.id.is_empty() {

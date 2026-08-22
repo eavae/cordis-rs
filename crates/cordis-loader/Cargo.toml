@@ -15,6 +15,7 @@ all = "warn"
 
 [dependencies]
 arc-swap.workspace = true
+im.workspace = true
 cordis-core = { path = "../cordis-core" }
 cordis-sdk = { path = "../cordis-sdk", default-features = false }
 tokio.workspace = true

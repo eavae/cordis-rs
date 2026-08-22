@@ -151,21 +151,7 @@ pub fn include_plugin() -> Plugin {
                         .is_some_and(|candidate| Arc::ptr_eq(candidate, &fiber))
                 })
                 .expect("include entry");
-            let subgroup = {
-                let existing = entry.subgroup.lock().unwrap().clone();
-                if let Some(subgroup) = existing {
-                    subgroup
-                } else {
-                    let subgroup = EntryGroup::new(
-                        loader.tree_handle(),
-                        entry.ctx.clone(),
-                        Some(entry.parent.lock().unwrap().clone()),
-                    );
-                    *subgroup.entry.lock().unwrap() = Some(entry.clone());
-                    *entry.subgroup.lock().unwrap() = Some(subgroup.clone());
-                    subgroup
-                }
-            };
+            let subgroup = loader.tree_handle().attach_subgroup(&entry);
             let loader = loader;
             Effect::Async(Box::pin(async move {
                 mount_include(&loader, &subgroup, &config, &entry).await;
@@ -220,6 +206,7 @@ async fn mount_include(
     let tree = loader.tree_handle();
     let state_for_write = state;
     let subgroup_for_write = subgroup.clone();
+    let tree_for_write = tree.clone();
     tree.write_callback.store(Arc::new(Some(Arc::new(move || {
         loader_ctx.emit("loader/config-update", &[]);
         if state_for_write.pending.load(Ordering::Acquire) {
@@ -228,10 +215,14 @@ async fn mount_include(
         state_for_write.pending.store(true, Ordering::Release);
         let state = state_for_write.clone();
         let subgroup = subgroup_for_write.clone();
+        let tree = tree_for_write.clone();
         tokio::task::spawn_local(async move {
             // `yield_now` mirrors the TS `setTimeout(0)` debounce boundary:
             // writes issued in the same turn coalesce into one disk write.
             tokio::task::yield_now().await;
+            // Re-resolve the current subgroup node: structural snapshots are
+            // immutable, so the captured handle may be stale after reloads.
+            let subgroup = tree.current_group(&subgroup);
             let _ = state.write_once(&subgroup);
             state.pending.store(false, Ordering::Release);
         });
@@ -257,7 +248,7 @@ pub async fn refresh_include_file(loader: &Loader, filename: &Path) -> bool {
         if candidate != canonical {
             continue;
         }
-        let Some(subgroup) = entry.subgroup.lock().unwrap().clone() else {
+        let Some(subgroup) = entry.subgroup() else {
             continue;
         };
         if fs::read_to_string(&canonical).is_err() {
@@ -291,8 +282,6 @@ impl IncludeWriteState {
         }
         let entries: Vec<EntryOptions> = subgroup
             .entries
-            .lock()
-            .unwrap()
             .iter()
             .map(|entry| entry.options.lock().unwrap().clone())
             .collect();

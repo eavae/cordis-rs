@@ -2,7 +2,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -61,42 +61,117 @@ pub enum IsolateValue {
 }
 
 /// A group of entries (mirrors `EntryGroup` in group.ts).
+///
+/// A group node is immutable: structural changes never mutate it in place.
+/// New nodes are built from the old ones (sharing unchanged `entries` and
+/// `subgroups` values) and published as part of a new [`TreeState`].
 pub struct EntryGroup {
-    /// The owning tree.
-    pub tree: Arc<EntryTree>,
     /// The group's context; entries inherit its isolate and intercept
-    /// layers.
+    /// layers. The handle points to the owning entry's shared context
+    /// (or the tree context for the root group).
     pub ctx: Context,
-    /// The parent group, if any (`None` for the root group).
-    pub parent: Option<Arc<Self>>,
-    /// Direct child entries of this group.
-    pub entries: Mutex<Vec<Arc<Entry>>>,
-    /// The group plugin's fiber, once initialized.
-    pub fiber: Mutex<Option<Arc<Fiber>>>,
-    /// The entry that owns this group (when the group belongs to an entry).
-    pub entry: Mutex<Option<Arc<Entry>>>,
-}
-
-impl EntryGroup {
-    /// Creates an empty group under `parent` (or the root group when
-    /// `parent` is `None`).
-    pub fn new(tree: Arc<EntryTree>, ctx: Context, parent: Option<Arc<Self>>) -> Arc<Self> {
-        Arc::new(Self {
-            tree,
-            ctx,
-            parent,
-            entries: Mutex::new(Vec::new()),
-            fiber: Mutex::new(None),
-            entry: Mutex::new(None),
-        })
-    }
+    /// The entry that owns this group (`None` for the root group).
+    pub entry: Option<Arc<Entry>>,
+    /// Direct child entries of this group, in config order.
+    pub entries: Arc<Vec<Arc<Entry>>>,
+    /// The subgroups attached under group-child entries (owning entry →
+    /// subgroup node).
+    pub subgroups: Arc<Vec<(Arc<Entry>, Arc<EntryGroup>)>>,
 }
 
 impl std::fmt::Debug for EntryGroup {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EntryGroup")
-            .field("entries", &self.entries.lock().unwrap().len())
+            .field("entries", &self.entries.len())
+            .field("subgroups", &self.subgroups.len())
             .finish()
+    }
+}
+
+/// The whole structural state of the tree.
+///
+/// The value is immutable: every structural change builds a new [`TreeState`]
+/// from the current snapshot (sharing untouched subtrees) and publishes it
+/// with a single compare-and-swap. Readers load one snapshot and never
+/// observe partial changes.
+pub struct TreeState {
+    /// The root group of the tree.
+    pub root: Arc<EntryGroup>,
+    /// Entry key → containing group node. This is the tree's reverse index,
+    /// used by ancestor walks and subgroup lookups; it is maintained
+    /// together with the root in every commit.
+    pub parent_of: im::HashMap<u64, Arc<EntryGroup>>,
+}
+
+impl TreeState {
+    /// Creates the initial state with an empty root group.
+    fn root(ctx: Context) -> Self {
+        Self {
+            root: Arc::new(EntryGroup {
+                ctx,
+                entry: None,
+                entries: Arc::new(Vec::new()),
+                subgroups: Arc::new(Vec::new()),
+            }),
+            parent_of: im::HashMap::new(),
+        }
+    }
+
+    /// Resolves an entry by id within this snapshot, returning the entry and
+    /// the root-first chain of group nodes containing it.
+    pub(crate) fn resolve_chain(
+        &self,
+        id: &str,
+    ) -> Result<(Arc<Entry>, Vec<Arc<EntryGroup>>), String> {
+        let parts: Vec<&str> = id.split(EntryTree::SEP).collect();
+        let mut current = self.root.clone();
+        let mut chain = vec![current.clone()];
+        for (index, part) in parts.iter().enumerate() {
+            let is_last = index + 1 == parts.len();
+            let entry = current
+                .entries
+                .iter()
+                .find(|entry| entry.options.lock().unwrap().id == *part)
+                .cloned()
+                .ok_or_else(|| format!("cannot resolve entry {id}"))?;
+            if is_last {
+                return Ok((entry, chain));
+            }
+            current = current
+                .subgroups
+                .iter()
+                .find(|(owner, _)| Arc::ptr_eq(owner, &entry))
+                .map(|(_, subgroup)| subgroup.clone())
+                .ok_or_else(|| format!("cannot resolve entry {id}"))?;
+            chain.push(current.clone());
+        }
+        Err(format!("cannot resolve entry {id}"))
+    }
+
+    /// Resolves a group, returning the root-first chain to it (`None`
+    /// resolves the root group).
+    pub(crate) fn resolve_group_chain(
+        &self,
+        id: Option<&str>,
+    ) -> Result<Vec<Arc<EntryGroup>>, String> {
+        match id {
+            None => Ok(vec![self.root.clone()]),
+            Some(id) => {
+                let (entry, mut chain) = self.resolve_chain(id)?;
+                let subgroup = chain
+                    .last()
+                    .and_then(|group| {
+                        group
+                            .subgroups
+                            .iter()
+                            .find(|(owner, _)| Arc::ptr_eq(owner, &entry))
+                            .map(|(_, subgroup)| subgroup.clone())
+                    })
+                    .ok_or_else(|| format!("entry {id} is not a group"))?;
+                chain.push(subgroup);
+                Ok(chain)
+            }
+        }
     }
 }
 
@@ -113,8 +188,12 @@ pub struct EntryTree {
     pub builtins: Arc<ArcSwap<HashMap<String, Plugin>>>,
     /// Called after every structural change (config write-back).
     pub write_callback: ArcSwap<Option<WriteCallback>>,
-    /// The root group of the tree.
-    pub root: Arc<Mutex<Option<Arc<EntryGroup>>>>,
+    /// The entire structural state. Readers load an immutable snapshot;
+    /// writers build a new state and publish it with a single
+    /// compare-and-swap, so no writer lock is needed.
+    pub state: ArcSwap<TreeState>,
+    /// Allocates stable entry keys (used by the `parent_of` index).
+    next_key: AtomicU64,
     /// Number of pending entry tasks (used by the `await` intercept).
     pub tasks: Arc<AtomicUsize>,
     /// Notifies waiters when a pending entry task settles.
@@ -127,19 +206,17 @@ impl EntryTree {
 
     /// Creates a tree with an empty root group.
     pub fn new(ctx: &Context) -> Arc<Self> {
-        let tree = Arc::new(Self {
+        Arc::new(Self {
             ctx: ctx.clone(),
             enable_logs: true,
             plugins: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             builtins: Arc::new(ArcSwap::from_pointee(HashMap::new())),
             write_callback: ArcSwap::from_pointee(None),
-            root: Arc::new(Mutex::new(None)),
+            state: ArcSwap::from_pointee(TreeState::root(ctx.clone())),
+            next_key: AtomicU64::new(1),
             tasks: Arc::new(AtomicUsize::new(0)),
             tasks_notify: Arc::new(Notify::new()),
-        });
-        let root = EntryGroup::new(tree.clone(), ctx.clone(), None);
-        *tree.root.lock().unwrap() = Some(root);
-        tree
+        })
     }
 
     /// Resolves a plugin by name. `cordis:` names hit builtins only; other
@@ -206,11 +283,9 @@ impl EntryTree {
 
     /// All entries in the tree (depth-first).
     pub fn entries(&self) -> Vec<Arc<Entry>> {
+        let state = self.state.load_full();
         let mut result = Vec::new();
-        let root = self.root.lock().unwrap();
-        if let Some(root) = root.as_ref() {
-            collect_entries(root, &mut result);
-        }
+        collect_entries(&state.root, &mut result);
         result
     }
 
@@ -221,56 +296,16 @@ impl EntryTree {
 
     /// Resolves an entry by id, walking nested groups via `:` separators.
     pub fn resolve_path(&self, id: &str) -> Result<Arc<Entry>, String> {
-        let parts: Vec<&str> = id.split(Self::SEP).collect();
-        let tree: &Self = self;
-        let mut current: Arc<EntryGroup> = tree
-            .root
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| format!("cannot resolve entry {id}"))?;
-        for (index, part) in parts.iter().enumerate() {
-            let is_last = index + 1 == parts.len();
-            let entry = current
-                .entries
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|entry| entry.options.lock().unwrap().id == *part)
-                .cloned()
-                .ok_or_else(|| format!("cannot resolve entry {id}"))?;
-            if is_last {
-                return Ok(entry);
-            }
-            current = entry
-                .subgroup
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| format!("cannot resolve entry {id}"))?;
-        }
-        Err(format!("cannot resolve entry {id}"))
+        let state = self.state.load_full();
+        state.resolve_chain(id).map(|(entry, _)| entry)
     }
 
     /// Resolves a group; `None` resolves the root group.
     pub fn resolve_group(&self, id: Option<&str>) -> Result<Arc<EntryGroup>, String> {
-        match id {
-            None => self
-                .root
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| "tree has no root".to_string()),
-            Some(id) => {
-                let entry = self.resolve_path(id)?;
-                entry
-                    .subgroup
-                    .lock()
-                    .unwrap()
-                    .clone()
-                    .ok_or_else(|| format!("entry {id} is not a group"))
-            }
-        }
+        let state = self.state.load_full();
+        state
+            .resolve_group_chain(id)
+            .map(|chain| chain.last().expect("group chain").clone())
     }
 
     /// Generates a non-colliding 8-character hex id (mirrors `ensureId`).
@@ -298,16 +333,43 @@ impl EntryTree {
         parent: Option<&str>,
         position: usize,
     ) -> Arc<Entry> {
-        let group = self
-            .resolve_group(parent)
-            .expect("cannot resolve parent group");
         let mut options = options;
         self.ensure_id(&mut options);
-        let entry = Entry::new(self.clone(), group.clone(), options.clone());
-        let mut entries = group.entries.lock().unwrap();
-        let position = position.min(entries.len());
-        entries.insert(position, entry.clone());
-        drop(entries);
+        let entry = {
+            // Resolve the parent group for the new entry's context; the
+            // group's context handle is stable across rebuilds.
+            let group = {
+                let state = self.state.load_full();
+                let chain = state
+                    .resolve_group_chain(parent)
+                    .expect("cannot resolve parent group");
+                chain.last().expect("group chain").clone()
+            };
+            let entry = Entry::new(self.clone(), group, options.clone());
+            self.state.rcu(|old| {
+                let chain = old
+                    .resolve_group_chain(parent)
+                    .expect("cannot resolve parent group");
+                let group = chain.last().expect("group chain").clone();
+                let mut entries = group.entries.as_ref().clone();
+                let position = position.min(entries.len());
+                entries.insert(position, entry.clone());
+                let entries = Arc::new(entries);
+                let change = StructuralChange {
+                    chain,
+                    apply: Box::new(move |node| {
+                        rebuild_group(node, entries.clone(), node.subgroups.clone())
+                    }),
+                };
+                let mut parent_of = old.parent_of.clone();
+                let new_root = rebuild_tree(&old.root, &[change], &mut parent_of);
+                Arc::new(TreeState {
+                    root: new_root,
+                    parent_of,
+                })
+            });
+            entry
+        };
         self.write();
         entry.update(PartialEntryOptions::from_options(&options), true, false);
         entry.init_task.store(true, Ordering::Release);
@@ -324,13 +386,37 @@ impl EntryTree {
         let entry = self
             .resolve_path(id)
             .unwrap_or_else(|error| panic!("{error}"));
-        let parent = entry.parent.lock().unwrap();
-        parent
-            .entries
-            .lock()
-            .unwrap()
-            .retain(|item| !Arc::ptr_eq(item, &entry));
-        if let Some(fiber) = entry.fiber.lock().unwrap().clone() {
+        self.state.rcu(|old| {
+            let (entry, chain) = old.resolve_chain(id).expect("cannot resolve entry");
+            let entry_for_change = entry.clone();
+            let change = StructuralChange {
+                chain,
+                apply: Box::new(move |node| {
+                    let entries: Vec<Arc<Entry>> = node
+                        .entries
+                        .iter()
+                        .filter(|candidate| !Arc::ptr_eq(candidate, &entry_for_change))
+                        .cloned()
+                        .collect();
+                    let subgroups: Vec<(Arc<Entry>, Arc<EntryGroup>)> = node
+                        .subgroups
+                        .iter()
+                        .filter(|(owner, _)| !Arc::ptr_eq(owner, &entry_for_change))
+                        .cloned()
+                        .collect();
+                    rebuild_group(node, Arc::new(entries), Arc::new(subgroups))
+                }),
+            };
+            let mut parent_of = old.parent_of.clone();
+            parent_of.remove(&entry.key);
+            let new_root = rebuild_tree(&old.root, &[change], &mut parent_of);
+            Arc::new(TreeState {
+                root: new_root,
+                parent_of,
+            })
+        });
+        let fiber = entry.detach_and_clear_fiber();
+        if let Some(fiber) = fiber {
             self.spawn_dispose(fiber);
         }
         self.write();
@@ -358,116 +444,209 @@ impl EntryTree {
         let entry = self
             .resolve_path(id)
             .unwrap_or_else(|error| panic!("{error}"));
-        let source = entry.parent.lock().unwrap().clone();
-        let target = self
-            .resolve_group(parent)
-            .unwrap_or_else(|error| panic!("{error}"));
-        if Arc::ptr_eq(&source, &target) {
+        // Pre-checks from the current snapshot (same no-op semantics as the
+        // original): reject moves into the entry's own subtree (a cycle) and
+        // same-group moves.
+        {
+            let state = self.state.load_full();
+            let (_, source_chain) = state.resolve_chain(id).expect("cannot resolve entry");
+            let target_chain = state
+                .resolve_group_chain(parent)
+                .expect("cannot resolve parent group");
+            let source = source_chain.last().expect("source chain").clone();
+            let target = target_chain.last().expect("target chain").clone();
+            let moves_into_own_subtree = target_chain.iter().any(|group| {
+                group
+                    .entry
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, &entry))
+            });
+            if moves_into_own_subtree || Arc::ptr_eq(&source, &target) {
+                return;
+            }
+        }
+        // Commit the structural move atomically (CAS on the root).
+        let mut applied = false;
+        self.state.rcu(|old| {
+            let (entry, source_chain) = old.resolve_chain(id).expect("cannot resolve entry");
+            let target_chain = old
+                .resolve_group_chain(parent)
+                .expect("cannot resolve parent group");
+            let source = source_chain.last().expect("source chain").clone();
+            let target = target_chain.last().expect("target chain").clone();
+            // Defensive: a concurrent same-entry operation may have
+            // invalidated the pre-check; keep the old state in that case.
+            let moves_into_own_subtree = target_chain.iter().any(|group| {
+                group
+                    .entry
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(owner, &entry))
+            });
+            if moves_into_own_subtree || Arc::ptr_eq(&source, &target) {
+                return Arc::clone(old);
+            }
+            applied = true;
+            let subgroup_of_entry = source
+                .subgroups
+                .iter()
+                .find(|(owner, _)| Arc::ptr_eq(owner, &entry))
+                .map(|(_, subgroup)| subgroup.clone());
+            let entry_for_source = entry.clone();
+            let source_change = StructuralChange {
+                chain: source_chain,
+                apply: Box::new(move |node| {
+                    let entries: Vec<Arc<Entry>> = node
+                        .entries
+                        .iter()
+                        .filter(|candidate| !Arc::ptr_eq(candidate, &entry_for_source))
+                        .cloned()
+                        .collect();
+                    let subgroups: Vec<(Arc<Entry>, Arc<EntryGroup>)> = node
+                        .subgroups
+                        .iter()
+                        .filter(|(owner, _)| !Arc::ptr_eq(owner, &entry_for_source))
+                        .cloned()
+                        .collect();
+                    rebuild_group(node, Arc::new(entries), Arc::new(subgroups))
+                }),
+            };
+            let entry_for_target = entry.clone();
+            let subgroup_for_target = subgroup_of_entry.clone();
+            let target_change = StructuralChange {
+                chain: target_chain,
+                apply: Box::new(move |node| {
+                    let mut entries = node.entries.as_ref().clone();
+                    entries.push(entry_for_target.clone());
+                    let mut subgroups = node.subgroups.as_ref().clone();
+                    if let Some(subgroup) = &subgroup_for_target {
+                        subgroups.push((entry_for_target.clone(), subgroup.clone()));
+                    }
+                    rebuild_group(node, Arc::new(entries), Arc::new(subgroups))
+                }),
+            };
+            let mut parent_of = old.parent_of.clone();
+            let new_root = rebuild_tree(&old.root, &[source_change, target_change], &mut parent_of);
+            Arc::new(TreeState {
+                root: new_root,
+                parent_of,
+            })
+        });
+        if !applied {
             return;
         }
-        // Names whose realm might change with the move: the plugin's declared
-        // injects (entry options may leave them to the plugin), plus the
-        // service it provides under its own name.
-        let mut names: Vec<String> = entry
-            .options
-            .lock()
-            .unwrap()
-            .inject
-            .clone()
-            .unwrap_or_default();
-        if let Ok(plugin) = self.import(&entry.options.lock().unwrap().name) {
-            for (name, _) in &plugin.inject {
-                if !names.contains(name) {
-                    names.push(name.clone());
+        // `rcu` returns the previous value; reload to get the committed
+        // state.
+        let state = self.state.load_full();
+        let target_group = state
+            .resolve_group_chain(parent)
+            .expect("target group")
+            .pop()
+            .expect("target group");
+
+        // Same-entry side effects are serialized by the entry's lifecycle
+        // lock so concurrent moves of the same entry stay ordered with the
+        // commits.
+        let fiber_to_dispose = {
+            let _guard = entry.lifecycle.lock().unwrap();
+            // Names whose realm might change with the move: the plugin's
+            // declared injects (entry options may leave them to the plugin),
+            // plus the service it provides under its own name.
+            let mut names: Vec<String> = entry
+                .options
+                .lock()
+                .unwrap()
+                .inject
+                .clone()
+                .unwrap_or_default();
+            if let Ok(plugin) = self.import(&entry.options.lock().unwrap().name) {
+                for (name, _) in &plugin.inject {
+                    if !names.contains(name) {
+                        names.push(name.clone());
+                    }
                 }
             }
-        }
-        let own_name = entry.options.lock().unwrap().name.clone();
-        if !names.contains(&own_name) {
-            names.push(own_name);
-        }
-        let old_labels: HashMap<String, Option<cordis_core::Label>> = names
-            .iter()
-            .map(|name| (name.clone(), entry.ctx.isolate_label(name)))
-            .collect();
-
-        source
-            .entries
-            .lock()
-            .unwrap()
-            .retain(|item| !Arc::ptr_eq(item, &entry));
-        target.entries.lock().unwrap().push(entry.clone());
-        *entry.parent.lock().unwrap() = target;
-
-        // Re-point the context chain at the new parent and re-apply the
-        // entry's own overlay layers.
-        entry.ctx.reparent(&entry.parent.lock().unwrap().ctx);
-        entry.apply_overlay_layers();
-        self.write();
-
-        let changed: Vec<(
-            String,
-            Option<cordis_core::Label>,
-            Option<cordis_core::Label>,
-        )> = names
-            .into_iter()
-            .filter_map(|name| {
-                let old = old_labels.get(&name).cloned().flatten();
-                let new = entry.ctx.isolate_label(&name);
-                (old != new).then_some((name, old, new))
-            })
-            .collect();
-
-        if !changed.is_empty() {
-            // The realm changed: restart the moved entry's fiber (clear it
-            // first so the loader's self-dispose hook stays silent). Once the
-            // entry re-provides under the new realm, wake dependents so their
-            // inject checks re-run (mirrors the TS patch-context order).
-            let fiber = entry.fiber.lock().unwrap().clone();
-            *entry.fiber.lock().unwrap() = None;
-            if let Some(fiber) = fiber {
-                self.spawn_dispose(fiber);
+            let own_name = entry.options.lock().unwrap().name.clone();
+            if !names.contains(&own_name) {
+                names.push(own_name);
             }
-            if !entry.disabled() && entry.options.lock().unwrap().group != Some(true) {
+            let old_labels: HashMap<String, Option<cordis_core::Label>> = names
+                .iter()
+                .map(|name| (name.clone(), entry.ctx.isolate_label(name)))
+                .collect();
+
+            // Re-point the context chain at the new parent and re-apply the
+            // entry's own overlay layers.
+            entry.ctx.reparent(&target_group.ctx);
+            entry.apply_overlay_layers();
+
+            let changed: Vec<(
+                String,
+                Option<cordis_core::Label>,
+                Option<cordis_core::Label>,
+            )> = names
+                .into_iter()
+                .filter_map(|name| {
+                    let old = old_labels.get(&name).cloned().flatten();
+                    let new = entry.ctx.isolate_label(&name);
+                    (old != new).then_some((name, old, new))
+                })
+                .collect();
+
+            if !changed.is_empty() {
+                // The realm changed: restart the moved entry's fiber (clear
+                // it first so the loader's self-dispose hook stays silent).
+                // Once the entry re-provides under the new realm, wake
+                // dependents so their inject checks re-run (mirrors the TS
+                // patch-context order).
+                let fiber = entry.fiber.lock().unwrap().clone();
+                *entry.fiber.lock().unwrap() = None;
+                if !entry.disabled() && entry.options.lock().unwrap().group != Some(true) {
+                    entry.init_task.store(true, Ordering::Release);
+                    let this = entry.clone();
+                    let notify: Vec<(String, Vec<cordis_core::Label>)> = changed
+                        .iter()
+                        .map(|(name, old, new)| {
+                            let mut labels = Vec::new();
+                            if let Some(old) = old {
+                                labels.push(old.clone());
+                            }
+                            if let Some(new) = new {
+                                labels.push(new.clone());
+                            }
+                            (name.clone(), labels)
+                        })
+                        .collect();
+                    tokio::task::spawn_local(async move {
+                        this.init_inner().await;
+                        this.init_task.store(false, Ordering::Release);
+                        for (name, labels) in notify {
+                            let _ = this.ctx.notify_with_labels(&name, &labels);
+                        }
+                    });
+                }
+                fiber
+            } else if entry.disabled() {
+                let fiber = entry.fiber.lock().unwrap().clone();
+                *entry.fiber.lock().unwrap() = None;
+                fiber
+            } else if entry.fiber.lock().unwrap().is_none()
+                && entry.options.lock().unwrap().group != Some(true)
+            {
                 entry.init_task.store(true, Ordering::Release);
-                let this = entry;
-                let notify: Vec<(String, Vec<cordis_core::Label>)> = changed
-                    .iter()
-                    .map(|(name, old, new)| {
-                        let mut labels = Vec::new();
-                        if let Some(old) = old {
-                            labels.push(old.clone());
-                        }
-                        if let Some(new) = new {
-                            labels.push(new.clone());
-                        }
-                        (name.clone(), labels)
-                    })
-                    .collect();
+                let this = entry.clone();
                 tokio::task::spawn_local(async move {
                     this.init_inner().await;
                     this.init_task.store(false, Ordering::Release);
-                    for (name, labels) in notify {
-                        let _ = this.ctx.notify_with_labels(&name, &labels);
-                    }
                 });
+                None
+            } else {
+                None
             }
-        } else if entry.disabled() {
-            let fiber = entry.fiber.lock().unwrap().clone();
-            *entry.fiber.lock().unwrap() = None;
-            if let Some(fiber) = fiber {
-                self.spawn_dispose(fiber);
-            }
-        } else if entry.fiber.lock().unwrap().is_none()
-            && entry.options.lock().unwrap().group != Some(true)
-        {
-            entry.init_task.store(true, Ordering::Release);
-            let this = entry;
-            tokio::task::spawn_local(async move {
-                this.init_inner().await;
-                this.init_task.store(false, Ordering::Release);
-            });
+        };
+        if let Some(fiber) = fiber_to_dispose {
+            self.spawn_dispose(fiber);
         }
+        self.write();
     }
 
     /// Updates an entry's options (mirrors `tree.update`).
@@ -527,6 +706,244 @@ impl EntryTree {
             }
         }
     }
+
+    /// Attaches a subgroup under `entry` (used by the builtin group plugin
+    /// and the include plugin). Idempotent: re-attachment returns the
+    /// existing subgroup. Commits the new structure atomically.
+    /// Attaches a subgroup under `entry` (used by the builtin group plugin
+    /// and the include plugin). Idempotent: re-attachment returns the
+    /// existing subgroup. Commits the new structure atomically.
+    pub fn attach_subgroup(self: &Arc<Self>, entry: &Arc<Entry>) -> Arc<EntryGroup> {
+        self.state.rcu(|old| {
+            let containing = old
+                .parent_of
+                .get(&entry.key)
+                .cloned()
+                .expect("cannot attach subgroup: entry is not in the tree");
+            if containing
+                .subgroups
+                .iter()
+                .any(|(owner, _)| Arc::ptr_eq(owner, entry))
+            {
+                return Arc::clone(old);
+            }
+            let subgroup = Arc::new(EntryGroup {
+                ctx: entry.ctx.clone(),
+                entry: Some(entry.clone()),
+                entries: Arc::new(Vec::new()),
+                subgroups: Arc::new(Vec::new()),
+            });
+            let chain = chain_to_group(old, &containing).expect("containing group chain");
+            let entry_for_change = entry.clone();
+            let subgroup_for_change = subgroup.clone();
+            let change = StructuralChange {
+                chain,
+                apply: Box::new(move |node| {
+                    let mut subgroups = node.subgroups.as_ref().clone();
+                    subgroups.push((entry_for_change.clone(), subgroup_for_change.clone()));
+                    rebuild_group(node, node.entries.clone(), Arc::new(subgroups))
+                }),
+            };
+            let mut parent_of = old.parent_of.clone();
+            let new_root = rebuild_tree(&old.root, &[change], &mut parent_of);
+            Arc::new(TreeState {
+                root: new_root,
+                parent_of,
+            })
+        });
+        // `rcu` returns the previous value; reload to get the committed
+        // state.
+        let state = self.state.load_full();
+        let containing = state.parent_of.get(&entry.key).expect("containing group");
+        containing
+            .subgroups
+            .iter()
+            .find(|(owner, _)| Arc::ptr_eq(owner, entry))
+            .map(|(_, subgroup)| subgroup.clone())
+            .expect("attached subgroup")
+    }
+
+    /// The current node for `group`, resolving through its owning entry so
+    /// stale handles stay valid. Structural nodes are immutable snapshots:
+    /// callers holding a group handle across commits should re-resolve
+    /// before reading its lists.
+    pub fn current_group(&self, group: &Arc<EntryGroup>) -> Arc<EntryGroup> {
+        let state = self.state.load_full();
+        current_group_chain(&state, group)
+            .map(|(group, _)| group)
+            .unwrap_or_else(|| group.clone())
+    }
+
+    /// The subgroup attached under `entry` in the current tree, if any.
+    pub(crate) fn subgroup_of(&self, entry: &Arc<Entry>) -> Option<Arc<EntryGroup>> {
+        let state = self.state.load_full();
+        let group = state.parent_of.get(&entry.key)?;
+        group
+            .subgroups
+            .iter()
+            .find(|(owner, _)| Arc::ptr_eq(owner, entry))
+            .map(|(_, subgroup)| subgroup.clone())
+    }
+}
+
+/// Builds a group node from `node`, sharing its context and owning entry
+/// while replacing the structural lists.
+pub(crate) fn rebuild_group(
+    node: &Arc<EntryGroup>,
+    entries: Arc<Vec<Arc<Entry>>>,
+    subgroups: Arc<Vec<(Arc<Entry>, Arc<EntryGroup>)>>,
+) -> Arc<EntryGroup> {
+    Arc::new(EntryGroup {
+        ctx: node.ctx.clone(),
+        entry: node.entry.clone(),
+        entries,
+        subgroups,
+    })
+}
+
+/// Points `parent_of` at `node` for every entry directly under it.
+fn index_node(node: &Arc<EntryGroup>, parent_of: &mut im::HashMap<u64, Arc<EntryGroup>>) {
+    for entry in node.entries.iter() {
+        parent_of.insert(entry.key, node.clone());
+    }
+}
+
+/// Rebuilds the tree so that each `(chain, replacement)` pair replaces the
+/// group at the end of its chain, sharing every node outside the affected
+/// paths. `parent_of` is maintained for every rebuilt node.
+pub(crate) fn rebuild_tree(
+    node: &Arc<EntryGroup>,
+    changes: &[StructuralChange],
+    parent_of: &mut im::HashMap<u64, Arc<EntryGroup>>,
+) -> Arc<EntryGroup> {
+    let refs: Vec<GroupChangeRef<'_>> = changes
+        .iter()
+        .map(|change| (change.chain.clone(), change.apply.as_ref()))
+        .collect();
+    rebuild_tree_refs(node, &refs, parent_of)
+}
+
+/// The workhorse behind [`rebuild_tree`]: applies `changes` (root-first
+/// chains plus transforms) to the subtree rooted at `node`. Child rebuilds
+/// happen first, then each node's own transform runs on the rebuilt node, so
+/// a transform for an ancestor sees its rebuilt descendants.
+fn rebuild_tree_refs(
+    node: &Arc<EntryGroup>,
+    changes: &[GroupChangeRef<'_>],
+    parent_of: &mut im::HashMap<u64, Arc<EntryGroup>>,
+) -> Arc<EntryGroup> {
+    let here: Vec<_> = changes
+        .iter()
+        .filter(|(chain, _)| chain.first().is_some_and(|first| Arc::ptr_eq(first, node)))
+        .collect();
+    if here.is_empty() {
+        return node.clone();
+    }
+
+    // Rebuild children that lead to deeper changes (deepest first).
+    let mut subgroups = node.subgroups.clone();
+    let mut child_changed = false;
+    let mut visited: Vec<Arc<EntryGroup>> = Vec::new();
+    for (chain, _) in &here {
+        if chain.len() <= 1 {
+            continue;
+        }
+        let child = &chain[1];
+        if visited.iter().any(|seen| Arc::ptr_eq(seen, child)) {
+            continue;
+        }
+        visited.push(child.clone());
+        let tail: Vec<_> = here
+            .iter()
+            .filter(|(candidate, _)| candidate.len() > 1 && Arc::ptr_eq(&candidate[1], child))
+            .map(|(candidate, apply)| (candidate[1..].to_vec(), *apply))
+            .collect();
+        let rebuilt = rebuild_tree_refs(child, &tail, parent_of);
+        if !Arc::ptr_eq(&rebuilt, child) {
+            let mut pairs = subgroups.as_ref().clone();
+            for (_, subgroup) in pairs.iter_mut() {
+                if Arc::ptr_eq(subgroup, child) {
+                    *subgroup = rebuilt.clone();
+                }
+            }
+            subgroups = Arc::new(pairs);
+            child_changed = true;
+        }
+    }
+
+    // Apply this node's own transform on top of the rebuilt children.
+    let mut current = if child_changed {
+        rebuild_group(node, node.entries.clone(), subgroups)
+    } else {
+        node.clone()
+    };
+    for (chain, apply) in &here {
+        if chain.len() == 1 {
+            current = apply(&current);
+        }
+    }
+    if !Arc::ptr_eq(&current, node) {
+        index_node(&current, parent_of);
+    }
+    current
+}
+
+/// A pending structural change: rebuild the group at the end of `chain`
+/// (root-first, current nodes) using `apply`. The transform runs after the
+/// node's descendants are rebuilt, and must derive everything from the node
+/// it receives (transforms may run more than once on rcu retries).
+pub(crate) struct StructuralChange {
+    pub(crate) chain: Vec<Arc<EntryGroup>>,
+    pub(crate) apply: GroupApply,
+}
+
+/// The transform producing a group node's replacement.
+type GroupApply = Box<dyn Fn(&Arc<EntryGroup>) -> Arc<EntryGroup>>;
+
+/// A borrowed structural change for the rebuild engine.
+type GroupChangeRef<'a> = (
+    Vec<Arc<EntryGroup>>,
+    &'a dyn Fn(&Arc<EntryGroup>) -> Arc<EntryGroup>,
+);
+
+/// The root-first chain of groups leading to `group` within `state`, walking
+/// up through the `parent_of` index.
+fn chain_to_group(state: &TreeState, group: &Arc<EntryGroup>) -> Option<Vec<Arc<EntryGroup>>> {
+    let mut chain = vec![group.clone()];
+    let mut current = group.clone();
+    loop {
+        match &current.entry {
+            None => break,
+            Some(owner) => {
+                let parent = state.parent_of.get(&owner.key)?.clone();
+                chain.push(parent.clone());
+                current = parent;
+            }
+        }
+    }
+    chain.reverse();
+    Some(chain)
+}
+
+/// Resolves the current node and root-first chain for `group` (which may be
+/// stale), using the owning entry's key.
+pub(crate) fn current_group_chain(
+    state: &TreeState,
+    group: &Arc<EntryGroup>,
+) -> Option<(Arc<EntryGroup>, Vec<Arc<EntryGroup>>)> {
+    match &group.entry {
+        None => Some((state.root.clone(), vec![state.root.clone()])),
+        Some(owner) => {
+            let containing = state.parent_of.get(&owner.key)?;
+            let subgroup = containing
+                .subgroups
+                .iter()
+                .find(|(entry, _)| Arc::ptr_eq(entry, owner))
+                .map(|(_, subgroup)| subgroup.clone())?;
+            let chain = chain_to_group(state, &subgroup)?;
+            Some((subgroup, chain))
+        }
+    }
 }
 
 fn random_hex(length: usize) -> String {
@@ -564,9 +981,13 @@ fn fast_random() -> u64 {
 }
 
 fn collect_entries(group: &Arc<EntryGroup>, result: &mut Vec<Arc<Entry>>) {
-    for entry in group.entries.lock().unwrap().iter() {
+    for entry in group.entries.iter() {
         result.push(entry.clone());
-        if let Some(subgroup) = &*entry.subgroup.lock().unwrap() {
+        if let Some((_, subgroup)) = group
+            .subgroups
+            .iter()
+            .find(|(owner, _)| Arc::ptr_eq(owner, entry))
+        {
             collect_entries(subgroup, result);
         }
     }
@@ -580,15 +1001,22 @@ pub struct Entry {
     /// The handle is immutable; overlay changes are atomic snapshot stores on
     /// the shared inner, so no lock is needed around it.
     pub ctx: Context,
-    /// The owning group; updated when the entry moves between groups.
-    pub parent: Mutex<Arc<EntryGroup>>,
+    /// Stable identity key used by the tree's `parent_of` index. Never
+    /// reused, so the index stays valid for the entry's whole lifetime.
+    pub(crate) key: u64,
     /// The entry's resolved options.
     pub options: Mutex<EntryOptions>,
     /// The entry's root fiber, once applied.
     pub fiber: Mutex<Option<Arc<Fiber>>>,
-    /// The subgroup created when this entry is a group.
-    pub subgroup: Mutex<Option<Arc<EntryGroup>>>,
     init_task: AtomicBool,
+    /// Set when the entry is detached from the tree so a still-pending init
+    /// task does not start a fiber on a removed entry.
+    detached: AtomicBool,
+    /// Serializes the entry's lifecycle side effects (ctx re-parenting,
+    /// fiber clearing, detached marking, and the init-vs-remove check). This
+    /// is the only lock left on the structural path, and it is per-entry:
+    /// operations on different entries never contend on it.
+    lifecycle: Mutex<()>,
 }
 
 impl Entry {
@@ -596,17 +1024,41 @@ impl Entry {
     pub fn new(tree: Arc<EntryTree>, parent: Arc<EntryGroup>, options: EntryOptions) -> Arc<Self> {
         let ctx = parent.ctx.clone();
         let ctx = ctx.with_isolate_layer().with_intercept_layer();
+        let key = tree.next_key.fetch_add(1, Ordering::Relaxed);
         let entry = Arc::new(Self {
             tree,
             ctx,
-            parent: Mutex::new(parent),
+            key,
             options: Mutex::new(options),
             fiber: Mutex::new(None),
-            subgroup: Mutex::new(None),
             init_task: AtomicBool::new(false),
+            detached: AtomicBool::new(false),
+            lifecycle: Mutex::new(()),
         });
         entry.apply_overlay_layers();
         entry
+    }
+
+    /// The subgroup attached under this entry, if any (mirrors
+    /// `entry.subgroup`). The subgroup lives in the containing group node's
+    /// `subgroups` list; the lookup resolves the entry's current containing
+    /// node so stale structural handles stay valid.
+    pub fn subgroup(self: &Arc<Self>) -> Option<Arc<EntryGroup>> {
+        self.tree.subgroup_of(self)
+    }
+
+    /// Marks the entry as detached from the tree; pending init tasks check
+    /// this before starting a fiber.
+    /// Detaches the entry from the tree and returns its fiber (if any) for
+    /// disposal. The detached marking, fiber snapshot and clear are
+    /// serialized with init via the lifecycle lock, so a pending init task
+    /// never starts a fiber on a removed entry.
+    pub(crate) fn detach_and_clear_fiber(&self) -> Option<Arc<Fiber>> {
+        let _guard = self.lifecycle.lock().unwrap();
+        self.detached.store(true, Ordering::Release);
+        let fiber = self.fiber.lock().unwrap().clone();
+        *self.fiber.lock().unwrap() = None;
+        fiber
     }
 
     /// Merges this entry's `inject` declarations into `fiber`'s inject map
@@ -676,7 +1128,9 @@ impl Entry {
     }
 
     fn ancestor_entry(&self) -> Option<Arc<Self>> {
-        self.parent.lock().unwrap().entry.lock().unwrap().clone()
+        let state = self.tree.state.load_full();
+        let group = state.parent_of.get(&self.key)?;
+        group.entry.clone()
     }
 
     /// Whether the entry (or an ancestor) is disabled (mirrors `entry.disabled`).
@@ -900,7 +1354,18 @@ impl Entry {
     /// Ungated initialization used by `create` (the pending flag is set by
     /// the caller).
     pub(crate) async fn init_inner(self: &Arc<Self>) {
-        let result = self.import_and_apply().await;
+        // The entry may have been detached (removed) while this init task
+        // was pending; never start a fiber on an entry that is no longer in
+        // the tree. Mirror the settle bookkeeping so `await_tree` does not
+        // wait forever on a task that never ran.
+        let Some(fiber) = self.prepare_fiber() else {
+            self.init_task.store(false, Ordering::Release);
+            self.tree.tasks_notify.notify_waiters();
+            return;
+        };
+        let result = fiber.wait().await.map_err(|error| error.to_string());
+        self.tree.tasks.fetch_sub(1, Ordering::AcqRel);
+        self.tree.tasks_notify.notify_waiters();
         if let Err(error) = result {
             self.ctx.logger().error(error);
         }
@@ -914,29 +1379,45 @@ impl Entry {
         }
     }
 
-    async fn import_and_apply(self: &Arc<Self>) -> Result<(), String> {
-        if self.disabled() {
-            return Ok(());
+    /// Creates the entry's fiber under its lifecycle lock: the detached
+    /// check, plugin import, config resolution and fiber registration are
+    /// atomic with respect to a concurrent removal, so a removed entry never
+    /// ends up with a running fiber. The returned fiber is awaited by the
+    /// caller outside the lock.
+    fn prepare_fiber(self: &Arc<Self>) -> Option<Arc<Fiber>> {
+        let _guard = self.lifecycle.lock().unwrap();
+        if self.disabled() || self.detached.load(Ordering::Acquire) {
+            return None;
         }
         // The plugin is always resolved by `options.name` (mirrors the TS
         // `entry._init`, which imports `this.options.name`). `group: true`
         // only carries the lifecycle semantics of being a group container.
-        let plugin = self.tree.import(&self.options.lock().unwrap().name)?;
-        let config = self.resolve_config_value(&plugin)?;
+        let plugin = match self.tree.import(&self.options.lock().unwrap().name) {
+            Ok(plugin) => plugin,
+            Err(error) => {
+                self.ctx.logger().error(error);
+                return None;
+            }
+        };
+        let config = match self.resolve_config_value(&plugin) {
+            Ok(config) => config,
+            Err(error) => {
+                self.ctx.logger().error(error);
+                return None;
+            }
+        };
         self.tree.tasks.fetch_add(1, Ordering::AcqRel);
         // Clone the context out of the lock before registering: the plugin
         // registration emits `internal/plugin`, whose loader callback
-        // re-enters this entry's context (self-deadlock if the guard is held).
+        // re-enters this entry's context (self-deadlock if the guard is
+        // held).
         let ctx = self.ctx.clone();
         let fiber = ctx.registry_plugin(&plugin, config);
         *self.fiber.lock().unwrap() = Some(fiber.clone());
         if let Some(loader) = ctx.get::<crate::Loader>() {
             loader.show_log("apply", self);
         }
-        let result = fiber.wait().await.map_err(|error| error.to_string());
-        self.tree.tasks.fetch_sub(1, Ordering::AcqRel);
-        self.tree.tasks_notify.notify_waiters();
-        result
+        Some(fiber)
     }
 
     /// The outer stack lines for error reporting (mirrors `getOuterStack`).
