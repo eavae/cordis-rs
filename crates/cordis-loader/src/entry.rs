@@ -176,6 +176,19 @@ impl TreeState {
 }
 
 /// The entry tree container (mirrors `EntryTree` in tree.ts).
+///
+/// # Lock ordering
+///
+/// Structural nodes are immutable snapshots published through `state`
+/// (`ArcSwap`), so group access never takes a group lock. Traversal stays
+/// top-down (`group.entries → entry.subgroup`); subgroups are re-resolved
+/// from the current snapshot instead of following stale handles upward.
+/// The per-entry `options`/`fiber`/`lifecycle` locks are short critical
+/// sections and are never held while taking a structural snapshot or across
+/// an await. They are also never acquired under a group lock: group handles
+/// are snapshot values, and fiber lifecycle callbacks re-enter the tree
+/// through `read_group`/`create`/`update`, so `entry.fiber`/`entry.parent`
+/// must not be reached while a group is locked.
 pub struct EntryTree {
     /// The tree's context (the loader's own context).
     pub ctx: Context,

@@ -312,6 +312,23 @@ pub(crate) struct Inertia {
 /// `ACTIVE`/`FAILED` → `UNLOADING` → `DISPOSED`), inertia locking while
 /// reload/unload tasks are in flight, inject-resolution epochs and the
 /// effect executor.
+///
+/// # Lock ordering
+///
+/// The fiber's locks are split into two groups that must never nest:
+///
+/// - The registry snapshot group: `registry.runtimes → runtime.fibers →
+///   fiber.inject`. `inject` is only held alone (snapshot the names and
+///   release) or while collecting an affected-fiber snapshot under the
+///   registry locks; it is never held while touching the lifecycle group.
+/// - The per-fiber lifecycle group: `resolved → epoch → inertia`. These are
+///   only used outside the registry snapshot, one fiber at a time.
+///
+/// In particular, `fiber.inject` must not be held while acquiring
+/// `resolved`, `epoch` or `inertia` (and vice versa): `inject` is the only
+/// fiber lock the registry broadcast and the loader touch, while the
+/// lifecycle locks back the reload/unload state machine that re-enters the
+/// registry through user callbacks.
 pub struct Fiber {
     /// Fiber id; `None` once disposed (mirrors `uid: null`).
     pub(crate) uid: AtomicU64,
@@ -690,8 +707,13 @@ impl Fiber {
     /// Rebuilds the inject epoch from the resolved map and starts any needed
     /// state transition.
     pub(crate) fn refresh(self: &Arc<Self>) {
+        // Snapshot the declared inject names before touching the per-fiber
+        // lifecycle locks. `inject` belongs to the registry snapshot lock
+        // group (`runtimes -> fibers -> inject`) and must never be held
+        // while acquiring `resolved` / `epoch` / `inertia`.
+        let names: Vec<String> = self.inject.lock().unwrap().keys().cloned().collect();
         let mut epoch_str = String::new();
-        for name in self.inject.lock().unwrap().keys() {
+        for name in &names {
             match self.resolved.lock().unwrap().get(name) {
                 Some(entry) => match entry.fiber.upgrade().and_then(|fiber| fiber.uid()) {
                     Some(uid) => {

@@ -71,6 +71,20 @@ impl Runtime {
 }
 
 /// Registry service, available on every context as `ctx.registry`.
+///
+/// # Lock ordering
+///
+/// The registry heads the snapshot lock group
+/// `registry.runtimes → runtime.fibers → fiber.inject`. These locks may only
+/// be nested while collecting the affected-fiber snapshot (see `notify` and
+/// `notify_with_labels`); every per-fiber re-check runs afterwards with all
+/// registry locks released, because `check_impl`/`refresh` can run user code
+/// that re-enters the registry (e.g. `ctx.plugin()` or a nested
+/// `ctx.notify()`). The per-fiber lifecycle locks
+/// (`fiber.resolved → fiber.epoch → fiber.inertia`) form a separate group
+/// and never nest with the registry group. Disposal follows the same rule:
+/// the `fibers` guard is dropped before the runtime is removed from
+/// `runtimes`, so the reverse edge `fibers → runtimes` never appears.
 #[derive(Default)]
 pub struct RegistryService {
     counter: AtomicU64,
@@ -198,7 +212,18 @@ impl RegistryService {
                             })
                         }));
                     }
-                    for name in fiber_for_effect.inject.lock().unwrap().keys() {
+                    // Snapshot the declared inject names before re-checking:
+                    // `inject` belongs to the registry snapshot lock group
+                    // and must not be held while `check_impl` touches
+                    // `resolved` or runs user-provided check closures.
+                    let inject_names: Vec<String> = fiber_for_effect
+                        .inject
+                        .lock()
+                        .unwrap()
+                        .keys()
+                        .cloned()
+                        .collect();
+                    for name in &inject_names {
                         fiber_for_effect.check_impl(name);
                     }
                     fiber_for_effect.refresh();
