@@ -760,6 +760,10 @@ impl Fiber {
 
     /// Runs the plugin apply callback and collects its effect disposers.
     async fn reload(self: Arc<Self>) {
+        // Clear the previous failure before retrying: a successful apply
+        // must recover a `Failed` fiber (restart, update or dependency
+        // arrival). A failing apply re-writes the error below.
+        *self.error.lock() = None;
         let target = self.epoch.lock().clone();
         let task = {
             let runtime = self.runtime.clone();
