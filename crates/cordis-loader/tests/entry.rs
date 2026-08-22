@@ -43,197 +43,183 @@ fn capture_plugin(sink: Arc<Mutex<Option<String>>>) -> cordis_core::ApplyFn {
 
 #[tokio::test(flavor = "current_thread")]
 async fn config_expr_is_evaluated_at_apply() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            let sink = Arc::new(Mutex::new(None));
-            loader.mock("greeter", capture_plugin(sink.clone()));
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        let sink = Arc::new(Mutex::new(None));
+        loader.mock("greeter", capture_plugin(sink.clone()));
 
-            loader
-                .read(vec![EntryOptions {
-                    id: "1".to_string(),
-                    name: "greeter".to_string(),
-                    config: Some(
-                        serde_yaml_ng::from_str(
-                            "!expr env(\"CORDIS_LOADER_TEST_MISSING\") or \"Hello\"",
-                        )
-                        .unwrap(),
-                    ),
-                    ..opts("", "greeter", false)
-                }])
-                .await;
-            assert_eq!(sink.lock().as_deref(), Some("Hello"));
+        loader
+            .read(vec![EntryOptions {
+                id: "1".to_string(),
+                name: "greeter".to_string(),
+                config: Some(
+                    serde_yaml_ng::from_str(
+                        "!expr env(\"CORDIS_LOADER_TEST_MISSING\") or \"Hello\"",
+                    )
+                    .unwrap(),
+                ),
+                ..opts("", "greeter", false)
+            }])
+            .await;
+        assert_eq!(sink.lock().as_deref(), Some("Hello"));
 
-            // `base_url()` comes from the loader's base url.
-            loader.set_base_url("https://example.com");
-            *sink.lock() = None;
-            loader
-                .read(vec![EntryOptions {
-                    id: "2".to_string(),
-                    name: "greeter".to_string(),
-                    config: Some(serde_yaml_ng::from_str("!expr base_url() ~ \"/data\"").unwrap()),
-                    ..opts("", "greeter", false)
-                }])
-                .await;
-            assert_eq!(sink.lock().as_deref(), Some("https://example.com/data"));
-        })
-        .await;
+        // `base_url()` comes from the loader's base url.
+        loader.set_base_url("https://example.com");
+        *sink.lock() = None;
+        loader
+            .read(vec![EntryOptions {
+                id: "2".to_string(),
+                name: "greeter".to_string(),
+                config: Some(serde_yaml_ng::from_str("!expr base_url() ~ \"/data\"").unwrap()),
+                ..opts("", "greeter", false)
+            }])
+            .await;
+        assert_eq!(sink.lock().as_deref(), Some("https://example.com/data"));
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn config_expr_error_fails_entry_apply() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            let applied = Arc::new(AtomicU32::new(0));
-            loader.mock("greeter", counter_plugin(applied.clone()));
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        let applied = Arc::new(AtomicU32::new(0));
+        loader.mock("greeter", counter_plugin(applied.clone()));
 
-            loader
-                .read(vec![EntryOptions {
-                    id: "1".to_string(),
-                    name: "greeter".to_string(),
-                    config: Some(serde_yaml_ng::from_str("!expr unknown_function()").unwrap()),
-                    ..opts("", "greeter", false)
-                }])
-                .await;
-            assert_eq!(applied.load(Ordering::SeqCst), 0);
-        })
-        .await;
+        loader
+            .read(vec![EntryOptions {
+                id: "1".to_string(),
+                name: "greeter".to_string(),
+                config: Some(serde_yaml_ng::from_str("!expr unknown_function()").unwrap()),
+                ..opts("", "greeter", false)
+            }])
+            .await;
+        assert_eq!(applied.load(Ordering::SeqCst), 0);
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn loader_initiate_and_update() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            let foo_count = Arc::new(AtomicU32::new(0));
-            let bar_count = Arc::new(AtomicU32::new(0));
-            let qux_count = Arc::new(AtomicU32::new(0));
-            loader.mock("foo", counter_plugin(foo_count.clone()));
-            loader.mock("bar", counter_plugin(bar_count.clone()));
-            loader.mock("qux", counter_plugin(qux_count.clone()));
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        let foo_count = Arc::new(AtomicU32::new(0));
+        let bar_count = Arc::new(AtomicU32::new(0));
+        let qux_count = Arc::new(AtomicU32::new(0));
+        loader.mock("foo", counter_plugin(foo_count.clone()));
+        loader.mock("bar", counter_plugin(bar_count.clone()));
+        loader.mock("qux", counter_plugin(qux_count.clone()));
 
-            loader
-                .read(vec![
-                    opts("1", "foo", false),
-                    opts("2", "bar", false),
-                    opts("3", "qux", true),
-                ])
-                .await;
+        loader
+            .read(vec![
+                opts("1", "foo", false),
+                opts("2", "bar", false),
+                opts("3", "qux", true),
+            ])
+            .await;
 
-            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
-            assert_eq!(bar_count.load(Ordering::SeqCst), 1);
-            assert_eq!(
-                qux_count.load(Ordering::SeqCst),
-                0,
-                "disabled entry must not apply"
-            );
+        assert_eq!(foo_count.load(Ordering::SeqCst), 1);
+        assert_eq!(bar_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            qux_count.load(Ordering::SeqCst),
+            0,
+            "disabled entry must not apply"
+        );
 
-            // Update: foo unchanged, bar removed, qux enabled.
-            loader
-                .read(vec![opts("1", "foo", false), opts("3", "qux", false)])
-                .await;
-            assert_eq!(
-                foo_count.load(Ordering::SeqCst),
-                1,
-                "unchanged entry must not re-apply"
-            );
-            assert_eq!(bar_count.load(Ordering::SeqCst), 1);
-            assert_eq!(qux_count.load(Ordering::SeqCst), 1);
-            assert!(loader.entries().iter().all(|entry| entry.id() != "2"));
-        })
-        .await;
+        // Update: foo unchanged, bar removed, qux enabled.
+        loader
+            .read(vec![opts("1", "foo", false), opts("3", "qux", false)])
+            .await;
+        assert_eq!(
+            foo_count.load(Ordering::SeqCst),
+            1,
+            "unchanged entry must not re-apply"
+        );
+        assert_eq!(bar_count.load(Ordering::SeqCst), 1);
+        assert_eq!(qux_count.load(Ordering::SeqCst), 1);
+        assert!(loader.entries().iter().all(|entry| entry.id() != "2"));
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn plugin_self_update_writes_back_config() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            loader.mock("foo", counter_plugin(Arc::new(AtomicU32::new(0))));
-            loader.read(vec![opts("1", "foo", false)]).await;
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        loader.mock("foo", counter_plugin(Arc::new(AtomicU32::new(0))));
+        loader.read(vec![opts("1", "foo", false)]).await;
 
-            let config = {
-                let mut map = serde_yaml_ng::Mapping::new();
-                map.insert(
-                    serde_yaml_ng::Value::String("a".to_string()),
-                    serde_yaml_ng::Value::Number(3.into()),
-                );
-                serde_yaml_ng::Value::Mapping(map)
-            };
-            let fiber = loader.expect_fiber("1");
-            fiber
-                .update_with(
-                    Some(Arc::new(config.clone()) as Arc<dyn Any + Send + Sync>),
-                    false,
-                )
-                .await
-                .unwrap();
+        let config = {
+            let mut map = serde_yaml_ng::Mapping::new();
+            map.insert(
+                serde_yaml_ng::Value::String("a".to_string()),
+                serde_yaml_ng::Value::Number(3.into()),
+            );
+            serde_yaml_ng::Value::Mapping(map)
+        };
+        let fiber = loader.expect_fiber("1");
+        fiber
+            .update_with(
+                Some(Arc::new(config.clone()) as Arc<dyn Any + Send + Sync>),
+                false,
+            )
+            .await
+            .unwrap();
 
-            let data = loader.data();
-            assert_eq!(data.len(), 1);
-            assert_eq!(data[0].config, Some(config));
-        })
-        .await;
+        let data = loader.data();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].config, Some(config));
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn plugin_self_dispose_marks_disabled() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            loader.mock("foo", counter_plugin(Arc::new(AtomicU32::new(0))));
-            loader.read(vec![opts("1", "foo", false)]).await;
-            assert_eq!(loader.data()[0].disabled, None);
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        loader.mock("foo", counter_plugin(Arc::new(AtomicU32::new(0))));
+        loader.read(vec![opts("1", "foo", false)]).await;
+        assert_eq!(loader.data()[0].disabled, None);
 
-            loader.expect_fiber("1").dispose().await;
-            tokio::task::yield_now().await;
+        loader.expect_fiber("1").dispose().await;
+        tokio::task::yield_now().await;
 
-            let data = loader.data();
-            assert_eq!(data.len(), 1);
-            assert_eq!(data[0].disabled, Some(true));
-        })
-        .await;
+        let data = loader.data();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].disabled, Some(true));
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn entry_disabled_chain() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            loader.mock("foo", counter_plugin(Arc::new(AtomicU32::new(0))));
-            loader.read(vec![opts("1", "foo", true)]).await;
-            let entry = loader.entries().into_iter().next().unwrap();
-            assert!(entry.disabled());
-        })
-        .await;
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        loader.mock("foo", counter_plugin(Arc::new(AtomicU32::new(0))));
+        loader.read(vec![opts("1", "foo", true)]).await;
+        let entry = loader.entries().into_iter().next().unwrap();
+        assert!(entry.disabled());
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn entry_outer_stack() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            loader.mock("foo", counter_plugin(Arc::new(AtomicU32::new(0))));
-            loader.read(vec![opts("1", "foo", false)]).await;
-            // Outer stack lines reference the entry id.
-            let entry = loader.entries().into_iter().next().unwrap();
-            let stack = entry.get_outer_stack();
-            assert!(stack.iter().any(|line| line.contains("#1")), "{stack:?}");
-        })
-        .await;
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        loader.mock("foo", counter_plugin(Arc::new(AtomicU32::new(0))));
+        loader.read(vec![opts("1", "foo", false)]).await;
+        // Outer stack lines reference the entry id.
+        let entry = loader.entries().into_iter().next().unwrap();
+        let stack = entry.get_outer_stack();
+        assert!(stack.iter().any(|line| line.contains("#1")), "{stack:?}");
+    }
+    .await;
 }

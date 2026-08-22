@@ -248,7 +248,7 @@ impl EffectHandle {
         let cleanup_done_waiter = cleanup_done.clone();
         let cleanup_notify = Arc::new(Notify::new());
         let cleanup_notify_waiter = cleanup_notify.clone();
-        let join = tokio::task::spawn_local(async move {
+        let join = tokio::task::spawn(async move {
             while !done.load(Ordering::Acquire) {
                 let notified = task_notify.notified();
                 if done.load(Ordering::Acquire) {
@@ -461,9 +461,8 @@ impl Fiber {
             Err(reason) => {
                 // TS: `catch (reason) { dispose(); throw reason }` — already
                 // collected disposables are cleaned up in the background
-                // (requires a LocalSet; the error path only runs inside the
-                // runtime).
-                tokio::task::spawn_local(handle.dispose());
+                // (the error path only runs inside a runtime).
+                tokio::task::spawn(handle.dispose());
                 return Err(CordisError {
                     code: "INVALID_EFFECT",
                     message: reason.to_string(),
@@ -471,8 +470,8 @@ impl Fiber {
             }
         };
         if let Some(task) = task {
-            // Async effects run in the background (requires a LocalSet) and
-            // signal completion through `task_done`. The task runs under a
+            // Async effects run in the background as tokio tasks and signal
+            // completion through `task_done`. The task runs under a
             // `JoinHandle` so a panic surfaces as an error instead of
             // silently aborting the completion handshake (which would hang
             // every waiter on `task_done`).
@@ -480,7 +479,7 @@ impl Fiber {
             let task_notify = handle.task_notify.clone();
             let task_result = handle.task_result.clone();
             let wrapped = Box::pin(async move {
-                let task = tokio::task::spawn_local(task);
+                let task = tokio::task::spawn(task);
                 let result = match task.await {
                     Ok(Ok(())) => Ok(()),
                     Ok(Err(error)) => Err(error.to_string()),
@@ -493,7 +492,7 @@ impl Fiber {
             });
             handle.has_task.store(true, Ordering::Release);
             handle.task_done.store(false, Ordering::Release);
-            tokio::task::spawn_local(wrapped);
+            tokio::task::spawn(wrapped);
         }
         self.disposables
             .lock()
@@ -752,10 +751,10 @@ impl Fiber {
         drop(inertia);
         if start_reload {
             self.update_state(Some(FiberState::Loading));
-            tokio::task::spawn_local(self.clone().reload());
+            tokio::task::spawn(self.clone().reload());
         } else {
             self.update_state(Some(FiberState::Unloading));
-            tokio::task::spawn_local(self.clone().unload());
+            tokio::task::spawn(self.clone().unload());
         }
     }
 
@@ -789,7 +788,7 @@ impl Fiber {
             // Run the apply task under a `JoinHandle` so a panic surfaces as
             // an error instead of unwinding `reload` and leaving the inertia
             // lock held forever (which would hang every `Fiber::wait`).
-            let result = tokio::task::spawn_local(task).await;
+            let result = tokio::task::spawn(task).await;
             let reason = match result {
                 Ok(Ok(())) => None,
                 Ok(Err(reason)) => Some(reason.to_string()),
@@ -818,8 +817,8 @@ impl Fiber {
                 // Run each disposer under a `JoinHandle` so a panicking
                 // disposer cannot unwind `unload` and leave the inertia lock
                 // held forever.
-                Disposable::Direct(disposer) => tokio::task::spawn_local(disposer()).await,
-                Disposable::Effect(handle) => tokio::task::spawn_local(handle.dispose()).await,
+                Disposable::Direct(disposer) => tokio::task::spawn(disposer()).await,
+                Disposable::Effect(handle) => tokio::task::spawn(handle.dispose()).await,
             };
             match outcome {
                 Ok(Ok(())) => {}
@@ -840,11 +839,11 @@ impl Fiber {
     }
 
     fn start_reload(self: &Arc<Self>) {
-        tokio::task::spawn_local(self.clone().reload());
+        tokio::task::spawn(self.clone().reload());
     }
 
     fn start_unload(self: &Arc<Self>) {
-        tokio::task::spawn_local(self.clone().unload());
+        tokio::task::spawn(self.clone().unload());
     }
 
     fn get_state(&self) -> FiberState {

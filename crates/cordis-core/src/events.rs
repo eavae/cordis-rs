@@ -361,8 +361,8 @@ impl EventsService {
     /// Synchronous listeners run immediately and the first error panics
     /// (mirrors the JS `emit`). An asynchronous listener is started and its
     /// continuation runs in the background, like the ignored promise of a JS
-    /// async listener; this requires a current-thread runtime or `LocalSet`
-    /// (the runtime model Cordis assumes), and its completion is logged.
+    /// async listener; the continuation runs as a tokio task, and its
+    /// completion is logged.
     pub fn emit_with(
         &self,
         ctx: &Context,
@@ -512,7 +512,7 @@ impl EventsService {
                 Poll::Ready(Err(error)) => panic!("emit listener failed: {error}"),
                 Poll::Pending => {
                     let logger = ctx.logger();
-                    tokio::task::spawn_local(async move {
+                    tokio::task::spawn(async move {
                         if let Err(error) = future.await {
                             logger.error(format!("emit listener failed asynchronously: {error}"));
                         }
@@ -558,7 +558,7 @@ impl EventsService {
                 Poll::Pending => {
                     let logger = ctx.logger();
                     let event = event.clone();
-                    tokio::task::spawn_local(async move {
+                    tokio::task::spawn(async move {
                         if let Err(error) = future.await {
                             logger.warn(format!("{event} listener rejected: {error}"));
                         }
@@ -588,7 +588,7 @@ impl EventsService {
                 Poll::Pending => {
                     let logger = ctx.logger();
                     let event = event.clone();
-                    tokio::task::spawn_local(async move {
+                    tokio::task::spawn(async move {
                         if let Err(error) = future.await {
                             logger.warn(format!("{event} listener rejected: {error}"));
                         }

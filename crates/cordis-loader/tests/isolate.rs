@@ -79,172 +79,166 @@ fn setup(loader: &Loader, foo_count: Arc<AtomicU32>, dispose_count: Arc<AtomicU3
 
 #[tokio::test(flavor = "current_thread")]
 async fn injector_isolate_relevant_and_irrelevant() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            let foo_count = Arc::new(AtomicU32::new(0));
-            let dispose_count = Arc::new(AtomicU32::new(0));
-            setup(&loader, foo_count.clone(), dispose_count.clone());
-            let tree = loader.tree_handle();
-            loader
-                .read(vec![bar_opts("1", "root"), opts("2", "foo")])
-                .await;
-            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
-            assert_eq!(dispose_count.load(Ordering::SeqCst), 0);
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        let foo_count = Arc::new(AtomicU32::new(0));
+        let dispose_count = Arc::new(AtomicU32::new(0));
+        setup(&loader, foo_count.clone(), dispose_count.clone());
+        let tree = loader.tree_handle();
+        loader
+            .read(vec![bar_opts("1", "root"), opts("2", "foo")])
+            .await;
+        assert_eq!(foo_count.load(Ordering::SeqCst), 1);
+        assert_eq!(dispose_count.load(Ordering::SeqCst), 0);
 
-            // Add isolate on the injector (relevant: bar).
-            tree.update_entry(
-                "2",
-                PartialEntryOptions {
-                    isolate: Some(isolate_map(&[("bar", IsolateValue::Flag(true))])),
-                    ..Default::default()
-                },
-            );
-            tree.await_tree().await;
+        // Add isolate on the injector (relevant: bar).
+        tree.update_entry(
+            "2",
+            PartialEntryOptions {
+                isolate: Some(isolate_map(&[("bar", IsolateValue::Flag(true))])),
+                ..Default::default()
+            },
+        );
+        tree.await_tree().await;
 
-            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
-            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
+        assert_eq!(foo_count.load(Ordering::SeqCst), 1);
+        assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
 
-            // Add isolate (irrelevant: qux).
-            tree.update_entry(
-                "2",
-                PartialEntryOptions {
-                    isolate: Some(isolate_map(&[
-                        ("bar", IsolateValue::Flag(true)),
-                        ("qux", IsolateValue::Flag(true)),
-                    ])),
-                    ..Default::default()
-                },
-            );
-            tree.await_tree().await;
-            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
-            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
+        // Add isolate (irrelevant: qux).
+        tree.update_entry(
+            "2",
+            PartialEntryOptions {
+                isolate: Some(isolate_map(&[
+                    ("bar", IsolateValue::Flag(true)),
+                    ("qux", IsolateValue::Flag(true)),
+                ])),
+                ..Default::default()
+            },
+        );
+        tree.await_tree().await;
+        assert_eq!(foo_count.load(Ordering::SeqCst), 1);
+        assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
 
-            // Remove isolate (relevant: bar gone → re-applies).
-            tree.update_entry(
-                "2",
-                PartialEntryOptions {
-                    isolate: Some(isolate_map(&[("qux", IsolateValue::Flag(true))])),
-                    ..Default::default()
-                },
-            );
-            tree.await_tree().await;
-            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
-            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
+        // Remove isolate (relevant: bar gone → re-applies).
+        tree.update_entry(
+            "2",
+            PartialEntryOptions {
+                isolate: Some(isolate_map(&[("qux", IsolateValue::Flag(true))])),
+                ..Default::default()
+            },
+        );
+        tree.await_tree().await;
+        assert_eq!(foo_count.load(Ordering::SeqCst), 2);
+        assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
 
-            // Remove isolate (irrelevant: qux only).
-            tree.update_entry(
-                "2",
-                PartialEntryOptions {
-                    isolate: Some(HashMap::new()),
-                    ..Default::default()
-                },
-            );
-            tree.await_tree().await;
-            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
-            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
-        })
-        .await;
+        // Remove isolate (irrelevant: qux only).
+        tree.update_entry(
+            "2",
+            PartialEntryOptions {
+                isolate: Some(HashMap::new()),
+                ..Default::default()
+            },
+        );
+        tree.await_tree().await;
+        assert_eq!(foo_count.load(Ordering::SeqCst), 2);
+        assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn provider_isolate_relevant() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            let foo_count = Arc::new(AtomicU32::new(0));
-            let dispose_count = Arc::new(AtomicU32::new(0));
-            setup(&loader, foo_count.clone(), dispose_count.clone());
-            let tree = loader.tree_handle();
-            loader
-                .read(vec![bar_opts("1", "root"), opts("2", "foo")])
-                .await;
-            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        let foo_count = Arc::new(AtomicU32::new(0));
+        let dispose_count = Arc::new(AtomicU32::new(0));
+        setup(&loader, foo_count.clone(), dispose_count.clone());
+        let tree = loader.tree_handle();
+        loader
+            .read(vec![bar_opts("1", "root"), opts("2", "foo")])
+            .await;
+        assert_eq!(foo_count.load(Ordering::SeqCst), 1);
 
-            // Isolating the provider moves bar away from the root label.
-            tree.update_entry(
-                "1",
-                PartialEntryOptions {
-                    isolate: Some(isolate_map(&[("bar", IsolateValue::Flag(true))])),
-                    ..Default::default()
-                },
-            );
-            tree.await_tree().await;
-            assert_eq!(foo_count.load(Ordering::SeqCst), 1);
-            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
+        // Isolating the provider moves bar away from the root label.
+        tree.update_entry(
+            "1",
+            PartialEntryOptions {
+                isolate: Some(isolate_map(&[("bar", IsolateValue::Flag(true))])),
+                ..Default::default()
+            },
+        );
+        tree.await_tree().await;
+        assert_eq!(foo_count.load(Ordering::SeqCst), 1);
+        assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
 
-            // Removing the provider isolate restores access.
-            tree.update_entry(
-                "1",
-                PartialEntryOptions {
-                    isolate: Some(HashMap::new()),
-                    ..Default::default()
-                },
-            );
-            tree.await_tree().await;
-            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
-            assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
-        })
-        .await;
+        // Removing the provider isolate restores access.
+        tree.update_entry(
+            "1",
+            PartialEntryOptions {
+                isolate: Some(HashMap::new()),
+                ..Default::default()
+            },
+        );
+        tree.await_tree().await;
+        assert_eq!(foo_count.load(Ordering::SeqCst), 2);
+        assert_eq!(dispose_count.load(Ordering::SeqCst), 1);
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn realm_global_labels_share() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            let foo_count = Arc::new(AtomicU32::new(0));
-            let dispose_count = Arc::new(AtomicU32::new(0));
-            setup(&loader, foo_count.clone(), dispose_count.clone());
-            let tree = loader.tree_handle();
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        let foo_count = Arc::new(AtomicU32::new(0));
+        let dispose_count = Arc::new(AtomicU32::new(0));
+        setup(&loader, foo_count.clone(), dispose_count.clone());
+        let tree = loader.tree_handle();
 
-            // Two groups with different labels isolate bar separately.
-            let alpha = tree.create(
-                EntryOptions {
-                    isolate: Some(isolate_map(&[("bar", IsolateValue::Label("alpha".into()))])),
-                    config: Some(serde_yaml_ng::to_value(vec![bar_opts("", "alpha")]).unwrap()),
-                    group: Some(true),
-                    ..opts("", "@cordisjs/plugin-group")
-                },
-                None,
-                0,
-            );
-            tree.await_tree().await;
-            let beta = tree.create(
-                EntryOptions {
-                    isolate: Some(isolate_map(&[("bar", IsolateValue::Label("beta".into()))])),
-                    config: Some(serde_yaml_ng::to_value(vec![bar_opts("", "beta")]).unwrap()),
-                    group: Some(true),
-                    ..opts("", "@cordisjs/plugin-group")
-                },
-                None,
-                0,
-            );
-            tree.await_tree().await;
+        // Two groups with different labels isolate bar separately.
+        let alpha = tree.create(
+            EntryOptions {
+                isolate: Some(isolate_map(&[("bar", IsolateValue::Label("alpha".into()))])),
+                config: Some(serde_yaml_ng::to_value(vec![bar_opts("", "alpha")]).unwrap()),
+                group: Some(true),
+                ..opts("", "@cordisjs/plugin-group")
+            },
+            None,
+            0,
+        );
+        tree.await_tree().await;
+        let beta = tree.create(
+            EntryOptions {
+                isolate: Some(isolate_map(&[("bar", IsolateValue::Label("beta".into()))])),
+                config: Some(serde_yaml_ng::to_value(vec![bar_opts("", "beta")]).unwrap()),
+                group: Some(true),
+                ..opts("", "@cordisjs/plugin-group")
+            },
+            None,
+            0,
+        );
+        tree.await_tree().await;
 
-            // A foo under alpha sees the alpha bar; a foo under beta sees beta.
-            let foo_alpha = tree.create(opts("", "foo"), Some(&alpha.id()), 0);
-            let foo_beta = tree.create(opts("", "foo"), Some(&beta.id()), 0);
-            tree.await_tree().await;
-            assert_eq!(foo_count.load(Ordering::SeqCst), 2);
+        // A foo under alpha sees the alpha bar; a foo under beta sees beta.
+        let foo_alpha = tree.create(opts("", "foo"), Some(&alpha.id()), 0);
+        let foo_beta = tree.create(opts("", "foo"), Some(&beta.id()), 0);
+        tree.await_tree().await;
+        assert_eq!(foo_count.load(Ordering::SeqCst), 2);
 
-            let value = |fiber: &Arc<cordis_core::Fiber>| {
-                fiber
-                    .context()
-                    .get_str("bar")
-                    .and_then(|value| value.downcast::<BarValue>().ok())
-                    .map(|value| value.value.clone())
-            };
-            let alpha_fiber = loader.expect_fiber(&foo_alpha.id());
-            let beta_fiber = loader.expect_fiber(&foo_beta.id());
-            assert_eq!(value(&alpha_fiber).as_deref(), Some("alpha"));
-            assert_eq!(value(&beta_fiber).as_deref(), Some("beta"));
-        })
-        .await;
+        let value = |fiber: &Arc<cordis_core::Fiber>| {
+            fiber
+                .context()
+                .get_str("bar")
+                .and_then(|value| value.downcast::<BarValue>().ok())
+                .map(|value| value.value.clone())
+        };
+        let alpha_fiber = loader.expect_fiber(&foo_alpha.id());
+        let beta_fiber = loader.expect_fiber(&foo_beta.id());
+        assert_eq!(value(&alpha_fiber).as_deref(), Some("alpha"));
+        assert_eq!(value(&beta_fiber).as_deref(), Some("beta"));
+    }
+    .await;
 }

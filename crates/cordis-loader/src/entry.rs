@@ -387,7 +387,7 @@ impl EntryTree {
         entry.update(PartialEntryOptions::from_options(&options), true, false);
         entry.init_task.store(true, Ordering::Release);
         let this = entry.clone();
-        tokio::task::spawn_local(async move {
+        tokio::task::spawn(async move {
             this.init_inner().await;
             this.init_task.store(false, Ordering::Release);
         });
@@ -440,7 +440,7 @@ impl EntryTree {
     pub(crate) fn spawn_dispose(self: &Arc<Self>, fiber: Arc<Fiber>) {
         self.tasks.fetch_add(1, Ordering::AcqRel);
         let tree = self.clone();
-        tokio::task::spawn_local(async move {
+        tokio::task::spawn(async move {
             let _ = fiber.dispose().await;
             tree.tasks.fetch_sub(1, Ordering::AcqRel);
             tree.tasks_notify.notify_waiters();
@@ -623,7 +623,7 @@ impl EntryTree {
                             (name.clone(), labels)
                         })
                         .collect();
-                    tokio::task::spawn_local(async move {
+                    tokio::task::spawn(async move {
                         this.init_inner().await;
                         this.init_task.store(false, Ordering::Release);
                         for (name, labels) in notify {
@@ -639,7 +639,7 @@ impl EntryTree {
             } else if entry.fiber.lock().is_none() && entry.options.lock().group != Some(true) {
                 entry.init_task.store(true, Ordering::Release);
                 let this = entry.clone();
-                tokio::task::spawn_local(async move {
+                tokio::task::spawn(async move {
                     this.init_inner().await;
                     this.init_task.store(false, Ordering::Release);
                 });
@@ -666,7 +666,7 @@ impl EntryTree {
         {
             entry.init_task.store(true, Ordering::Release);
             let this = entry;
-            tokio::task::spawn_local(async move {
+            tokio::task::spawn(async move {
                 this.init_inner().await;
                 this.init_task.store(false, Ordering::Release);
             });
@@ -1207,7 +1207,7 @@ impl Entry {
             {
                 let config = self.resolve_applied_config();
                 let fiber = fiber.clone();
-                tokio::task::spawn_local(fiber.update_with(config, true));
+                tokio::task::spawn(fiber.update_with(config, true));
             } else if fiber.is_some() {
                 // Migrate services provided by this entry's fiber to the new
                 // labels (mirrors the loader's store migration; the provider
@@ -1251,7 +1251,7 @@ impl Entry {
         if let Some(fiber) = fiber {
             let config = self.resolve_applied_config();
 
-            tokio::task::spawn_local(fiber.update_with(config, true));
+            tokio::task::spawn(fiber.update_with(config, true));
         }
     }
 
@@ -1323,7 +1323,7 @@ impl Entry {
         let fiber = self.fiber.lock().clone();
         *self.fiber.lock() = None;
         if let Some(fiber) = fiber {
-            let _ = tokio::task::spawn_local(fiber.dispose()).await;
+            let _ = tokio::task::spawn(fiber.dispose()).await;
         }
         self.init_task.store(false, Ordering::Release);
         self.init().await;

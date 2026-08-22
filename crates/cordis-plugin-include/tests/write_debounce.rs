@@ -68,179 +68,173 @@ async fn wait_until(mut check: impl FnMut() -> bool) {
 /// `loader/config-update` fires on every call.
 #[tokio::test(flavor = "current_thread")]
 async fn same_turn_writes_coalesce_but_events_fire() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let dir = std::env::temp_dir()
-                .join(format!("cordis-include-debounce-a-{}", std::process::id()));
-            let path = fixture_yaml(&dir, 1);
-            let root = Context::new();
-            let updates = Arc::new(AtomicU32::new(0));
-            drop(
-                root.on(
-                    "loader/config-update",
-                    event_callback({
-                        let updates = updates.clone();
-                        move |_args| {
-                            updates.store(updates.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
-                            Ok(None)
-                        }
-                    }),
-                    EventOptions::default(),
-                )
-                .unwrap(),
-            );
-            let loader = Loader::new(&root);
-            setup_loader(&loader);
-            let tree = loader.tree_handle();
-            tree.create(
-                include_opts(IncludeConfig {
-                    path,
-                    initial: None,
-                    patches: None,
-                    enable_logs: None,
+    async {
+        let dir =
+            std::env::temp_dir().join(format!("cordis-include-debounce-a-{}", std::process::id()));
+        let path = fixture_yaml(&dir, 1);
+        let root = Context::new();
+        let updates = Arc::new(AtomicU32::new(0));
+        drop(
+            root.on(
+                "loader/config-update",
+                event_callback({
+                    let updates = updates.clone();
+                    move |_args| {
+                        updates.store(updates.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        Ok(None)
+                    }
                 }),
-                None,
-                0,
-            );
-            tree.await_tree().await;
-            updates.store(0, Ordering::SeqCst);
+                EventOptions::default(),
+            )
+            .unwrap(),
+        );
+        let loader = Loader::new(&root);
+        setup_loader(&loader);
+        let tree = loader.tree_handle();
+        tree.create(
+            include_opts(IncludeConfig {
+                path,
+                initial: None,
+                patches: None,
+                enable_logs: None,
+            }),
+            None,
+            0,
+        );
+        tree.await_tree().await;
+        updates.store(0, Ordering::SeqCst);
 
-            // Change the entry config, then write twice in the same turn.
-            let greeter = tree
-                .entries()
-                .into_iter()
-                .find(|entry| entry.options.lock().name == "greeter")
-                .expect("greeter entry");
-            greeter.options.lock().config = Some(config_value(3));
-            tree.write();
-            tree.write();
+        // Change the entry config, then write twice in the same turn.
+        let greeter = tree
+            .entries()
+            .into_iter()
+            .find(|entry| entry.options.lock().name == "greeter")
+            .expect("greeter entry");
+        greeter.options.lock().config = Some(config_value(3));
+        tree.write();
+        tree.write();
 
-            let file = fs::read_to_string(dir.join("base.yml")).unwrap();
-            assert!(
-                !file.contains("value: 3"),
-                "write must be debounced (not yet flushed)"
-            );
-            assert_eq!(
-                updates.load(Ordering::SeqCst),
-                2,
-                "loader/config-update fires on every write() call"
-            );
+        let file = fs::read_to_string(dir.join("base.yml")).unwrap();
+        assert!(
+            !file.contains("value: 3"),
+            "write must be debounced (not yet flushed)"
+        );
+        assert_eq!(
+            updates.load(Ordering::SeqCst),
+            2,
+            "loader/config-update fires on every write() call"
+        );
 
-            tokio::task::yield_now().await;
-            wait_until(|| {
-                fs::read_to_string(dir.join("base.yml"))
-                    .is_ok_and(|content| content.contains("value: 3"))
-            })
-            .await;
-            let content = fs::read_to_string(dir.join("base.yml")).unwrap();
-            assert!(
-                content.contains("value: 3"),
-                "final config must be written once"
-            );
-            assert_eq!(content.matches("name: greeter").count(), 1);
-            fs::remove_dir_all(&dir).unwrap();
+        tokio::task::yield_now().await;
+        wait_until(|| {
+            fs::read_to_string(dir.join("base.yml"))
+                .is_ok_and(|content| content.contains("value: 3"))
         })
         .await;
+        let content = fs::read_to_string(dir.join("base.yml")).unwrap();
+        assert!(
+            content.contains("value: 3"),
+            "final config must be written once"
+        );
+        assert_eq!(content.matches("name: greeter").count(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    .await;
 }
 
 /// Writes across turns are not coalesced — each turn flushes.
 #[tokio::test(flavor = "current_thread")]
 async fn cross_turn_writes_flush_separately() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let dir = std::env::temp_dir()
-                .join(format!("cordis-include-debounce-b-{}", std::process::id()));
-            let path = fixture_yaml(&dir, 1);
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            setup_loader(&loader);
-            let tree = loader.tree_handle();
-            tree.create(
-                include_opts(IncludeConfig {
-                    path,
-                    initial: None,
-                    patches: None,
-                    enable_logs: None,
-                }),
-                None,
-                0,
-            );
-            tree.await_tree().await;
+    async {
+        let dir =
+            std::env::temp_dir().join(format!("cordis-include-debounce-b-{}", std::process::id()));
+        let path = fixture_yaml(&dir, 1);
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        setup_loader(&loader);
+        let tree = loader.tree_handle();
+        tree.create(
+            include_opts(IncludeConfig {
+                path,
+                initial: None,
+                patches: None,
+                enable_logs: None,
+            }),
+            None,
+            0,
+        );
+        tree.await_tree().await;
 
-            let greeter = tree
-                .entries()
-                .into_iter()
-                .find(|entry| entry.options.lock().name == "greeter")
-                .expect("greeter entry");
-            greeter.options.lock().config = Some(config_value(2));
-            tree.write();
-            wait_until(|| {
-                fs::read_to_string(dir.join("base.yml"))
-                    .is_ok_and(|content| content.contains("value: 2"))
-            })
-            .await;
-
-            // A later turn triggers its own write.
-            greeter.options.lock().config = Some(config_value(4));
-            tree.write();
-            wait_until(|| {
-                fs::read_to_string(dir.join("base.yml"))
-                    .is_ok_and(|content| content.contains("value: 4"))
-            })
-            .await;
-            fs::remove_dir_all(&dir).unwrap();
+        let greeter = tree
+            .entries()
+            .into_iter()
+            .find(|entry| entry.options.lock().name == "greeter")
+            .expect("greeter entry");
+        greeter.options.lock().config = Some(config_value(2));
+        tree.write();
+        wait_until(|| {
+            fs::read_to_string(dir.join("base.yml"))
+                .is_ok_and(|content| content.contains("value: 2"))
         })
         .await;
+
+        // A later turn triggers its own write.
+        greeter.options.lock().config = Some(config_value(4));
+        tree.write();
+        wait_until(|| {
+            fs::read_to_string(dir.join("base.yml"))
+                .is_ok_and(|content| content.contains("value: 4"))
+        })
+        .await;
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    .await;
 }
 
 /// A readonly config file is not overwritten (the error path mirrors the TS
 /// `cannot overwrite readonly config`).
 #[tokio::test(flavor = "current_thread")]
 async fn readonly_config_is_not_overwritten() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let dir = std::env::temp_dir()
-                .join(format!("cordis-include-debounce-c-{}", std::process::id()));
-            let path = fixture_yaml(&dir, 1);
-            let mut permissions = fs::metadata(&path).unwrap().permissions();
-            permissions.set_readonly(true);
-            fs::set_permissions(&path, permissions).unwrap();
+    async {
+        let dir =
+            std::env::temp_dir().join(format!("cordis-include-debounce-c-{}", std::process::id()));
+        let path = fixture_yaml(&dir, 1);
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
 
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            setup_loader(&loader);
-            let tree = loader.tree_handle();
-            tree.create(
-                include_opts(IncludeConfig {
-                    path: path.clone(),
-                    initial: None,
-                    patches: None,
-                    enable_logs: None,
-                }),
-                None,
-                0,
-            );
-            tree.await_tree().await;
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        setup_loader(&loader);
+        let tree = loader.tree_handle();
+        tree.create(
+            include_opts(IncludeConfig {
+                path: path.clone(),
+                initial: None,
+                patches: None,
+                enable_logs: None,
+            }),
+            None,
+            0,
+        );
+        tree.await_tree().await;
 
-            let greeter = tree
-                .entries()
-                .into_iter()
-                .find(|entry| entry.options.lock().name == "greeter")
-                .expect("greeter entry");
-            greeter.options.lock().config = Some(config_value(9));
-            tree.write();
-            tokio::task::yield_now().await;
-            tokio::task::yield_now().await;
+        let greeter = tree
+            .entries()
+            .into_iter()
+            .find(|entry| entry.options.lock().name == "greeter")
+            .expect("greeter entry");
+        greeter.options.lock().config = Some(config_value(9));
+        tree.write();
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
 
-            let content = fs::read_to_string(&path).unwrap();
-            assert!(
-                content.contains("value: 1"),
-                "readonly config must not be overwritten"
-            );
-            fs::remove_dir_all(&dir).unwrap();
-        })
-        .await;
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("value: 1"),
+            "readonly config must not be overwritten"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    .await;
 }

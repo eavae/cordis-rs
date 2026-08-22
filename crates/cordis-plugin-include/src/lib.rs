@@ -215,7 +215,7 @@ async fn mount_include(
         let state = state_for_write.clone();
         let subgroup = subgroup_for_write.clone();
         let tree = tree_for_write.clone();
-        tokio::task::spawn_local(async move {
+        tokio::task::spawn(async move {
             // `yield_now` mirrors the TS `setTimeout(0)` debounce boundary:
             // writes issued in the same turn coalesce into one disk write.
             tokio::task::yield_now().await;

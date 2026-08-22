@@ -61,7 +61,7 @@ tokio = {{ version = "1", features = ["rt", "rt-multi-thread", "macros", "time",
     )?;
     std::fs::write(
         dir.join("app/src/main.rs"),
-        "fn main() -> anyhow::Result<()> {\n    // The default project watches `./plugins` and reads `./cordis.yml`.\n    // Phase 0 of the multithreading plan: a worker pool with a `LocalSet`,\n    // so existing `!Send` tasks stay pinned to this thread.\n    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;\n    let local = tokio::task::LocalSet::new();\n    local.block_on(&runtime, async { cordis_cli::run(&Default::default()).await })\n}\n",
+        "fn main() -> anyhow::Result<()> {\n    // The default project watches `./plugins` and reads `./cordis.yml`.\n    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;\n    runtime.block_on(async { cordis_cli::run(&Default::default()).await })\n}\n",
     )?;
     std::fs::write(
         dir.join("cordis.yml"),
@@ -295,7 +295,8 @@ fn load_so_plugins(loader: &Loader, dir: &Path) -> anyhow::Result<Vec<SoPlugin>>
         if !is_plugin {
             continue;
         }
-        // SAFETY: the library is loaded on the host thread and used there.
+        // SAFETY: the plugin is only used while the instance is alive and
+        // never concurrently from two threads.
         let mut plugin = unsafe { SoPlugin::load(&path) }
             .map_err(|error| anyhow::anyhow!("cannot load plugin {}: {error}", path.display()))?;
         extern "C" fn cli_log(message: *const std::ffi::c_char) {

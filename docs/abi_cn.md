@@ -111,13 +111,16 @@ unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, config: *const c_ch
 - 非 JSON 对象服务(如 host 侧 Rust 服务)无法跨边界,`get` 返回 null;
   插件应通过元数据 `inject` 声明依赖,由 host 侧完成解析。
 
-## 6. 单线程纪律
+## 6. 线程模型
 
-全部 vtable 调用只发生在 host 的 current_thread runtime 线程上(core 决策 3):
+host 任务为 `Send`,运行在 tokio worker 池上(多线程化计划阶段 2):
 
-- 编译期:core/SDK 上下文均为 `!Send`(`Rc`/`RefCell`);`HostVtable` 的 `Send`/`Sync`
-  仅因 FFI 指针需要。
-- 运行期:会话注册表是 `thread_local` 的;跨线程调用自然找不到会话而失败,不会 panic。
+- 编译期:host 与 SDK 状态均为 `Send + Sync`(`Arc`、原子类型、无锁快照和短临界区
+  `Mutex`)。经 `spawn` 交给 host 的插件 future 按 `Send` 契约处理;逐插件线程
+  亲和性在阶段 3 最终确定。
+- 运行期:会话在当前驱动 host→plugin 调用的线程上压栈;没有会话的线程调用 vtable
+  会静默失败而不会 panic。存活句柄注册表是进程级的,任何线程上的延迟回调都会跳过
+  已 dispose 的插件。
 - 插件禁止自带 runtime;异步只能经 SDK 的 `spawn(vtable, future)` 交给 host。
 
 ## 7. 错误约定

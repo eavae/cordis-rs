@@ -10,8 +10,9 @@ use std::ffi::{CString, c_char};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
 use std::task::{Context as TaskContext, Poll, RawWaker, RawWakerVTable, Waker};
+
+use tokio::sync::oneshot;
 
 /// The ABI version implemented by this SDK.
 ///
@@ -110,8 +111,8 @@ pub struct HostVtable {
     pub host_version: u32,
 }
 
-// SAFETY: the vtable is only used on the host thread; the raw data pointer
-// stays valid for the plugin's lifetime.
+// SAFETY: the vtable is only used while the owning plugin instance is alive;
+// the raw data pointer stays valid for the plugin's lifetime.
 unsafe impl Send for HostVtable {}
 unsafe impl Sync for HostVtable {}
 
@@ -199,15 +200,24 @@ pub unsafe extern "C" fn plugin_apply(_handle: *mut PluginHandle, _config: *cons
 #[repr(C)]
 pub struct WakerData {
     refs: AtomicUsize,
+    /// Opaque host context handed back to `wake`; the host keeps it valid
+    /// for as long as any waker reference is alive (e.g. a per-task slot
+    /// holding the tokio waker that re-schedules the task).
+    data: *mut std::ffi::c_void,
     wake: unsafe extern "C" fn(*mut std::ffi::c_void),
 }
 
 impl WakerData {
-    /// Creates a waker data cell owned by the caller.
+    /// Creates a waker data cell owned by the caller; `data` is passed back
+    /// to `wake` and must stay valid for the cell's lifetime.
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(wake: unsafe extern "C" fn(*mut std::ffi::c_void)) -> RcWaker {
+    pub fn new(
+        data: *mut std::ffi::c_void,
+        wake: unsafe extern "C" fn(*mut std::ffi::c_void),
+    ) -> RcWaker {
         RcWaker(Box::into_raw(Box::new(Self {
             refs: AtomicUsize::new(1),
+            data,
             wake,
         })))
     }
@@ -267,14 +277,14 @@ unsafe fn waker_wake(ptr: *const ()) {
     // SAFETY: the pointer is a valid WakerData.
     let data = unsafe { &*(ptr as *const WakerData) };
     // SAFETY: the wake callback was provided by the host.
-    unsafe { (data.wake)(ptr as *mut std::ffi::c_void) };
+    unsafe { (data.wake)(data.data) };
 }
 
 unsafe fn waker_wake_by_ref(ptr: *const ()) {
     // SAFETY: the pointer is a valid WakerData.
     let data = unsafe { &*(ptr as *const WakerData) };
     // SAFETY: the wake callback was provided by the host.
-    unsafe { (data.wake)(ptr as *mut std::ffi::c_void) };
+    unsafe { (data.wake)(data.data) };
 }
 
 unsafe fn waker_drop(ptr: *const ()) {
@@ -305,7 +315,7 @@ pub unsafe fn waker_from_raw(ptr: *const std::ffi::c_void) -> Waker {
 
 /// Shared completion state of a spawned task (plugin side).
 struct SpawnState<T> {
-    result: mpsc::Sender<T>,
+    result: Option<oneshot::Sender<T>>,
 }
 
 /// Wraps a plugin future so the host can poll it through [`BoxedFuture`].
@@ -329,7 +339,9 @@ where
     // SAFETY: the future is pinned in place inside the box.
     match unsafe { Pin::new_unchecked(&mut this.future).poll(&mut cx) } {
         Poll::Ready(value) => {
-            let _ = this.state.result.send(value);
+            if let Some(sender) = this.state.result.take() {
+                let _ = sender.send(value);
+            }
             1
         }
         Poll::Pending => 0,
@@ -345,31 +357,31 @@ where
 }
 
 /// A future that resolves to the result of a task spawned on the host.
+///
+/// The completion is delivered through a oneshot channel and the poll
+/// registers the caller's waker, so the awaiting side resumes as soon as the
+/// host task completes (on any runtime thread).
 pub struct Spawned<T> {
-    receiver: Option<mpsc::Receiver<T>>,
+    receiver: Option<oneshot::Receiver<T>>,
 }
 
 impl<T> Future for Spawned<T> {
     type Output = Result<T, String>;
 
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
-        let Some(receiver) = self.receiver.as_ref() else {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        let Some(receiver) = self.receiver.as_mut() else {
             return Poll::Ready(Err("task has already been awaited".to_string()));
         };
-        match receiver.try_recv() {
-            Ok(value) => {
+        match Pin::new(receiver).poll(cx) {
+            Poll::Ready(Ok(value)) => {
                 self.receiver.take();
                 Poll::Ready(Ok(value))
             }
-            Err(mpsc::TryRecvError::Empty) => {
-                // The host runtime drives the spawned task; yielding lets it
-                // make progress on the single-threaded executor.
-                Poll::Pending
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
+            Poll::Ready(Err(_)) => {
                 self.receiver.take();
                 Poll::Ready(Err("task was cancelled".to_string()))
             }
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -383,10 +395,12 @@ pub unsafe fn spawn<F>(vtable: &HostVtable, future: F) -> Spawned<F::Output>
 where
     F: Future + 'static,
 {
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = oneshot::channel();
     let boxed = Box::new(BoxedPluginFuture {
         future,
-        state: SpawnState { result: sender },
+        state: SpawnState {
+            result: Some(sender),
+        },
     });
     let data: *mut std::ffi::c_void = Box::into_raw(boxed).cast();
     let wrapped = BoxedFuture {
@@ -408,8 +422,7 @@ where
 ///
 /// A bridge is only valid while the host is calling into the plugin (apply,
 /// an event callback, or a disposer); the host pushes a session for the
-/// plugin's handle for the duration of those calls, and every vtable call
-/// must happen on the host thread.
+/// plugin's handle on the calling thread for the duration of those calls.
 ///
 /// Values cross the boundary as JSON strings: the host copies them during
 /// the call, so no allocation crosses the ABI.

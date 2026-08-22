@@ -104,8 +104,9 @@ pub struct SoPlugin {
     apply: Option<Symbol<'static, ApplyConfig>>,
 }
 
-// SAFETY: the handle is only touched on the host thread; `Send` is required
-// because `Library` is `Send`.
+// SAFETY: the handle is only touched while the owning plugin instance is
+// alive (guarded by the process-wide live-handle registry); `Send` is
+// required because `Library` is `Send`.
 unsafe impl Send for SoPlugin {}
 
 impl SoPlugin {

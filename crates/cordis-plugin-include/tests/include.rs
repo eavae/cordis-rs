@@ -59,110 +59,104 @@ fn greeting(root: &Context) -> Option<String> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn loads_without_patches() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-include-a-{}", std::process::id()));
-            let path = write_fixture(
-                &dir,
-                "base.yml",
-                "- id: '1'\n  name: greeter\n  config:\n    value: hello\n",
-            );
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            setup_loader(&loader);
-            let tree = loader.tree_handle();
-            let entry = tree.create(
-                include_opts(IncludeConfig {
-                    path,
-                    initial: None,
-                    patches: None,
-                    enable_logs: None,
-                }),
-                None,
-                0,
-            );
-            tree.await_tree().await;
-            assert_eq!(greeting(&root).as_deref(), Some("hello"));
-            assert!(!entry.id().is_empty());
-            fs::remove_dir_all(&dir).unwrap();
-        })
-        .await;
+    async {
+        let dir = std::env::temp_dir().join(format!("cordis-include-a-{}", std::process::id()));
+        let path = write_fixture(
+            &dir,
+            "base.yml",
+            "- id: '1'\n  name: greeter\n  config:\n    value: hello\n",
+        );
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        setup_loader(&loader);
+        let tree = loader.tree_handle();
+        let entry = tree.create(
+            include_opts(IncludeConfig {
+                path,
+                initial: None,
+                patches: None,
+                enable_logs: None,
+            }),
+            None,
+            0,
+        );
+        tree.await_tree().await;
+        assert_eq!(greeting(&root).as_deref(), Some("hello"));
+        assert!(!entry.id().is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn patch_disables_entry() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-include-b-{}", std::process::id()));
-            let path = write_fixture(
-                &dir,
-                "base.yml",
-                "- id: '1'\n  name: greeter\n  config:\n    value: hello\n",
-            );
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            setup_loader(&loader);
-            let tree = loader.tree_handle();
-            tree.create(
-                include_opts(IncludeConfig {
-                    path,
-                    initial: None,
-                    patches: Some(vec![PatchOptions {
-                        id: Some("1".to_string()),
-                        disabled: Override::Set(true),
-                        ..Default::default()
-                    }]),
-                    enable_logs: None,
-                }),
-                None,
-                0,
-            );
-            tree.await_tree().await;
-            assert!(
-                greeting(&root).is_none(),
-                "patched-disabled entry must not apply"
-            );
-            fs::remove_dir_all(&dir).unwrap();
-        })
-        .await;
+    async {
+        let dir = std::env::temp_dir().join(format!("cordis-include-b-{}", std::process::id()));
+        let path = write_fixture(
+            &dir,
+            "base.yml",
+            "- id: '1'\n  name: greeter\n  config:\n    value: hello\n",
+        );
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        setup_loader(&loader);
+        let tree = loader.tree_handle();
+        tree.create(
+            include_opts(IncludeConfig {
+                path,
+                initial: None,
+                patches: Some(vec![PatchOptions {
+                    id: Some("1".to_string()),
+                    disabled: Override::Set(true),
+                    ..Default::default()
+                }]),
+                enable_logs: None,
+            }),
+            None,
+            0,
+        );
+        tree.await_tree().await;
+        assert!(
+            greeting(&root).is_none(),
+            "patched-disabled entry must not apply"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn missing_file_with_initial_creates_it() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let dir = std::env::temp_dir().join(format!("cordis-include-c-{}", std::process::id()));
-            fs::create_dir_all(&dir).unwrap();
-            let path = dir.join("missing.yml").to_string_lossy().to_string();
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            setup_loader(&loader);
-            let tree = loader.tree_handle();
-            tree.create(
-                include_opts(IncludeConfig {
-                    path,
-                    initial: Some(
-                        serde_yaml_ng::from_str::<Vec<EntryOptions>>(
-                            "- id: '1'\n  name: greeter\n  config:\n    value: created\n",
-                        )
-                        .unwrap(),
-                    ),
-                    patches: None,
-                    enable_logs: None,
-                }),
-                None,
-                0,
-            );
-            tree.await_tree().await;
-            assert_eq!(greeting(&root).as_deref(), Some("created"));
-            assert!(
-                dir.join("missing.yml").exists(),
-                "initial file must be created"
-            );
-            fs::remove_dir_all(&dir).unwrap();
-        })
-        .await;
+    async {
+        let dir = std::env::temp_dir().join(format!("cordis-include-c-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("missing.yml").to_string_lossy().to_string();
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        setup_loader(&loader);
+        let tree = loader.tree_handle();
+        tree.create(
+            include_opts(IncludeConfig {
+                path,
+                initial: Some(
+                    serde_yaml_ng::from_str::<Vec<EntryOptions>>(
+                        "- id: '1'\n  name: greeter\n  config:\n    value: created\n",
+                    )
+                    .unwrap(),
+                ),
+                patches: None,
+                enable_logs: None,
+            }),
+            None,
+            0,
+        );
+        tree.await_tree().await;
+        assert_eq!(greeting(&root).as_deref(), Some("created"));
+        assert!(
+            dir.join("missing.yml").exists(),
+            "initial file must be created"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    .await;
 }

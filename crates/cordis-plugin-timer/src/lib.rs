@@ -28,7 +28,7 @@ impl TimerService {
     ) -> Result<Arc<EffectHandle>, CordisError> {
         ctx.fiber().effect(
             move || {
-                let join = tokio::task::spawn_local(async move {
+                let join = tokio::task::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                     callback();
                 });
@@ -63,7 +63,7 @@ impl TimerService {
     ) -> Result<Arc<EffectHandle>, CordisError> {
         ctx.fiber().effect(
             move || {
-                let join = tokio::task::spawn_local(async move {
+                let join = tokio::task::spawn(async move {
                     loop {
                         tokio::time::sleep(Duration::from_millis(delay)).await;
                         callback();
@@ -138,7 +138,7 @@ impl TimerService {
                 let callback = callback.clone();
                 let state = state.clone();
                 let disposed = tracker.disposed.clone();
-                let handle = tokio::task::spawn_local(async move {
+                let handle = tokio::task::spawn(async move {
                     tokio::time::sleep_until(deadline).await;
                     if disposed.load(Ordering::Acquire) {
                         return;
@@ -171,7 +171,7 @@ impl TimerService {
             let callback = callback.clone();
             let generation = generation.clone();
             let disposed = tracker.disposed.clone();
-            let handle = tokio::task::spawn_local(async move {
+            let handle = tokio::task::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
                 if !disposed.load(Ordering::Acquire)
                     && generation.load(Ordering::Acquire) == next_gen

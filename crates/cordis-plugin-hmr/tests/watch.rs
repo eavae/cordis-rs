@@ -57,184 +57,180 @@ fn config_defaults_and_validation() {
 /// files are filtered out.
 #[tokio::test(flavor = "current_thread")]
 async fn change_event_and_ignored() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let dir = temp_dir("event");
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            let changes = Arc::new(Mutex::new(Vec::new()));
-            drop(
-                root.on(
-                    "hmr/change",
-                    event_callback({
-                        let changes = changes.clone();
-                        move |args| {
-                            if let Some(path) = args[0].downcast_ref::<String>() {
-                                changes.lock().push(path.clone());
-                            }
-                            Ok(None)
+    async {
+        let dir = temp_dir("event");
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        let changes = Arc::new(Mutex::new(Vec::new()));
+        drop(
+            root.on(
+                "hmr/change",
+                event_callback({
+                    let changes = changes.clone();
+                    move |args| {
+                        if let Some(path) = args[0].downcast_ref::<String>() {
+                            changes.lock().push(path.clone());
                         }
-                    }),
-                    EventOptions::default(),
-                )
-                .unwrap(),
-            );
+                        Ok(None)
+                    }
+                }),
+                EventOptions::default(),
+            )
+            .unwrap(),
+        );
 
-            let watcher = FileWatcher::start(
-                root.clone(),
-                loader,
-                HmrConfig {
-                    base: Some(dir.to_string_lossy().into_owned()),
-                    root: vec![".".to_string()],
-                    debounce: 30,
-                    ignored: vec!["**/node_modules".to_string()],
-                },
-                dir.clone(),
-            );
-            fs::create_dir_all(dir.join("node_modules")).unwrap();
-            fs::write(dir.join("node_modules/pkg.js"), "x").unwrap();
-            fs::write(dir.join("src.js"), "hello").unwrap();
+        let watcher = FileWatcher::start(
+            root.clone(),
+            loader,
+            HmrConfig {
+                base: Some(dir.to_string_lossy().into_owned()),
+                root: vec![".".to_string()],
+                debounce: 30,
+                ignored: vec!["**/node_modules".to_string()],
+            },
+            dir.clone(),
+        );
+        fs::create_dir_all(dir.join("node_modules")).unwrap();
+        fs::write(dir.join("node_modules/pkg.js"), "x").unwrap();
+        fs::write(dir.join("src.js"), "hello").unwrap();
 
-            wait_for(|| !changes.lock().is_empty()).await;
-            watcher.stop();
-            assert!(
-                changes.lock().iter().any(|p| p.ends_with("src.js")),
-                "src.js change must emit hmr/change: {:?}",
-                changes.lock()
-            );
-            assert!(
-                !changes.lock().iter().any(|p| p.contains("node_modules")),
-                "ignored files must not emit: {:?}",
-                changes.lock()
-            );
-            fs::remove_dir_all(&dir).unwrap();
-        })
-        .await;
+        wait_for(|| !changes.lock().is_empty()).await;
+        watcher.stop();
+        assert!(
+            changes.lock().iter().any(|p| p.ends_with("src.js")),
+            "src.js change must emit hmr/change: {:?}",
+            changes.lock()
+        );
+        assert!(
+            !changes.lock().iter().any(|p| p.contains("node_modules")),
+            "ignored files must not emit: {:?}",
+            changes.lock()
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    .await;
 }
 
 /// A config file owned by the include plugin is refreshed instead of
 /// emitting `hmr/change`.
 #[tokio::test(flavor = "current_thread")]
 async fn include_config_refresh() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let dir = temp_dir("include");
-            let config_path = dir.join("base.yml");
-            fs::write(
-                &config_path,
-                "- id: '1'\n  name: greeter\n  config:\n    value: one\n",
-            )
-            .unwrap();
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            loader.builtins.rcu(|builtins| {
-                let mut next = (**builtins).clone();
-                next.insert("@cordisjs/plugin-include".to_string(), include_plugin());
-                Arc::new(next)
-            });
-            loader.mock(
-                "greeter",
-                Arc::new(|ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
-                    let value = config
-                        .downcast_ref::<serde_yaml_ng::Value>()
-                        .and_then(|value| value.get("value"))
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("default")
-                        .to_string();
-                    drop(ctx.provide_str("greeting", Arc::new(value)).unwrap());
-                    Effect::None
+    async {
+        let dir = temp_dir("include");
+        let config_path = dir.join("base.yml");
+        fs::write(
+            &config_path,
+            "- id: '1'\n  name: greeter\n  config:\n    value: one\n",
+        )
+        .unwrap();
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        loader.builtins.rcu(|builtins| {
+            let mut next = (**builtins).clone();
+            next.insert("@cordisjs/plugin-include".to_string(), include_plugin());
+            Arc::new(next)
+        });
+        loader.mock(
+            "greeter",
+            Arc::new(|ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
+                let value = config
+                    .downcast_ref::<serde_yaml_ng::Value>()
+                    .and_then(|value| value.get("value"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("default")
+                    .to_string();
+                drop(ctx.provide_str("greeting", Arc::new(value)).unwrap());
+                Effect::None
+            }),
+        );
+        let changes = Arc::new(Mutex::new(0u32));
+        drop(
+            root.on(
+                "hmr/change",
+                event_callback({
+                    let changes = changes.clone();
+                    move |_args| {
+                        *changes.lock() += 1;
+                        Ok(None)
+                    }
                 }),
-            );
-            let changes = Arc::new(Mutex::new(0u32));
-            drop(
-                root.on(
-                    "hmr/change",
-                    event_callback({
-                        let changes = changes.clone();
-                        move |_args| {
-                            *changes.lock() += 1;
-                            Ok(None)
-                        }
-                    }),
-                    EventOptions::default(),
-                )
-                .unwrap(),
-            );
-            let tree = loader.tree_handle();
-            tree.create(
-                EntryOptions {
-                    id: String::new(),
-                    name: "@cordisjs/plugin-include".to_string(),
-                    config: Some(
-                        serde_yaml_ng::to_value(IncludeConfig {
-                            path: config_path.to_string_lossy().into_owned(),
-                            initial: None,
-                            patches: None,
-                            enable_logs: None,
-                        })
-                        .unwrap(),
-                    ),
-                    group: None,
-                    disabled: None,
-                    inject: None,
-                    isolate: None,
-                    intercept: None,
-                    extra: HashMap::default(),
-                },
-                None,
-                0,
-            );
-            tree.await_tree().await;
-            assert_eq!(
-                root.get_str("greeting")
-                    .and_then(|v| v.downcast::<String>().ok())
-                    .map(|s| s.to_string())
-                    .as_deref(),
-                Some("one")
-            );
-
-            // Change the include config file → refresh, no hmr/change.
-            let watcher = FileWatcher::start(
-                root.clone(),
-                loader.clone(),
-                HmrConfig {
-                    base: Some(dir.to_string_lossy().into_owned()),
-                    root: vec![".".to_string()],
-                    debounce: 20,
-                    ignored: vec![],
-                },
-                dir.clone(),
-            );
-            fs::write(
-                &config_path,
-                "- id: '1'\n  name: greeter\n  config:\n    value: two\n",
+                EventOptions::default(),
             )
-            .unwrap();
-            wait_for(|| {
-                root.get_str("greeting")
-                    .and_then(|v| v.downcast::<String>().ok())
-                    .map(|s| s.to_string())
-                    .as_deref()
-                    == Some("two")
-            })
-            .await;
-            watcher.stop();
-            assert_eq!(
-                root.get_str("greeting")
-                    .and_then(|v| v.downcast::<String>().ok())
-                    .map(|s| s.to_string())
-                    .as_deref(),
-                Some("two"),
-                "include config change must refresh the tree"
-            );
-            assert_eq!(
-                *changes.lock(),
-                0,
-                "config file changes must not emit hmr/change"
-            );
-            fs::remove_dir_all(&dir).unwrap();
+            .unwrap(),
+        );
+        let tree = loader.tree_handle();
+        tree.create(
+            EntryOptions {
+                id: String::new(),
+                name: "@cordisjs/plugin-include".to_string(),
+                config: Some(
+                    serde_yaml_ng::to_value(IncludeConfig {
+                        path: config_path.to_string_lossy().into_owned(),
+                        initial: None,
+                        patches: None,
+                        enable_logs: None,
+                    })
+                    .unwrap(),
+                ),
+                group: None,
+                disabled: None,
+                inject: None,
+                isolate: None,
+                intercept: None,
+                extra: HashMap::default(),
+            },
+            None,
+            0,
+        );
+        tree.await_tree().await;
+        assert_eq!(
+            root.get_str("greeting")
+                .and_then(|v| v.downcast::<String>().ok())
+                .map(|s| s.to_string())
+                .as_deref(),
+            Some("one")
+        );
+
+        // Change the include config file → refresh, no hmr/change.
+        let watcher = FileWatcher::start(
+            root.clone(),
+            loader.clone(),
+            HmrConfig {
+                base: Some(dir.to_string_lossy().into_owned()),
+                root: vec![".".to_string()],
+                debounce: 20,
+                ignored: vec![],
+            },
+            dir.clone(),
+        );
+        fs::write(
+            &config_path,
+            "- id: '1'\n  name: greeter\n  config:\n    value: two\n",
+        )
+        .unwrap();
+        wait_for(|| {
+            root.get_str("greeting")
+                .and_then(|v| v.downcast::<String>().ok())
+                .map(|s| s.to_string())
+                .as_deref()
+                == Some("two")
         })
         .await;
+        watcher.stop();
+        assert_eq!(
+            root.get_str("greeting")
+                .and_then(|v| v.downcast::<String>().ok())
+                .map(|s| s.to_string())
+                .as_deref(),
+            Some("two"),
+            "include config change must refresh the tree"
+        );
+        assert_eq!(
+            *changes.lock(),
+            0,
+            "config file changes must not emit hmr/change"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    .await;
 }

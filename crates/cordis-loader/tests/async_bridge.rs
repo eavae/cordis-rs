@@ -59,28 +59,26 @@ async fn wait_logged(needle: &str) {
 async fn host_drives_spawned_future_to_completion() {
     let _serial = SERIAL.lock();
     reset_counters();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
-            let handle = unsafe { plugin.create(log_message) };
-            assert!(!handle.is_null());
+    async {
+        let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
+        let handle = unsafe { plugin.create(log_message) };
+        assert!(!handle.is_null());
 
-            LOGGED.lock().clear();
-            let library = unsafe { Library::new(fixture_path()) }.unwrap();
-            type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle);
-            let spawn: libloading::Symbol<Spawn> =
-                unsafe { library.get(b"plugin_spawn_and_log") }.unwrap();
-            unsafe { spawn(handle) };
+        LOGGED.lock().clear();
+        let library = unsafe { Library::new(fixture_path()) }.unwrap();
+        type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle);
+        let spawn: libloading::Symbol<Spawn> =
+            unsafe { library.get(b"plugin_spawn_and_log") }.unwrap();
+        unsafe { spawn(handle) };
 
-            wait_logged("spawned task result: 42").await;
-            type Count = unsafe extern "C" fn() -> u32;
-            let completed: libloading::Symbol<Count> =
-                unsafe { library.get(b"plugin_completed") }.unwrap();
-            assert_eq!(unsafe { completed() }, 1);
-            drop(plugin);
-        })
-        .await;
+        wait_logged("spawned task result: 42").await;
+        type Count = unsafe extern "C" fn() -> u32;
+        let completed: libloading::Symbol<Count> =
+            unsafe { library.get(b"plugin_completed") }.unwrap();
+        assert_eq!(unsafe { completed() }, 1);
+        drop(plugin);
+    }
+    .await;
 }
 
 /// Disposing the plugin handle cancels pending futures (their boxed futures
@@ -90,39 +88,37 @@ async fn host_drives_spawned_future_to_completion() {
 async fn dispose_cancels_pending_spawns() {
     let _serial = SERIAL.lock();
     reset_counters();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
-            let handle = unsafe { plugin.create(log_message) };
-            assert!(!handle.is_null());
+    async {
+        let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
+        let handle = unsafe { plugin.create(log_message) };
+        assert!(!handle.is_null());
 
-            let library = unsafe { Library::new(fixture_path()) }.unwrap();
-            type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle);
-            let spawn: libloading::Symbol<Spawn> =
-                unsafe { library.get(b"plugin_spawn_never_completes") }.unwrap();
-            unsafe { spawn(handle) };
+        let library = unsafe { Library::new(fixture_path()) }.unwrap();
+        type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle);
+        let spawn: libloading::Symbol<Spawn> =
+            unsafe { library.get(b"plugin_spawn_never_completes") }.unwrap();
+        unsafe { spawn(handle) };
+        tokio::task::yield_now().await;
+
+        type Count = unsafe extern "C" fn() -> u32;
+        let cancelled: libloading::Symbol<Count> =
+            unsafe { library.get(b"plugin_cancelled_drops") }.unwrap();
+        assert_eq!(unsafe { cancelled() }, 0, "task is still pending");
+
+        drop(plugin);
+        for _ in 0..100 {
             tokio::task::yield_now().await;
-
-            type Count = unsafe extern "C" fn() -> u32;
-            let cancelled: libloading::Symbol<Count> =
-                unsafe { library.get(b"plugin_cancelled_drops") }.unwrap();
-            assert_eq!(unsafe { cancelled() }, 0, "task is still pending");
-
-            drop(plugin);
-            for _ in 0..100 {
-                tokio::task::yield_now().await;
-                if unsafe { cancelled() } >= 1 {
-                    break;
-                }
+            if unsafe { cancelled() } >= 1 {
+                break;
             }
-            assert_eq!(
-                unsafe { cancelled() },
-                1,
-                "disposing the plugin must drop the pending boxed future"
-            );
-        })
-        .await;
+        }
+        assert_eq!(
+            unsafe { cancelled() },
+            1,
+            "disposing the plugin must drop the pending boxed future"
+        );
+    }
+    .await;
 }
 
 /// Dropping a plugin while one of its spawned futures is still pending must
@@ -134,48 +130,46 @@ async fn dispose_cancels_pending_spawns() {
 async fn unload_waits_for_pending_spawned_futures() {
     let _serial = SERIAL.lock();
     reset_counters();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
-            let handle = unsafe { plugin.create(log_message) };
-            assert!(!handle.is_null());
+    async {
+        let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
+        let handle = unsafe { plugin.create(log_message) };
+        assert!(!handle.is_null());
 
-            // The extra handle only reaches the fixture's spawn export;
-            // release it so the plugin is the sole owner of the library when
-            // it is dropped.
-            let library = unsafe { Library::new(fixture_path()) }.unwrap();
-            type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle);
-            {
-                let spawn: libloading::Symbol<Spawn> =
-                    unsafe { library.get(b"plugin_spawn_never_completes") }.unwrap();
-                unsafe { spawn(handle) };
-                // Let the host poll the new task once so it is registered
-                // with the runtime before it is cancelled.
-                tokio::task::yield_now().await;
+        // The extra handle only reaches the fixture's spawn export;
+        // release it so the plugin is the sole owner of the library when
+        // it is dropped.
+        let library = unsafe { Library::new(fixture_path()) }.unwrap();
+        type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle);
+        {
+            let spawn: libloading::Symbol<Spawn> =
+                unsafe { library.get(b"plugin_spawn_never_completes") }.unwrap();
+            unsafe { spawn(handle) };
+            // Let the host poll the new task once so it is registered
+            // with the runtime before it is cancelled.
+            tokio::task::yield_now().await;
+        }
+        drop(library);
+
+        drop(plugin);
+
+        // Let the runtime drop the aborted task, then verify through a
+        // fresh handle that the fixture's drop function ran: if the
+        // library was unloaded and reloaded (current behavior), the new
+        // instance's counter never reaches 1, while a pending task must
+        // keep the original instance alive until it is dropped.
+        let library = unsafe { Library::new(fixture_path()) }.unwrap();
+        type Count = unsafe extern "C" fn() -> u32;
+        let fresh: libloading::Symbol<Count> =
+            unsafe { library.get(b"plugin_cancelled_drops") }.unwrap();
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            if unsafe { fresh() } >= 1 {
+                return;
             }
-            drop(library);
-
-            drop(plugin);
-
-            // Let the runtime drop the aborted task, then verify through a
-            // fresh handle that the fixture's drop function ran: if the
-            // library was unloaded and reloaded (current behavior), the new
-            // instance's counter never reaches 1, while a pending task must
-            // keep the original instance alive until it is dropped.
-            let library = unsafe { Library::new(fixture_path()) }.unwrap();
-            type Count = unsafe extern "C" fn() -> u32;
-            let fresh: libloading::Symbol<Count> =
-                unsafe { library.get(b"plugin_cancelled_drops") }.unwrap();
-            for _ in 0..100 {
-                tokio::task::yield_now().await;
-                if unsafe { fresh() } >= 1 {
-                    return;
-                }
-            }
-            panic!("pending future was not dropped");
-        })
-        .await;
+        }
+        panic!("pending future was not dropped");
+    }
+    .await;
 }
 
 /// 10k spawns complete without abnormal growth (smoke).
@@ -184,33 +178,31 @@ async fn unload_waits_for_pending_spawned_futures() {
 async fn ten_thousand_spawns_smoke() {
     let _serial = SERIAL.lock();
     reset_counters();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
-            let handle = unsafe { plugin.create(log_message) };
-            assert!(!handle.is_null());
+    async {
+        let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
+        let handle = unsafe { plugin.create(log_message) };
+        assert!(!handle.is_null());
 
-            let library = unsafe { Library::new(fixture_path()) }.unwrap();
-            type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle, u32);
-            let spawn: libloading::Symbol<Spawn> =
-                unsafe { library.get(b"plugin_spawn_many") }.unwrap();
-            unsafe { spawn(handle, 10_000) };
+        let library = unsafe { Library::new(fixture_path()) }.unwrap();
+        type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle, u32);
+        let spawn: libloading::Symbol<Spawn> =
+            unsafe { library.get(b"plugin_spawn_many") }.unwrap();
+        unsafe { spawn(handle, 10_000) };
 
-            type Count = unsafe extern "C" fn() -> u32;
-            let completed: libloading::Symbol<Count> =
-                unsafe { library.get(b"plugin_completed") }.unwrap();
-            let baseline = unsafe { completed() };
-            for _ in 0..2000 {
-                tokio::task::yield_now().await;
-                if unsafe { completed() } == baseline + 10_000 {
-                    break;
-                }
+        type Count = unsafe extern "C" fn() -> u32;
+        let completed: libloading::Symbol<Count> =
+            unsafe { library.get(b"plugin_completed") }.unwrap();
+        let baseline = unsafe { completed() };
+        for _ in 0..2000 {
+            tokio::task::yield_now().await;
+            if unsafe { completed() } == baseline + 10_000 {
+                break;
             }
-            assert_eq!(unsafe { completed() }, baseline + 10_000);
-            drop(plugin);
-        })
-        .await;
+        }
+        assert_eq!(unsafe { completed() }, baseline + 10_000);
+        drop(plugin);
+    }
+    .await;
 }
 
 /// The vtable is version-checked by the fixture.

@@ -180,124 +180,116 @@ async fn honours_intercept_name() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn uses_service_name_inside_service_method() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (ctx, captured) = setup();
-            let fiber = ctx.plugin(&named_plugin("foo:driver", Arc::new(FooService)), None);
-            fiber.wait().await.unwrap();
+    async {
+        let (ctx, captured) = setup();
+        let fiber = ctx.plugin(&named_plugin("foo:driver", Arc::new(FooService)), None);
+        fiber.wait().await.unwrap();
 
-            // The traced handle's context carries the service's shadow, so
-            // `ctx.logger()` inside the method falls back to the service's
-            // own fiber name (JS: `symbols.caller` → fiber name).
-            ctx.foo_service().expect("foo").action();
-            let names: Vec<String> = captured
-                .lock()
-                .iter()
-                .map(|message| message.name.clone())
-                .collect();
-            assert!(names.contains(&"foo:driver".to_string()));
-            assert!(!names.contains(&"root".to_string()));
-        })
-        .await;
+        // The traced handle's context carries the service's shadow, so
+        // `ctx.logger()` inside the method falls back to the service's
+        // own fiber name (JS: `symbols.caller` → fiber name).
+        ctx.foo_service().expect("foo").action();
+        let names: Vec<String> = captured
+            .lock()
+            .iter()
+            .map(|message| message.name.clone())
+            .collect();
+        assert!(names.contains(&"foo:driver".to_string()));
+        assert!(!names.contains(&"root".to_string()));
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn lets_outer_caller_intercept_override_service_name() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (ctx, captured) = setup();
-            let fiber = ctx.plugin(&named_plugin("foo:driver", Arc::new(FooService)), None);
-            fiber.wait().await.unwrap();
+    async {
+        let (ctx, captured) = setup();
+        let fiber = ctx.plugin(&named_plugin("foo:driver", Arc::new(FooService)), None);
+        fiber.wait().await.unwrap();
 
-            // The intercept chain comes from the caller's context, not the
-            // service's own (JS: `this.ctx` reads the caller's intercept).
-            let intercepted = ctx.intercept(
-                "logger",
-                LoggerIntercept {
-                    name: Some("caller-override".to_string()),
-                    level: None,
-                },
-            );
-            intercepted.foo_service().expect("foo").action();
-            let names: Vec<String> = captured
-                .lock()
-                .iter()
-                .map(|message| message.name.clone())
-                .collect();
-            assert!(names.contains(&"caller-override".to_string()));
-            assert!(!names.contains(&"foo:driver".to_string()));
-        })
-        .await;
+        // The intercept chain comes from the caller's context, not the
+        // service's own (JS: `this.ctx` reads the caller's intercept).
+        let intercepted = ctx.intercept(
+            "logger",
+            LoggerIntercept {
+                name: Some("caller-override".to_string()),
+                level: None,
+            },
+        );
+        intercepted.foo_service().expect("foo").action();
+        let names: Vec<String> = captured
+            .lock()
+            .iter()
+            .map(|message| message.name.clone())
+            .collect();
+        assert!(names.contains(&"caller-override".to_string()));
+        assert!(!names.contains(&"foo:driver".to_string()));
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn uses_innermost_service_name_and_restores_outer() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (ctx, captured) = setup();
-            let bar = ctx.plugin(&named_plugin("bar:driver", Arc::new(BarService)), None);
-            bar.wait().await.unwrap();
-            let foo = ctx.plugin(
-                &named_plugin("foo:driver", Arc::new(NestedFooService)),
-                None,
-            );
-            foo.wait().await.unwrap();
+    async {
+        let (ctx, captured) = setup();
+        let bar = ctx.plugin(&named_plugin("bar:driver", Arc::new(BarService)), None);
+        bar.wait().await.unwrap();
+        let foo = ctx.plugin(
+            &named_plugin("foo:driver", Arc::new(NestedFooService)),
+            None,
+        );
+        foo.wait().await.unwrap();
 
-            // No stack is involved: each method's traced context resolves
-            // the name from its own shadow fiber, so bar logs first and
-            // foo's log is restored when control returns (JS: per-access
-            // re-derivation).
-            ctx.nested_foo_service().expect("foo").action();
-            let pairs: Vec<(String, String)> = captured
-                .lock()
-                .iter()
-                .map(|message| (message.name.clone(), arg0(message)))
-                .collect();
-            assert_eq!(
-                pairs,
-                vec![
-                    ("bar:driver".to_string(), "from bar".to_string()),
-                    ("foo:driver".to_string(), "from foo".to_string()),
-                ]
-            );
-        })
-        .await;
+        // No stack is involved: each method's traced context resolves
+        // the name from its own shadow fiber, so bar logs first and
+        // foo's log is restored when control returns (JS: per-access
+        // re-derivation).
+        ctx.nested_foo_service().expect("foo").action();
+        let pairs: Vec<(String, String)> = captured
+            .lock()
+            .iter()
+            .map(|message| (message.name.clone(), arg0(message)))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("bar:driver".to_string(), "from bar".to_string()),
+                ("foo:driver".to_string(), "from foo".to_string()),
+            ]
+        );
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn uses_service_name_in_apply() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let (ctx, captured) = setup();
-            let plugin = Plugin {
-                is_group: false,
-                name: Some("foo:driver".to_string()),
-                inject: Vec::new(),
-                apply: Arc::new(|ctx: &Context, _config| {
-                    // The apply callback is the Rust counterpart of
-                    // `Service.init`: the fiber already carries the plugin
-                    // name.
-                    ctx.logger().debug("from init");
-                    drop(ctx.provide::<FooService>(Arc::new(FooService)).unwrap());
-                    Effect::None
-                }),
-            };
-            let fiber = ctx.plugin(&plugin, None);
-            fiber.wait().await.unwrap();
+    async {
+        let (ctx, captured) = setup();
+        let plugin = Plugin {
+            is_group: false,
+            name: Some("foo:driver".to_string()),
+            inject: Vec::new(),
+            apply: Arc::new(|ctx: &Context, _config| {
+                // The apply callback is the Rust counterpart of
+                // `Service.init`: the fiber already carries the plugin
+                // name.
+                ctx.logger().debug("from init");
+                drop(ctx.provide::<FooService>(Arc::new(FooService)).unwrap());
+                Effect::None
+            }),
+        };
+        let fiber = ctx.plugin(&plugin, None);
+        fiber.wait().await.unwrap();
 
-            let names: Vec<String> = captured
-                .lock()
-                .iter()
-                .map(|message| message.name.clone())
-                .collect();
-            assert!(names.contains(&"foo:driver".to_string()));
-            assert!(!names.contains(&"root".to_string()));
-        })
-        .await;
+        let names: Vec<String> = captured
+            .lock()
+            .iter()
+            .map(|message| message.name.clone())
+            .collect();
+        assert!(names.contains(&"foo:driver".to_string()));
+        assert!(!names.contains(&"root".to_string()));
+    }
+    .await;
 }
 
 #[tokio::test]

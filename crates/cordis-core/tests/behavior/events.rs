@@ -403,71 +403,67 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
 
 #[tokio::test]
 async fn events_ctx_emit_async_continues_in_background() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let done = Arc::new(AtomicBool::new(false));
-            {
-                let done = done.clone();
-                root.on(
-                    "async-emit",
-                    event_listener_async(move |_args, _next| {
-                        let done = done.clone();
-                        async move {
-                            tokio::task::yield_now().await;
-                            done.store(true, Ordering::SeqCst);
-                            Ok(None)
-                        }
-                    }),
-                    EventOptions::default(),
-                )
-                .unwrap();
-            }
-
-            root.emit("async-emit", &[]);
-            assert!(
-                !done.load(Ordering::SeqCst),
-                "emit must return before async listeners finish"
-            );
-            for _ in 0..8 {
-                tokio::task::yield_now().await;
-                if done.load(Ordering::SeqCst) {
-                    break;
-                }
-            }
-            assert!(
-                done.load(Ordering::SeqCst),
-                "the background continuation must run to completion"
-            );
-        })
-        .await;
-}
-
-#[tokio::test]
-async fn events_ctx_emit_async_error_is_not_propagated() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
+    async {
+        let root = Context::new();
+        let done = Arc::new(AtomicBool::new(false));
+        {
+            let done = done.clone();
             root.on(
-                "async-emit-error",
-                event_listener_async(|_args, _next| async move {
-                    tokio::task::yield_now().await;
-                    Err(Box::<dyn Error + Send + Sync>::from(std::io::Error::other(
-                        "late failure",
-                    )))
+                "async-emit",
+                event_listener_async(move |_args, _next| {
+                    let done = done.clone();
+                    async move {
+                        tokio::task::yield_now().await;
+                        done.store(true, Ordering::SeqCst);
+                        Ok(None)
+                    }
                 }),
                 EventOptions::default(),
             )
             .unwrap();
+        }
 
-            root.emit("async-emit-error", &[]);
-            for _ in 0..8 {
-                tokio::task::yield_now().await;
+        root.emit("async-emit", &[]);
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "emit must return before async listeners finish"
+        );
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+            if done.load(Ordering::SeqCst) {
+                break;
             }
-        })
-        .await;
+        }
+        assert!(
+            done.load(Ordering::SeqCst),
+            "the background continuation must run to completion"
+        );
+    }
+    .await;
+}
+
+#[tokio::test]
+async fn events_ctx_emit_async_error_is_not_propagated() {
+    async {
+        let root = Context::new();
+        root.on(
+            "async-emit-error",
+            event_listener_async(|_args, _next| async move {
+                tokio::task::yield_now().await;
+                Err(Box::<dyn Error + Send + Sync>::from(std::io::Error::other(
+                    "late failure",
+                )))
+            }),
+            EventOptions::default(),
+        )
+        .unwrap();
+
+        root.emit("async-emit-error", &[]);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+    .await;
 }
 
 #[tokio::test]
@@ -716,55 +712,53 @@ async fn events_ctx_waterfall_async_chain() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn internal_update_hook() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let seen = Arc::new(Mutex::new(Vec::new()));
-            let applied_seen = seen.clone();
-            let fiber = root.plugin(
-                &Plugin {
-                    is_group: false,
-                    name: None,
-                    inject: Vec::new(),
-                    apply: Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
-                        let value = config.downcast_ref::<Config>().expect("config").value;
-                        applied_seen.lock().push(("apply", value));
-                        Effect::None
-                    }),
-                },
-                Some(Arc::new(Config { value: 1 })),
-            );
-            // Register an `internal/update` hook on the fiber's own context:
-            // it runs before the default update path.
-            let hook_seen = seen.clone();
-            fiber
-                .context()
-                .on(
-                    "internal/update",
-                    event_listener_async(move |args, next| {
-                        let hook_seen = hook_seen.clone();
-                        async move {
-                            let config = args[0].downcast_ref::<Config>().expect("config").value;
-                            hook_seen.lock().push(("hook", config));
-                            let next = next.expect("next");
-                            let _ = next.next().await;
-                            Ok(None)
-                        }
-                    }),
-                    EventOptions::default(),
-                )
-                .unwrap();
-            fiber.wait().await.unwrap();
+    async {
+        let root = Context::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let applied_seen = seen.clone();
+        let fiber = root.plugin(
+            &Plugin {
+                is_group: false,
+                name: None,
+                inject: Vec::new(),
+                apply: Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
+                    let value = config.downcast_ref::<Config>().expect("config").value;
+                    applied_seen.lock().push(("apply", value));
+                    Effect::None
+                }),
+            },
+            Some(Arc::new(Config { value: 1 })),
+        );
+        // Register an `internal/update` hook on the fiber's own context:
+        // it runs before the default update path.
+        let hook_seen = seen.clone();
+        fiber
+            .context()
+            .on(
+                "internal/update",
+                event_listener_async(move |args, next| {
+                    let hook_seen = hook_seen.clone();
+                    async move {
+                        let config = args[0].downcast_ref::<Config>().expect("config").value;
+                        hook_seen.lock().push(("hook", config));
+                        let next = next.expect("next");
+                        let _ = next.next().await;
+                        Ok(None)
+                    }
+                }),
+                EventOptions::default(),
+            )
+            .unwrap();
+        fiber.wait().await.unwrap();
 
-            fiber
-                .update(Some(Arc::new(Config { value: 2 })))
-                .await
-                .unwrap();
-            assert_eq!(
-                seen.lock().as_slice(),
-                &[("apply", 1), ("hook", 2), ("apply", 2)]
-            );
-        })
-        .await;
+        fiber
+            .update(Some(Arc::new(Config { value: 2 })))
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.lock().as_slice(),
+            &[("apply", 1), ("hook", 2), ("apply", 2)]
+        );
+    }
+    .await;
 }

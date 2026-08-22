@@ -129,15 +129,19 @@ Key points:
   boundary; `get` returns null. Plugins should declare dependencies via the
   metadata `inject` field and let the host resolve them.
 
-## 6. Single-thread discipline
+## 6. Threading model
 
-All vtable calls happen only on the host's current-thread runtime (core
-decision 3):
+Host tasks are `Send` and run on the tokio worker pool (stage 2 of the
+multithreading plan):
 
-- Compile time: core/SDK contexts are `!Send` (`Rc`/`RefCell`); `HostVtable`
-  is `Send`/`Sync` only because of FFI pointers.
-- Runtime: the session registry is `thread_local`; calls from other threads
-  find no session and fail gracefully instead of panicking.
+- Compile time: host and SDK state is `Send + Sync` (`Arc`, atomics, lock-free
+  snapshots and short-scoped `Mutex`es). Plugin futures handed to the host
+  through `spawn` are assumed `Send`; per-plugin thread affinity is finalized
+  in stage 3.
+- Runtime: sessions are pushed on the thread driving the current host→plugin
+  call, so vtable calls from a thread without a session fail gracefully
+  instead of panicking. The live-handle registry is process-wide, so
+  deferred callbacks skip disposed plugins from any thread.
 - Plugins must not bring their own runtime; all async goes through the
   SDK's `spawn(vtable, future)` to the host.
 

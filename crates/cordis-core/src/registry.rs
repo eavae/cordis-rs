@@ -275,7 +275,7 @@ impl RegistryService {
         };
         let fibers = runtime.fibers.lock().clone();
         for fiber in fibers {
-            tokio::task::spawn_local(fiber.dispose());
+            tokio::task::spawn(fiber.dispose());
         }
     }
 

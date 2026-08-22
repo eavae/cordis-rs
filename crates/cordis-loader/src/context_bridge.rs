@@ -1,21 +1,24 @@
 //! Host-side Context bridge for `.so` plugins.
 //!
-//! The plugin's apply / event callbacks / disposers run on the host thread
-//! inside a *session*: a per-handle association with the fiber's
-//! [`Context`]. Every vtable entry resolves the session for the handle the
-//! plugin passes, so services and events registered by one fiber never leak
-//! into another (multiple fibers may share one plugin handle).
+//! The plugin's apply / event callbacks / disposers run inside a *session*:
+//! a per-handle association with the fiber's [`Context`] pushed on the
+//! calling thread for the duration of the host→plugin call. Every vtable
+//! entry resolves the session for the handle the plugin passes, so services
+//! and events registered by one fiber never leak into another (multiple
+//! fibers may share one plugin handle).
 //!
 //! Values cross the boundary as JSON strings. The host copies payloads
 //! during the call; the plugin copies the `get` result before its next host
-//! call. No allocation crosses the ABI, and all calls must happen on the
-//! host thread.
+//! call. No allocation crosses the ABI; sessions are scoped to the thread
+//! driving the call (stage 3 finalizes per-plugin thread affinity).
 
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+
+use parking_lot::Mutex;
 
 use cordis_core::{Context, Effect, EventCallback, EventOptions, WaterfallNext, sync_disposer};
 use cordis_sdk::{PluginDisposer, PluginEventCallback, PluginHandle};
@@ -23,7 +26,7 @@ use cordis_sdk::{PluginDisposer, PluginEventCallback, PluginHandle};
 /// A plugin handle pointer that is `Send + Sync` under the plugin pinning
 /// contract. The pointer is only dereferenced through the vtable while the
 /// owning `SoPlugin` is alive, and all callbacks touching it are confined to
-/// the plugin's own thread (phase 1: the host thread; phase 3: per-plugin
+/// the thread driving the current host→plugin call (stage 3: per-plugin
 /// pinned threads).
 #[derive(Clone, Copy)]
 pub struct PluginHandlePtr(pub *mut PluginHandle);
@@ -54,33 +57,33 @@ struct Session {
 
 thread_local! {
     static SESSIONS: RefCell<Vec<Session>> = const { RefCell::new(Vec::new()) };
-    /// Plugin handles that are still alive (created, not yet disposed).
-    /// Deferred host→plugin callbacks (event listeners, disposers) check this
-    /// before invoking plugin code, so a plugin instance disposed while its
-    /// fiber is still unloading never causes a call into freed code.
-    static LIVE_HANDLES: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
+
+/// Plugin handles that are still alive (created, not yet disposed).
+///
+/// Deferred host→plugin callbacks (event listeners, disposers) check this
+/// before invoking plugin code, so a plugin instance disposed while its
+/// fiber is still unloading never causes a call into freed code. The set is
+/// process-wide: `SoPlugin` creation/drop and deferred callbacks may run on
+/// different runtime threads.
+static LIVE_HANDLES: LazyLock<Mutex<HashSet<usize>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Marks `handle` as alive (called by `SoPlugin::create`).
 pub fn register_handle(handle: *mut PluginHandle) {
-    LIVE_HANDLES.with(|live| {
-        live.borrow_mut().insert(handle as usize);
-    });
+    LIVE_HANDLES.lock().insert(handle as usize);
 }
 
 /// Marks `handle` as disposed (called by `SoPlugin::drop`).
 pub fn unregister_handle(handle: *mut PluginHandle) {
-    LIVE_HANDLES.with(|live| {
-        live.borrow_mut().remove(&(handle as usize));
-    });
+    LIVE_HANDLES.lock().remove(&(handle as usize));
 }
 
 /// Whether the plugin instance behind `handle` is still alive.
 pub fn is_handle_live(handle: *mut PluginHandle) -> bool {
-    LIVE_HANDLES.with(|live| live.borrow().contains(&(handle as usize)))
+    LIVE_HANDLES.lock().contains(&(handle as usize))
 }
 
-/// Runs `f` with a session binding `handle` to `ctx` (host thread only).
+/// Runs `f` with a session binding `handle` to `ctx` on the current thread.
 ///
 /// Nested sessions are supported: a plugin event callback fired while
 /// another session is active pushes its own frame and pops it on return.

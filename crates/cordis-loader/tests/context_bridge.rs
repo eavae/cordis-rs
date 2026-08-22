@@ -98,88 +98,86 @@ fn reset_fixture() {
 async fn provide_get_event_and_disposers() {
     let _guard = FIXTURE_LOCK.lock();
     reset_fixture();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
-            let handle = unsafe { plugin.create(log_message) };
-            assert!(!handle.is_null());
-            loader.register_so_plugin(&plugin).expect("register");
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
+        let handle = unsafe { plugin.create(log_message) };
+        assert!(!handle.is_null());
+        loader.register_so_plugin(&plugin).expect("register");
 
-            LOGGED.lock().clear();
-            let tree = loader.tree_handle();
-            let entry = tree.create(opts("hi"), None, 0);
-            tree.await_tree().await;
-            let fiber = entry.fiber.lock().clone().expect("fiber created");
-            assert_eq!(fiber.state(), FiberState::Active);
+        LOGGED.lock().clear();
+        let tree = loader.tree_handle();
+        let entry = tree.create(opts("hi"), None, 0);
+        tree.await_tree().await;
+        let fiber = entry.fiber.lock().clone().expect("fiber created");
+        assert_eq!(fiber.state(), FiberState::Active);
 
-            // Host reads the service the plugin provided in apply.
-            let greeting = entry
-                .ctx
-                .get_str("greeting")
-                .expect("plugin must provide greeting")
-                .downcast_ref::<serde_yaml_ng::Value>()
-                .cloned()
-                .expect("greeting is a serde value");
-            assert_eq!(greeting.as_str(), Some("hi"));
-            let logged = LOGGED.lock().clone();
-            assert!(
-                logged
-                    .iter()
-                    .any(|line| line.contains("context provided greeting: hi")),
-                "apply must provide through the bridge: {logged:?}"
-            );
+        // Host reads the service the plugin provided in apply.
+        let greeting = entry
+            .ctx
+            .get_str("greeting")
+            .expect("plugin must provide greeting")
+            .downcast_ref::<serde_yaml_ng::Value>()
+            .cloned()
+            .expect("greeting is a serde value");
+        assert_eq!(greeting.as_str(), Some("hi"));
+        let logged = LOGGED.lock().clone();
+        assert!(
+            logged
+                .iter()
+                .any(|line| line.contains("context provided greeting: hi")),
+            "apply must provide through the bridge: {logged:?}"
+        );
 
-            // Host emits an event; the plugin listener responds and writes
-            // back through the vtable logger, including a `get` round-trip
-            // (the fiber is ACTIVE during dispatch).
-            let args: Arc<dyn Any + Send + Sync> =
-                Arc::new(serde_yaml_ng::Value::String("world".to_string()));
-            entry.ctx.emit("demo/event", &[args]);
-            let logged = LOGGED.lock().clone();
-            assert!(
-                logged
-                    .iter()
-                    .any(|line| line.contains("context event fired: [\"world\"]")),
-                "listener must run with the event args: {logged:?}"
-            );
-            assert!(
-                logged
-                    .iter()
-                    .any(|line| line.contains("context get greeting: \"hi\"")),
-                "get must round-trip the value during event dispatch: {logged:?}"
-            );
-            assert_eq!(fixture_helpers().1, 1, "one event callback");
+        // Host emits an event; the plugin listener responds and writes
+        // back through the vtable logger, including a `get` round-trip
+        // (the fiber is ACTIVE during dispatch).
+        let args: Arc<dyn Any + Send + Sync> =
+            Arc::new(serde_yaml_ng::Value::String("world".to_string()));
+        entry.ctx.emit("demo/event", &[args]);
+        let logged = LOGGED.lock().clone();
+        assert!(
+            logged
+                .iter()
+                .any(|line| line.contains("context event fired: [\"world\"]")),
+            "listener must run with the event args: {logged:?}"
+        );
+        assert!(
+            logged
+                .iter()
+                .any(|line| line.contains("context get greeting: \"hi\"")),
+            "get must round-trip the value during event dispatch: {logged:?}"
+        );
+        assert_eq!(fixture_helpers().1, 1, "one event callback");
 
-            // Disposing the fiber runs the disposers in reverse
-            // registration order (the second-registered one runs first).
-            let _ = tokio::task::spawn_local(fiber.dispose()).await;
-            for _ in 0..100 {
-                if fixture_helpers().3 != -1 {
-                    break;
-                }
-                tokio::task::yield_now().await;
+        // Disposing the fiber runs the disposers in reverse
+        // registration order (the second-registered one runs first).
+        let _ = tokio::task::spawn(fiber.dispose()).await;
+        for _ in 0..100 {
+            if fixture_helpers().3 != -1 {
+                break;
             }
-            let (_, _, first_order, second_order) = fixture_helpers();
-            assert_eq!(second_order, 0, "second-registered disposer runs first");
-            assert_eq!(first_order, 1, "first-registered disposer runs second");
-            let logged = LOGGED.lock().clone();
-            assert!(
-                logged
-                    .iter()
-                    .any(|line| line.contains("context disposer second (order 0)")),
-                "{logged:?}"
-            );
-            assert!(
-                logged
-                    .iter()
-                    .any(|line| line.contains("context disposer first (order 1)")),
-                "{logged:?}"
-            );
-        })
-        .await;
+            tokio::task::yield_now().await;
+        }
+        let (_, _, first_order, second_order) = fixture_helpers();
+        assert_eq!(second_order, 0, "second-registered disposer runs first");
+        assert_eq!(first_order, 1, "first-registered disposer runs second");
+        let logged = LOGGED.lock().clone();
+        assert!(
+            logged
+                .iter()
+                .any(|line| line.contains("context disposer second (order 0)")),
+            "{logged:?}"
+        );
+        assert!(
+            logged
+                .iter()
+                .any(|line| line.contains("context disposer first (order 1)")),
+            "{logged:?}"
+        );
+    }
+    .await;
 }
 
 /// Entry-level isolate scopes the `.so` plugin's provide/get the same way it
@@ -189,83 +187,81 @@ async fn provide_get_event_and_disposers() {
 async fn isolate_scopes_provide_get() {
     let _guard = FIXTURE_LOCK.lock();
     reset_fixture();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
-            let handle = unsafe { plugin.create(log_message) };
-            assert!(!handle.is_null());
-            loader.register_so_plugin(&plugin).expect("register");
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
+        let handle = unsafe { plugin.create(log_message) };
+        assert!(!handle.is_null());
+        loader.register_so_plugin(&plugin).expect("register");
 
-            let tree = loader.tree_handle();
-            let mut isolated = opts("A");
-            isolated.id = "iso".to_string();
-            isolated.isolate = Some(isolate_map(&[("greeting", IsolateValue::Flag(true))]));
-            let isolated_entry = tree.create(isolated, None, 0);
+        let tree = loader.tree_handle();
+        let mut isolated = opts("A");
+        isolated.id = "iso".to_string();
+        isolated.isolate = Some(isolate_map(&[("greeting", IsolateValue::Flag(true))]));
+        let isolated_entry = tree.create(isolated, None, 0);
 
-            // The shared entry also carries an intercept declaration; it must
-            // not disturb provide/get (the loader keeps intercept layers
-            // inert until typed configs fill them).
-            let mut shared = opts("B");
-            shared.id = "shared".to_string();
-            shared.intercept = Some(
-                serde_yaml_ng::from_str::<serde_yaml_ng::Value>("{logger: {level: debug}}")
-                    .unwrap(),
-            );
-            let shared_entry = tree.create(shared, None, 0);
-            tree.await_tree().await;
+        // The shared entry also carries an intercept declaration; it must
+        // not disturb provide/get (the loader keeps intercept layers
+        // inert until typed configs fill them).
+        let mut shared = opts("B");
+        shared.id = "shared".to_string();
+        shared.intercept = Some(
+            serde_yaml_ng::from_str::<serde_yaml_ng::Value>("{logger: {level: debug}}").unwrap(),
+        );
+        let shared_entry = tree.create(shared, None, 0);
+        tree.await_tree().await;
 
-            // The isolated realm sees only its own greeting.
-            let isolated_greeting = isolated_entry
-                .ctx
-                .get_str("greeting")
-                .expect("isolated entry must see its own greeting")
-                .downcast_ref::<serde_yaml_ng::Value>()
-                .cloned()
-                .unwrap();
-            assert_eq!(isolated_greeting.as_str(), Some("A"));
+        // The isolated realm sees only its own greeting.
+        let isolated_greeting = isolated_entry
+            .ctx
+            .get_str("greeting")
+            .expect("isolated entry must see its own greeting")
+            .downcast_ref::<serde_yaml_ng::Value>()
+            .cloned()
+            .unwrap();
+        assert_eq!(isolated_greeting.as_str(), Some("A"));
 
-            // The shared realm sees the shared greeting, not the isolated one.
-            let shared_greeting = shared_entry
-                .ctx
-                .get_str("greeting")
-                .expect("shared entry must see the shared greeting")
-                .downcast_ref::<serde_yaml_ng::Value>()
-                .cloned()
-                .unwrap();
-            assert_eq!(shared_greeting.as_str(), Some("B"));
+        // The shared realm sees the shared greeting, not the isolated one.
+        let shared_greeting = shared_entry
+            .ctx
+            .get_str("greeting")
+            .expect("shared entry must see the shared greeting")
+            .downcast_ref::<serde_yaml_ng::Value>()
+            .cloned()
+            .unwrap();
+        assert_eq!(shared_greeting.as_str(), Some("B"));
 
-            // Root (no isolate label for greeting) sees only the shared one.
-            let root_greeting = root
-                .get_str("greeting")
-                .expect("root must see the shared greeting")
-                .downcast_ref::<serde_yaml_ng::Value>()
-                .cloned()
-                .unwrap();
-            assert_eq!(root_greeting.as_str(), Some("B"));
+        // Root (no isolate label for greeting) sees only the shared one.
+        let root_greeting = root
+            .get_str("greeting")
+            .expect("root must see the shared greeting")
+            .downcast_ref::<serde_yaml_ng::Value>()
+            .cloned()
+            .unwrap();
+        assert_eq!(root_greeting.as_str(), Some("B"));
 
-            // The isolated entry's fiber resolves the same label as its
-            // entry context (the .so plugin provided under the isolated
-            // label, not the root one).
-            let isolated_fiber = isolated_entry.fiber.lock().clone().unwrap();
-            let isolated_label = isolated_entry.ctx.isolate_label("greeting");
-            let fiber_label = isolated_fiber.context().isolate_label("greeting");
-            assert_eq!(isolated_label, fiber_label);
-            assert_ne!(
-                root.isolate_label("greeting"),
-                isolated_label,
-                "isolated greeting must use a realm-local label"
-            );
-            let _ = handle;
-        })
-        .await;
+        // The isolated entry's fiber resolves the same label as its
+        // entry context (the .so plugin provided under the isolated
+        // label, not the root one).
+        let isolated_fiber = isolated_entry.fiber.lock().clone().unwrap();
+        let isolated_label = isolated_entry.ctx.isolate_label("greeting");
+        let fiber_label = isolated_fiber.context().isolate_label("greeting");
+        assert_eq!(isolated_label, fiber_label);
+        assert_ne!(
+            root.isolate_label("greeting"),
+            isolated_label,
+            "isolated greeting must use a realm-local label"
+        );
+        let _ = handle;
+    }
+    .await;
 }
 
-/// The vtable only resolves sessions on the host thread. Calls from a
-/// foreign thread fail gracefully (no session), and a disposed plugin's
-/// deferred callbacks are skipped instead of calling into freed code.
+/// Sessions are scoped to the thread driving the call, so vtable calls from
+/// a foreign thread fail gracefully (no session), while the live-handle
+/// registry is process-wide: deferred callbacks from any thread skip a
+/// disposed plugin instead of calling into freed code.
 #[test]
 fn host_thread_discipline_and_live_handle_guard() {
     let _guard = FIXTURE_LOCK.lock();
@@ -276,8 +272,8 @@ fn host_thread_discipline_and_live_handle_guard() {
     assert!(!handle.is_null());
     assert!(context_bridge::is_handle_live(handle));
 
-    // A foreign thread has no session and no live handle registry: the
-    // bridge refuses the call without panicking.
+    // A foreign thread has no session, so the bridge refuses the call
+    // without panicking; the live-handle registry is process-wide.
     let name = std::ffi::CString::new("greeting").unwrap();
     let payload = std::ffi::CString::new("\"x\"").unwrap();
     let handle_token = handle as usize;
@@ -295,9 +291,9 @@ fn host_thread_discipline_and_live_handle_guard() {
     let (provided, got_null, live) = foreign.join().unwrap();
     assert_eq!(provided, 1, "foreign provide must fail");
     assert!(got_null, "foreign get must return null");
-    assert!(!live, "live registry is host-thread scoped");
+    assert!(live, "live registry is process-wide");
 
-    // On the host thread a session resolves: provide then get round-trip.
+    // On the calling thread a session resolves: provide then get round-trip.
     context_bridge::with_session(handle, &root, || {
         let name = std::ffi::CString::new("greeting").unwrap();
         let payload = std::ffi::CString::new("\"host session\"").unwrap();
@@ -322,35 +318,33 @@ fn host_thread_discipline_and_live_handle_guard() {
 async fn disposed_plugin_event_callback_is_skipped() {
     let _guard = FIXTURE_LOCK.lock();
     reset_fixture();
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let loader = Loader::new(&root);
-            let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
-            let handle = unsafe { plugin.create(log_message) };
-            assert!(!handle.is_null());
-            loader.register_so_plugin(&plugin).expect("register");
+    async {
+        let root = Context::new();
+        let loader = Loader::new(&root);
+        let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
+        let handle = unsafe { plugin.create(log_message) };
+        assert!(!handle.is_null());
+        loader.register_so_plugin(&plugin).expect("register");
 
-            LOGGED.lock().clear();
-            let tree = loader.tree_handle();
-            let entry = tree.create(opts("hi"), None, 0);
-            tree.await_tree().await;
+        LOGGED.lock().clear();
+        let tree = loader.tree_handle();
+        let entry = tree.create(opts("hi"), None, 0);
+        tree.await_tree().await;
 
-            // Drop the plugin instance while the fiber (and its listener)
-            // are still alive; the host must skip the deferred callback.
-            drop(plugin);
-            entry.ctx.emit("demo/event", &[]);
-            assert_eq!(fixture_helpers().1, 0, "callback must be skipped");
+        // Drop the plugin instance while the fiber (and its listener)
+        // are still alive; the host must skip the deferred callback.
+        drop(plugin);
+        entry.ctx.emit("demo/event", &[]);
+        assert_eq!(fixture_helpers().1, 0, "callback must be skipped");
 
-            // Disposing the fiber runs the disposers, which are skipped the
-            // same way (the handle is no longer live).
-            let fiber = entry.fiber.lock().clone().unwrap();
-            let _ = tokio::task::spawn_local(fiber.dispose()).await;
-            let (_, _, first_order, second_order) = fixture_helpers();
-            assert_eq!(first_order, -1, "disposer must be skipped");
-            assert_eq!(second_order, -1, "disposer must be skipped");
-            let _ = handle;
-        })
-        .await;
+        // Disposing the fiber runs the disposers, which are skipped the
+        // same way (the handle is no longer live).
+        let fiber = entry.fiber.lock().clone().unwrap();
+        let _ = tokio::task::spawn(fiber.dispose()).await;
+        let (_, _, first_order, second_order) = fixture_helpers();
+        assert_eq!(first_order, -1, "disposer must be skipped");
+        assert_eq!(second_order, -1, "disposer must be skipped");
+        let _ = handle;
+    }
+    .await;
 }

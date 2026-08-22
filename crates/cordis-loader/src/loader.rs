@@ -293,7 +293,7 @@ impl Loader {
                                 for entry in entries {
                                     let fiber = entry.fiber.lock().clone();
                                     if let Some(fiber) = fiber {
-                                        tokio::task::spawn_local(fiber.dispose());
+                                        tokio::task::spawn(fiber.dispose());
                                     }
                                     *entry.fiber.lock() = None;
                                 }

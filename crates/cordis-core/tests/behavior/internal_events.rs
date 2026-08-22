@@ -173,57 +173,55 @@ fn internal_set_hook_intercepts_write() {
 /// receive it (mirrors the "isolated event" semantics).
 #[tokio::test(flavor = "current_thread")]
 async fn internal_service_broadcasts_to_same_realm() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let ctx = root.isolate("foo", Arc::from("shared-label"));
+    async {
+        let root = Context::new();
+        let ctx = root.isolate("foo", Arc::from("shared-label"));
 
-            let root_seen = Arc::new(Mutex::new(Vec::new()));
-            let ctx_seen = Arc::new(Mutex::new(Vec::new()));
-            drop(
-                root.on(
-                    "internal/service",
-                    service_recorder(root_seen.clone()),
-                    EventOptions::default(),
-                )
-                .unwrap(),
-            );
-            drop(
-                ctx.on(
-                    "internal/service",
-                    service_recorder(ctx_seen.clone()),
-                    EventOptions::default(),
-                )
-                .unwrap(),
-            );
+        let root_seen = Arc::new(Mutex::new(Vec::new()));
+        let ctx_seen = Arc::new(Mutex::new(Vec::new()));
+        drop(
+            root.on(
+                "internal/service",
+                service_recorder(root_seen.clone()),
+                EventOptions::default(),
+            )
+            .unwrap(),
+        );
+        drop(
+            ctx.on(
+                "internal/service",
+                service_recorder(ctx_seen.clone()),
+                EventOptions::default(),
+            )
+            .unwrap(),
+        );
 
-            // Provided on the root realm: only the root listener sees it.
-            let root_provide = root
-                .provide_str("foo", Arc::new("root foo".to_string()))
-                .unwrap();
-            assert_eq!(root_seen.lock().as_slice(), &["root foo".to_string()]);
-            assert!(
-                ctx_seen.lock().is_empty(),
-                "different realm must not see it"
-            );
+        // Provided on the root realm: only the root listener sees it.
+        let root_provide = root
+            .provide_str("foo", Arc::new("root foo".to_string()))
+            .unwrap();
+        assert_eq!(root_seen.lock().as_slice(), &["root foo".to_string()]);
+        assert!(
+            ctx_seen.lock().is_empty(),
+            "different realm must not see it"
+        );
 
-            // Provided on the isolated realm: only the same-realm listener
-            // sees it.
-            let ctx_provide = ctx
-                .provide_str("foo", Arc::new("isolated foo".to_string()))
-                .unwrap();
-            assert_eq!(ctx_seen.lock().as_slice(), &["isolated foo".to_string()]);
-            assert_eq!(
-                root_seen.lock().as_slice(),
-                &["root foo".to_string()],
-                "root listener must not receive the isolated provide"
-            );
+        // Provided on the isolated realm: only the same-realm listener
+        // sees it.
+        let ctx_provide = ctx
+            .provide_str("foo", Arc::new("isolated foo".to_string()))
+            .unwrap();
+        assert_eq!(ctx_seen.lock().as_slice(), &["isolated foo".to_string()]);
+        assert_eq!(
+            root_seen.lock().as_slice(),
+            &["root foo".to_string()],
+            "root listener must not receive the isolated provide"
+        );
 
-            drop(root_provide);
-            drop(ctx_provide);
-        })
-        .await;
+        drop(root_provide);
+        drop(ctx_provide);
+    }
+    .await;
 }
 
 fn service_recorder(records: Arc<Mutex<Vec<String>>>) -> EventCallback {
@@ -242,68 +240,66 @@ fn service_recorder(records: Arc<Mutex<Vec<String>>>) -> EventCallback {
 /// and its previous state (mirrors fiber.ts `_updateState`).
 #[tokio::test(flavor = "current_thread")]
 async fn internal_status_broadcasts_transitions() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let records = Arc::new(Mutex::new(Vec::new()));
-            let records_for_hook = records.clone();
-            let status_hook: EventCallback =
-                event_callback(move |args: &[Arc<dyn Any + Send + Sync>]| {
-                    // `Arc<dyn Any + Send + Sync>` erases the inner type, so the fiber arrives
-                    // as `&Fiber` (mirrors the loader's internal/plugin hooks).
-                    let fiber = args[0].downcast_ref::<cordis_core::Fiber>().unwrap();
-                    let old = args[1].downcast_ref::<FiberState>().copied().unwrap();
-                    records_for_hook
-                        .lock()
-                        .push((fiber as *const cordis_core::Fiber as usize, old));
-                    Ok(None)
-                });
-            drop(
-                root.on("internal/status", status_hook, EventOptions::default())
-                    .unwrap(),
-            );
-            let fiber = root.plugin(
-                &Plugin {
-                    is_group: false,
-                    name: None,
-                    inject: Vec::new(),
-                    apply: Arc::new(|_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
-                        Effect::None
-                    }),
-                },
-                None,
-            );
-            fiber.wait().await.unwrap();
+    async {
+        let root = Context::new();
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let records_for_hook = records.clone();
+        let status_hook: EventCallback =
+            event_callback(move |args: &[Arc<dyn Any + Send + Sync>]| {
+                // `Arc<dyn Any + Send + Sync>` erases the inner type, so the fiber arrives
+                // as `&Fiber` (mirrors the loader's internal/plugin hooks).
+                let fiber = args[0].downcast_ref::<cordis_core::Fiber>().unwrap();
+                let old = args[1].downcast_ref::<FiberState>().copied().unwrap();
+                records_for_hook
+                    .lock()
+                    .push((fiber as *const cordis_core::Fiber as usize, old));
+                Ok(None)
+            });
+        drop(
+            root.on("internal/status", status_hook, EventOptions::default())
+                .unwrap(),
+        );
+        let fiber = root.plugin(
+            &Plugin {
+                is_group: false,
+                name: None,
+                inject: Vec::new(),
+                apply: Arc::new(|_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                    Effect::None
+                }),
+            },
+            None,
+        );
+        fiber.wait().await.unwrap();
 
-            let seen = records.lock().clone();
-            assert!(
-                seen.iter().any(|(ptr, old)| {
-                    *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Pending
-                }),
-                "must broadcast Pending → Loading with the fiber: {seen:?}"
-            );
-            assert!(
-                seen.iter().any(|(ptr, old)| {
-                    *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Loading
-                }),
-                "must broadcast Loading → Active: {seen:?}"
-            );
+        let seen = records.lock().clone();
+        assert!(
+            seen.iter().any(|(ptr, old)| {
+                *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Pending
+            }),
+            "must broadcast Pending → Loading with the fiber: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|(ptr, old)| {
+                *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Loading
+            }),
+            "must broadcast Loading → Active: {seen:?}"
+        );
 
-            let _ = tokio::task::spawn_local(fiber.dispose()).await;
-            let seen = records.lock().clone();
-            assert!(
-                seen.iter().any(|(ptr, old)| {
-                    *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Active
-                }),
-                "must broadcast Active → Unloading on dispose: {seen:?}"
-            );
-            assert!(
-                seen.iter().any(|(ptr, old)| {
-                    *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Unloading
-                }),
-                "must broadcast Unloading → Disposed: {seen:?}"
-            );
-        })
-        .await;
+        let _ = tokio::task::spawn(fiber.dispose()).await;
+        let seen = records.lock().clone();
+        assert!(
+            seen.iter().any(|(ptr, old)| {
+                *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Active
+            }),
+            "must broadcast Active → Unloading on dispose: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|(ptr, old)| {
+                *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Unloading
+            }),
+            "must broadcast Unloading → Disposed: {seen:?}"
+        );
+    }
+    .await;
 }

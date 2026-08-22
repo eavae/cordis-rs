@@ -153,7 +153,7 @@ impl FileWatcher {
                 }
             }
         });
-        let handle = tokio::task::spawn_local(async move {
+        let handle = tokio::task::spawn(async move {
             let mut pending: Option<PathBuf>;
             while let Some(path) = event_rx.recv().await {
                 // Directory events are noise for HMR: notify reports the

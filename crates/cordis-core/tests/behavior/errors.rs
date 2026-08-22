@@ -55,119 +55,113 @@ fn validation_error_format_matches_ts() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn config_validation_rejects_registration() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let applied = Arc::new(AtomicU32::new(0));
-            let fiber = root.plugin_with_validator(
-                &Plugin {
-                    is_group: false,
-                    name: Some("demo".to_string()),
-                    inject: Vec::new(),
-                    apply: {
-                        let applied = applied.clone();
-                        Arc::new(
-                            move |_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
-                                applied.store(applied.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
-                                Effect::None
-                            },
-                        )
-                    },
+    async {
+        let root = Context::new();
+        let applied = Arc::new(AtomicU32::new(0));
+        let fiber = root.plugin_with_validator(
+            &Plugin {
+                is_group: false,
+                name: Some("demo".to_string()),
+                inject: Vec::new(),
+                apply: {
+                    let applied = applied.clone();
+                    Arc::new(
+                        move |_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                            applied.store(applied.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                            Effect::None
+                        },
+                    )
                 },
-                Some(Arc::new(Config { value: -1 })),
-                Some(value_must_be_positive()),
-            );
-            tokio::task::yield_now().await;
-            assert!(fiber.wait().await.is_err());
-            assert_eq!(fiber.state(), FiberState::Failed);
-            assert_eq!(
-                applied.load(Ordering::SeqCst),
-                0,
-                "apply must not run for invalid config"
-            );
-            assert!(
-                root.get::<LoggerService>().unwrap().error_count() >= 1,
-                "validation error must be logged"
-            );
-        })
-        .await;
+            },
+            Some(Arc::new(Config { value: -1 })),
+            Some(value_must_be_positive()),
+        );
+        tokio::task::yield_now().await;
+        assert!(fiber.wait().await.is_err());
+        assert_eq!(fiber.state(), FiberState::Failed);
+        assert_eq!(
+            applied.load(Ordering::SeqCst),
+            0,
+            "apply must not run for invalid config"
+        );
+        assert!(
+            root.get::<LoggerService>().unwrap().error_count() >= 1,
+            "validation error must be logged"
+        );
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn config_validation_rejects_update() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let applied = Arc::new(AtomicU32::new(0));
-            let fiber = root.plugin_with_validator(
-                &Plugin {
-                    is_group: false,
-                    name: None,
-                    inject: Vec::new(),
-                    apply: {
-                        let applied = applied.clone();
-                        Arc::new(
-                            move |_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
-                                applied.store(applied.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
-                                Effect::None
-                            },
-                        )
-                    },
+    async {
+        let root = Context::new();
+        let applied = Arc::new(AtomicU32::new(0));
+        let fiber = root.plugin_with_validator(
+            &Plugin {
+                is_group: false,
+                name: None,
+                inject: Vec::new(),
+                apply: {
+                    let applied = applied.clone();
+                    Arc::new(
+                        move |_ctx: &Context, _config: &Arc<dyn Any + Send + Sync>| {
+                            applied.store(applied.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                            Effect::None
+                        },
+                    )
                 },
-                Some(Arc::new(Config { value: 1 })),
-                Some(value_must_be_positive()),
-            );
-            fiber.wait().await.unwrap();
-            assert_eq!(applied.load(Ordering::SeqCst), 1);
+            },
+            Some(Arc::new(Config { value: 1 })),
+            Some(value_must_be_positive()),
+        );
+        fiber.wait().await.unwrap();
+        assert_eq!(applied.load(Ordering::SeqCst), 1);
 
-            let error = fiber
-                .update(Some(Arc::new(Config { value: -5 })))
-                .await
-                .unwrap_err();
-            assert!(error.to_string().contains("invalid config"), "{error}");
-            assert_eq!(
-                applied.load(Ordering::SeqCst),
-                1,
-                "invalid update must not re-apply"
-            );
-        })
-        .await;
+        let error = fiber
+            .update(Some(Arc::new(Config { value: -5 })))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("invalid config"), "{error}");
+        assert_eq!(
+            applied.load(Ordering::SeqCst),
+            1,
+            "invalid update must not re-apply"
+        );
+    }
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn apply_error_includes_entry_location() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
-            let root = Context::new();
-            let fiber = root.plugin(
-                &Plugin {
-                    is_group: false,
-                    name: Some("demo".to_string()),
-                    inject: Vec::new(),
-                    apply: Arc::new(|_ctx: &Context, _config| {
-                        Effect::Error(Box::new(std::io::Error::other("boom")))
-                    }),
-                },
-                None,
-            );
-            tokio::task::yield_now().await;
-            assert!(fiber.wait().await.is_err());
+    async {
+        let root = Context::new();
+        let fiber = root.plugin(
+            &Plugin {
+                is_group: false,
+                name: Some("demo".to_string()),
+                inject: Vec::new(),
+                apply: Arc::new(|_ctx: &Context, _config| {
+                    Effect::Error(Box::new(std::io::Error::other("boom")))
+                }),
+            },
+            None,
+        );
+        tokio::task::yield_now().await;
+        assert!(fiber.wait().await.is_err());
 
-            // The logged error carries the entry location (`at <name>`).
-            let logger = root.get::<LoggerService>().unwrap();
-            let messages = logger
-                .buffer()
-                .into_iter()
-                .filter(|message| message.args[0].inspect().contains("boom"))
-                .map(|message| message.args[0].inspect())
-                .collect::<Vec<_>>();
-            assert!(
-                messages.iter().any(|message| message.contains("at <demo>")),
-                "{messages:?}"
-            );
-        })
-        .await;
+        // The logged error carries the entry location (`at <name>`).
+        let logger = root.get::<LoggerService>().unwrap();
+        let messages = logger
+            .buffer()
+            .into_iter()
+            .filter(|message| message.args[0].inspect().contains("boom"))
+            .map(|message| message.args[0].inspect())
+            .collect::<Vec<_>>();
+        assert!(
+            messages.iter().any(|message| message.contains("at <demo>")),
+            "{messages:?}"
+        );
+    }
+    .await;
 }

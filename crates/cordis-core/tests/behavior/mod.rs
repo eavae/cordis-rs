@@ -2,8 +2,8 @@
 //!
 //! Mirrors the helpers in `packages/core/tests/utils.ts` of the TypeScript
 //! reference implementation. The fake clock is implemented manually (waker
-//! table) instead of `tokio::time`, so that it works both for plain spawned
-//! tasks and for `LocalSet`-scheduled fiber tasks.
+//! table) instead of `tokio::time`, so it works for tasks scheduled on any
+//! runtime thread.
 
 use parking_lot::Mutex;
 use std::future::{Future, poll_fn};

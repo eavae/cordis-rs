@@ -9,38 +9,36 @@ use std::sync::{
 
 #[tokio::test]
 async fn sleep_waits_for_clock_advance() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(behavior::with_timers(|timers| async move {
-            let fired = Arc::new(AtomicBool::new(false));
-            let fired2 = Arc::clone(&fired);
-            let timers2 = timers.clone();
-            let handle = tokio::task::spawn_local(async move {
-                timers2.sleep(100).await;
-                fired2.store(true, Ordering::SeqCst);
-            });
-            // Let the task register its timer at t=0 (mirrors the TS test
-            // where the timer starts as soon as it is created).
-            tokio::task::yield_now().await;
+    behavior::with_timers(|timers| async move {
+        let fired = Arc::new(AtomicBool::new(false));
+        let fired2 = Arc::clone(&fired);
+        let timers2 = timers.clone();
+        let handle = tokio::task::spawn(async move {
+            timers2.sleep(100).await;
+            fired2.store(true, Ordering::SeqCst);
+        });
+        // Let the task register its timer at t=0 (mirrors the TS test
+        // where the timer starts as soon as it is created).
+        tokio::task::yield_now().await;
 
-            assert!(
-                !fired.load(Ordering::SeqCst),
-                "timer must not fire before deadline"
-            );
-            timers.advance(99).await;
-            assert!(
-                !fired.load(Ordering::SeqCst),
-                "timer must not fire before deadline"
-            );
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "timer must not fire before deadline"
+        );
+        timers.advance(99).await;
+        assert!(
+            !fired.load(Ordering::SeqCst),
+            "timer must not fire before deadline"
+        );
 
-            timers.advance(1).await;
-            handle.await.expect("sleep task must complete");
-            assert!(
-                fired.load(Ordering::SeqCst),
-                "timer must fire at the deadline"
-            );
-        }))
-        .await;
+        timers.advance(1).await;
+        handle.await.expect("sleep task must complete");
+        assert!(
+            fired.load(Ordering::SeqCst),
+            "timer must fire at the deadline"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]

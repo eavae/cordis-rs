@@ -39,13 +39,11 @@ fn main() -> anyhow::Result<()> {
         config: cli.config,
         plugins_dir: cli.plugins_dir,
     };
-    // Phase 0 of the multithreading plan: run the runtime on a worker pool
-    // but keep the `LocalSet`, so all existing `!Send` tasks stay pinned to
-    // this thread while blocking work can move to other workers.
+    // Stage 2 of the multithreading plan: tasks are `Send` and run on the
+    // worker pool directly; no `LocalSet` pinning is needed anymore.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, async { cordis_cli::run(&options).await })?;
+    runtime.block_on(async { cordis_cli::run(&options).await })?;
     Ok(())
 }
