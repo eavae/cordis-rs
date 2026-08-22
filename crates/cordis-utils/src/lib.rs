@@ -2,9 +2,10 @@
 //!
 //! Port of `@cordisjs/utils`: the effect-bound ordered [`List`] collection.
 
+use parking_lot::Mutex;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use cordis_core::{Context, CordisError, Effect, EffectHandle, sync_disposer};
 
@@ -28,7 +29,7 @@ impl<T: Send + Sync + 'static> List<T> {
 
     /// The number of items.
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
+        self.inner.lock().len()
     }
 
     /// Whether the list is empty.
@@ -42,9 +43,9 @@ impl<T: Send + Sync + 'static> List<T> {
         let inner = Arc::clone(&self.inner);
         ctx.fiber().effect(
             move || {
-                inner.lock().unwrap().push((sn, Arc::new(value)));
+                inner.lock().push((sn, Arc::new(value)));
                 Effect::Disposer(sync_disposer(move || {
-                    inner.lock().unwrap().retain(|(item_sn, _)| *item_sn != sn);
+                    inner.lock().retain(|(item_sn, _)| *item_sn != sn);
                 }))
             },
             "list.push()",
@@ -55,7 +56,6 @@ impl<T: Send + Sync + 'static> List<T> {
     pub fn iter(&self) -> Vec<Arc<T>> {
         self.inner
             .lock()
-            .unwrap()
             .iter()
             .map(|(_, value)| value.clone())
             .collect()
@@ -65,7 +65,6 @@ impl<T: Send + Sync + 'static> List<T> {
     pub fn filter(&self, predicate: impl Fn(&T) -> bool) -> Vec<Arc<T>> {
         self.inner
             .lock()
-            .unwrap()
             .iter()
             .filter(|(_, value)| predicate(value))
             .map(|(_, value)| value.clone())
@@ -76,7 +75,6 @@ impl<T: Send + Sync + 'static> List<T> {
     pub fn map<U>(&self, mapper: impl Fn(&T) -> U) -> Vec<U> {
         self.inner
             .lock()
-            .unwrap()
             .iter()
             .map(|(_, value)| mapper(value))
             .collect()

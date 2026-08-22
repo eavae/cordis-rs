@@ -10,10 +10,10 @@
 //! an overlay reconfiguration publish one atomic snapshot instead of two
 //! independent stores.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::Poll;
@@ -298,7 +298,7 @@ impl std::fmt::Debug for ContextInner {
         f.debug_struct("ContextInner")
             .field("overlay", &self.overlay)
             .field("store", &self.store.load_full())
-            .field("meta", &self.meta.lock().unwrap())
+            .field("meta", &self.meta.lock())
             .finish_non_exhaustive()
     }
 }
@@ -536,6 +536,7 @@ impl Context {
     /// The root owns an `ACTIVE` fiber and provides the four framework
     /// services (`events`, `logger`, `reflect`, `registry`).
     pub fn new() -> Self {
+        crate::deadlock::install();
         let overlay = Arc::new(OverlayLayer::default());
         let store = Arc::new(ArcSwap::from_pointee(Store::default()));
         let inner = Arc::new(ContextInner {
@@ -554,7 +555,7 @@ impl Context {
         ctx.provide_inner(RegistryService::default());
         // context.ts clears the root fiber's disposables after framework
         // services are registered, so they don't surface as user effects.
-        ctx.fiber.disposables.lock().unwrap().clear();
+        ctx.fiber.disposables.lock().clear();
         ctx
     }
 
@@ -963,11 +964,7 @@ impl Context {
                     match result {
                         Err(message) => Effect::Error(message.into()),
                         Ok(()) => {
-                            ctx.fiber
-                                .resolved
-                                .lock()
-                                .unwrap()
-                                .insert(name.clone(), entry);
+                            ctx.fiber.resolved.lock().insert(name.clone(), entry);
                             if ctx.fiber.state() == FiberState::Active {
                                 ctx.notify(&name);
                             }
@@ -989,7 +986,7 @@ impl Context {
                                     // synchronous, which matches the fiber
                                     // spec expectations under fake timers.
                                     let _ = fibers;
-                                    ctx.fiber.resolved.lock().unwrap().remove(&name);
+                                    ctx.fiber.resolved.lock().remove(&name);
                                     Ok(())
                                 })
                             }))
@@ -1141,17 +1138,17 @@ impl Context {
     /// the nearest entry with the same key.
     pub fn extend(&self, meta: &[(&str, Arc<dyn Any + Send + Sync>)]) -> Self {
         let ctx = self.spawn(self.inner.overlay.clone());
-        let mut entries = self.inner.meta.lock().unwrap().clone();
+        let mut entries = self.inner.meta.lock().clone();
         for (key, value) in meta {
             entries.push((key.to_string(), value.clone()));
         }
-        *ctx.inner.meta.lock().unwrap() = entries;
+        *ctx.inner.meta.lock() = entries;
         ctx
     }
 
     /// Returns a metadata value previously attached via [`Context::extend`].
     pub fn meta<T: Any + Send + Sync>(&self, key: &str) -> Option<Arc<T>> {
-        for (k, value) in self.inner.meta.lock().unwrap().iter().rev() {
+        for (k, value) in self.inner.meta.lock().iter().rev() {
             if k == key {
                 return value.clone().downcast::<T>().ok();
             }
@@ -1665,7 +1662,7 @@ impl Context {
             inner: Arc::new(ContextInner {
                 overlay,
                 store: self.inner.store.clone(),
-                meta: Mutex::new(self.inner.meta.lock().unwrap().clone()),
+                meta: Mutex::new(self.inner.meta.lock().clone()),
                 props: self.inner.props.clone(),
             }),
             fiber: self.fiber.clone(),

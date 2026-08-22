@@ -1,9 +1,9 @@
 //! EntryGroup and the Group plugin.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{Context, Effect, sync_disposer};
@@ -285,7 +285,7 @@ async fn group_config_stays_raw_and_children_evaluate() {
                 "foo",
                 Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                     if let Some(value) = config.downcast_ref::<serde_yaml_ng::Value>() {
-                        *sink_apply.lock().unwrap() = value.as_str().map(String::from);
+                        *sink_apply.lock() = value.as_str().map(String::from);
                     }
                     Effect::None
                 }),
@@ -304,7 +304,7 @@ async fn group_config_stays_raw_and_children_evaluate() {
             // The group's own config is passed through raw (it is a list of
             // entry options), while each child entry evaluates `!expr` when it
             // applies.
-            assert_eq!(sink.lock().unwrap().as_deref(), Some("Hi"));
+            assert_eq!(sink.lock().as_deref(), Some("Hi"));
             assert!(
                 outer.subgroup().is_some(),
                 "the group builtin must still apply"

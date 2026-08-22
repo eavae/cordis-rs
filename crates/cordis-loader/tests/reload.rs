@@ -1,9 +1,9 @@
 //! `.so` reload semantics — dispose the old instance, load a new one;
 //! per-instance state does not survive.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use cordis_core::{Context, FiberState};
 use cordis_loader::{EntryOptions, Loader, SoPlugin};
@@ -27,7 +27,7 @@ extern "C" fn log_message(message: *const std::ffi::c_char) {
     let text = unsafe { std::ffi::CStr::from_ptr(message) }
         .to_string_lossy()
         .to_string();
-    LOGGED.lock().unwrap().push(text);
+    LOGGED.lock().push(text);
 }
 
 fn opts(name: &str, config: serde_yaml_ng::Value) -> EntryOptions {
@@ -49,7 +49,7 @@ fn opts(name: &str, config: serde_yaml_ng::Value) -> EntryOptions {
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn reload_gives_clean_instance() {
-    let _guard = FIXTURE_LOCK.lock().unwrap();
+    let _guard = FIXTURE_LOCK.lock();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -113,7 +113,7 @@ async fn reload_gives_clean_instance() {
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn dispose_then_reapply_works() {
-    let _guard = FIXTURE_LOCK.lock().unwrap();
+    let _guard = FIXTURE_LOCK.lock();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -121,7 +121,7 @@ async fn dispose_then_reapply_works() {
             let handle = unsafe { plugin.create(log_message) };
             assert!(!handle.is_null());
 
-            LOGGED.lock().unwrap().clear();
+            LOGGED.lock().clear();
             drop(plugin); // dispose
 
             let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
@@ -140,16 +140,15 @@ async fn dispose_then_reapply_works() {
                 0,
             );
             tree.await_tree().await;
-            let fiber = entry.fiber.lock().unwrap().clone().expect("fiber");
+            let fiber = entry.fiber.lock().clone().expect("fiber");
             assert_eq!(fiber.state(), FiberState::Active);
             assert!(
                 LOGGED
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("meta applied with value 9")),
                 "fresh instance must apply: {:?}",
-                LOGGED.lock().unwrap()
+                LOGGED.lock()
             );
         })
         .await;

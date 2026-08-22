@@ -1,10 +1,10 @@
 //! TS spec parity fill-ins: behavioral cases in loader/group/isolate not yet
 //! covered 1:1 (corresponding to `packages/loader/tests/{group,index,isolate}.spec.ts`).
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{Context, Effect, FiberState, sync_disposer};
@@ -188,7 +188,7 @@ async fn group_intercept_chain() {
                                 .unwrap()
                         })
                         .collect();
-                    *captured_apply.lock().unwrap() = values;
+                    *captured_apply.lock() = values;
                     Effect::None
                 }),
             );
@@ -223,7 +223,7 @@ async fn group_intercept_chain() {
             );
             tree.await_tree().await;
 
-            let chain = captured.lock().unwrap();
+            let chain = captured.lock();
             assert_eq!(chain.len(), 3, "intercept chain must have 3 layers");
             assert_eq!(
                 chain[0].get("c").and_then(serde_yaml_ng::Value::as_i64),
@@ -256,7 +256,7 @@ async fn loader_intercept_await_fiber_states() {
             loader.mock(
                 "foo",
                 Arc::new(move |_ctx: &Context, _config| {
-                    let mut rx = rx_cell.lock().unwrap().take().expect("foo applied once");
+                    let mut rx = rx_cell.lock().take().expect("foo applied once");
                     Effect::Async(Box::pin(async move {
                         let _ = rx.recv().await;
                         Ok(sync_disposer(|| {}))
@@ -306,8 +306,8 @@ async fn loader_intercept_await_fiber_states() {
                     .tree_handle()
                     .entries()
                     .iter()
-                    .find(|entry| entry.options.lock().unwrap().id == "1")
-                    .and_then(|entry| entry.fiber.lock().unwrap().clone())
+                    .find(|entry| entry.options.lock().id == "1")
+                    .and_then(|entry| entry.fiber.lock().clone())
                     .is_some_and(|fiber| fiber.state() == FiberState::Loading)
             })
             .await;

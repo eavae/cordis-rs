@@ -110,9 +110,9 @@ async fn same_turn_writes_coalesce_but_events_fire() {
             let greeter = tree
                 .entries()
                 .into_iter()
-                .find(|entry| entry.options.lock().unwrap().name == "greeter")
+                .find(|entry| entry.options.lock().name == "greeter")
                 .expect("greeter entry");
-            greeter.options.lock().unwrap().config = Some(config_value(3));
+            greeter.options.lock().config = Some(config_value(3));
             tree.write();
             tree.write();
 
@@ -172,9 +172,9 @@ async fn cross_turn_writes_flush_separately() {
             let greeter = tree
                 .entries()
                 .into_iter()
-                .find(|entry| entry.options.lock().unwrap().name == "greeter")
+                .find(|entry| entry.options.lock().name == "greeter")
                 .expect("greeter entry");
-            greeter.options.lock().unwrap().config = Some(config_value(2));
+            greeter.options.lock().config = Some(config_value(2));
             tree.write();
             wait_until(|| {
                 fs::read_to_string(dir.join("base.yml"))
@@ -183,7 +183,7 @@ async fn cross_turn_writes_flush_separately() {
             .await;
 
             // A later turn triggers its own write.
-            greeter.options.lock().unwrap().config = Some(config_value(4));
+            greeter.options.lock().config = Some(config_value(4));
             tree.write();
             wait_until(|| {
                 fs::read_to_string(dir.join("base.yml"))
@@ -228,9 +228,9 @@ async fn readonly_config_is_not_overwritten() {
             let greeter = tree
                 .entries()
                 .into_iter()
-                .find(|entry| entry.options.lock().unwrap().name == "greeter")
+                .find(|entry| entry.options.lock().name == "greeter")
                 .expect("greeter entry");
-            greeter.options.lock().unwrap().config = Some(config_value(9));
+            greeter.options.lock().config = Some(config_value(9));
             tree.write();
             tokio::task::yield_now().await;
             tokio::task::yield_now().await;

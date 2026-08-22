@@ -5,9 +5,9 @@
 //! (`events.ts` `_resolve`, `reflect.ts` waterfall/provide paths and
 //! `fiber.ts` `_updateState`).
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cordis_core::{
@@ -23,7 +23,7 @@ fn dispatch_recorder(records: Arc<Mutex<Vec<(String, String, usize)>>>) -> Event
         let payload = args[2]
             .downcast_ref::<Vec<Arc<dyn Any + Send + Sync>>>()
             .unwrap();
-        records.lock().unwrap().push((mode, name, payload.len()));
+        records.lock().push((mode, name, payload.len()));
         Ok(None)
     })
 }
@@ -48,7 +48,7 @@ fn internal_dispatch_hook_fires_for_external_events_only() {
     // Internal events must not re-enter the dispatch hook.
     root.emit("internal/update", &[Arc::new(())]);
 
-    let records = records.lock().unwrap();
+    let records = records.lock();
     assert_eq!(
         records.as_slice(),
         &[
@@ -202,12 +202,9 @@ async fn internal_service_broadcasts_to_same_realm() {
             let root_provide = root
                 .provide_str("foo", Arc::new("root foo".to_string()))
                 .unwrap();
-            assert_eq!(
-                root_seen.lock().unwrap().as_slice(),
-                &["root foo".to_string()]
-            );
+            assert_eq!(root_seen.lock().as_slice(), &["root foo".to_string()]);
             assert!(
-                ctx_seen.lock().unwrap().is_empty(),
+                ctx_seen.lock().is_empty(),
                 "different realm must not see it"
             );
 
@@ -216,12 +213,9 @@ async fn internal_service_broadcasts_to_same_realm() {
             let ctx_provide = ctx
                 .provide_str("foo", Arc::new("isolated foo".to_string()))
                 .unwrap();
+            assert_eq!(ctx_seen.lock().as_slice(), &["isolated foo".to_string()]);
             assert_eq!(
-                ctx_seen.lock().unwrap().as_slice(),
-                &["isolated foo".to_string()]
-            );
-            assert_eq!(
-                root_seen.lock().unwrap().as_slice(),
+                root_seen.lock().as_slice(),
                 &["root foo".to_string()],
                 "root listener must not receive the isolated provide"
             );
@@ -238,7 +232,7 @@ fn service_recorder(records: Arc<Mutex<Vec<String>>>) -> EventCallback {
         if name == "foo"
             && let Some(value) = args[1].downcast_ref::<String>()
         {
-            records.lock().unwrap().push(value.clone());
+            records.lock().push(value.clone());
         }
         Ok(None)
     })
@@ -262,7 +256,6 @@ async fn internal_status_broadcasts_transitions() {
                     let old = args[1].downcast_ref::<FiberState>().copied().unwrap();
                     records_for_hook
                         .lock()
-                        .unwrap()
                         .push((fiber as *const cordis_core::Fiber as usize, old));
                     Ok(None)
                 });
@@ -283,7 +276,7 @@ async fn internal_status_broadcasts_transitions() {
             );
             fiber.wait().await.unwrap();
 
-            let seen = records.lock().unwrap().clone();
+            let seen = records.lock().clone();
             assert!(
                 seen.iter().any(|(ptr, old)| {
                     *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Pending
@@ -298,7 +291,7 @@ async fn internal_status_broadcasts_transitions() {
             );
 
             let _ = tokio::task::spawn_local(fiber.dispose()).await;
-            let seen = records.lock().unwrap().clone();
+            let seen = records.lock().clone();
             assert!(
                 seen.iter().any(|(ptr, old)| {
                     *ptr == Arc::as_ptr(&fiber) as usize && *old == FiberState::Active

@@ -7,9 +7,10 @@ pub mod build;
 pub mod graph;
 pub mod reload;
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use cordis_core::{Context, Effect, Service, sync_disposer};
 use cordis_loader::Loader;
@@ -131,7 +132,7 @@ impl FileWatcher {
         let mut watched = Vec::new();
         for root in &config.root {
             let path = base_dir.join(root);
-            if let Some(watcher) = watcher.lock().unwrap().as_mut() {
+            if let Some(watcher) = watcher.lock().as_mut() {
                 if let Err(error) = watcher.watch(&path, RecursiveMode::Recursive) {
                     ctx.logger()
                         .warn(format!("cannot watch {}: {error}", path.display()));
@@ -182,7 +183,7 @@ impl FileWatcher {
         if let Some(handle) = &self.handle {
             handle.abort();
         }
-        if let Some(watcher) = self.watcher.lock().unwrap().as_mut() {
+        if let Some(watcher) = self.watcher.lock().as_mut() {
             for path in &self.watched {
                 let _ = watcher.unwatch(path);
             }

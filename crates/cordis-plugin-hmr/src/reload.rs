@@ -47,7 +47,7 @@ pub async fn execute_reloads(
             .tree_handle()
             .entries()
             .into_iter()
-            .filter(|entry| entry.options.lock().unwrap().name == name)
+            .filter(|entry| entry.options.lock().name == name)
             .collect();
         if entries.is_empty() {
             // Not mounted: register the new artifact so future reads use it.

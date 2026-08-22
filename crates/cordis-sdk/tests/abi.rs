@@ -1,8 +1,8 @@
 //! ABI smoke tests (host loads fixture `.so` files).
 
+use parking_lot::Mutex;
 use std::ffi::c_char;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use cordis_sdk::{HostVtable, PLUGIN_API_VERSION, PluginHandle};
 use libloading::Library;
@@ -42,7 +42,7 @@ fn host_loads_fixture_and_round_trips() {
         let text = unsafe { std::ffi::CStr::from_ptr(message) }
             .to_string_lossy()
             .to_string();
-        LOGGED.lock().unwrap().push(text);
+        LOGGED.lock().push(text);
     }
     let vtable = HostVtable {
         log: log_message,
@@ -55,11 +55,11 @@ fn host_loads_fixture_and_round_trips() {
         data: std::ptr::null_mut(),
         host_version: PLUGIN_API_VERSION,
     };
-    LOGGED.lock().unwrap().clear();
+    LOGGED.lock().clear();
     let handle = unsafe { create(&vtable) };
     assert!(!handle.is_null(), "plugin_create must succeed");
     assert_eq!(
-        LOGGED.lock().unwrap().as_slice(),
+        LOGGED.lock().as_slice(),
         &["hello from fixture plugin".to_string()]
     );
     unsafe { dispose(handle) };

@@ -3,8 +3,9 @@
 //! Port of `@cordisjs/plugin-timer`: `ctx.timeout`, `ctx.interval`,
 //! `ctx.throttle` and `ctx.debounce`, all bound to the fiber lifecycle.
 
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use cordis_core::{CordisError, Effect, EffectHandle, Service, sync_disposer};
@@ -119,18 +120,17 @@ impl TimerService {
             let now = tokio::time::Instant::now();
             let elapsed_ok = state
                 .lock()
-                .unwrap()
                 .last
                 .is_none_or(|last| now.duration_since(last) >= Duration::from_millis(delay));
             if elapsed_ok {
-                state.lock().unwrap().last = Some(now);
-                state.lock().unwrap().pending = false;
+                state.lock().last = Some(now);
+                state.lock().pending = false;
                 callback();
             } else if !tracker.disposed.load(Ordering::Acquire)
                 && !no_trailing
-                && !state.lock().unwrap().pending
+                && !state.lock().pending
             {
-                let mut state_guard = state.lock().unwrap();
+                let mut state_guard = state.lock();
                 state_guard.pending = true;
                 let deadline: tokio::time::Instant =
                     state_guard.last.unwrap() + Duration::from_millis(delay);
@@ -143,13 +143,13 @@ impl TimerService {
                     if disposed.load(Ordering::Acquire) {
                         return;
                     }
-                    let mut state = state.lock().unwrap();
+                    let mut state = state.lock();
                     state.last = Some(tokio::time::Instant::now());
                     state.pending = false;
                     drop(state);
                     callback();
                 });
-                tracker.handles.lock().unwrap().push(handle);
+                tracker.handles.lock().push(handle);
             }
         });
         Ok(throttled)
@@ -179,7 +179,7 @@ impl TimerService {
                     callback();
                 }
             });
-            tracker.handles.lock().unwrap().push(handle);
+            tracker.handles.lock().push(handle);
         });
         Ok(debounced)
     }
@@ -201,7 +201,7 @@ fn track_handles(ctx: &cordis_core::Context) -> Result<TimerTracker, CordisError
         move || {
             Effect::Disposer(sync_disposer(move || {
                 tracked_disposed.store(true, Ordering::Release);
-                for handle in tracked_handles.lock().unwrap().iter() {
+                for handle in tracked_handles.lock().iter() {
                     handle.abort();
                 }
             }))

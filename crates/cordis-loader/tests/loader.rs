@@ -1,9 +1,9 @@
 //! The Loader service itself.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
 use cordis_core::{Context, Effect, LoggerLevel, SimpleExporter};
@@ -91,9 +91,7 @@ async fn show_log_emits_apply_and_reload() {
                         formatters: None,
                         handler: {
                             let captured = captured.clone();
-                            Arc::new(move |message| {
-                                captured.lock().unwrap().push(message.args[0].inspect())
-                            })
+                            Arc::new(move |message| captured.lock().push(message.args[0].inspect()))
                         },
                     }))
                     .unwrap(),
@@ -105,11 +103,10 @@ async fn show_log_emits_apply_and_reload() {
             assert!(
                 captured
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("apply plugin foo")),
                 "{:?}",
-                captured.lock().unwrap()
+                captured.lock()
             );
 
             let config = serde_yaml_ng::to_value(serde_yaml_ng::Mapping::new()).unwrap();
@@ -122,11 +119,10 @@ async fn show_log_emits_apply_and_reload() {
             assert!(
                 captured
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("reload plugin foo")),
                 "{:?}",
-                captured.lock().unwrap()
+                captured.lock()
             );
         })
         .await;

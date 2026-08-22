@@ -1,12 +1,13 @@
 //! Logger service: levels, formatting, colors, exporters and explicit
 //! naming.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 
@@ -225,7 +226,7 @@ impl SimpleExporter {
             max_length: 10240,
             levels: None,
             formatters: None,
-            handler: Arc::new(move |message| captured.lock().unwrap().push(message.clone())),
+            handler: Arc::new(move |message| captured.lock().push(message.clone())),
         })
     }
 }
@@ -425,7 +426,7 @@ impl LoggerService {
 
     fn push_buffer(&self, message: Message) {
         let size = self.buffer_size.load(Ordering::Relaxed);
-        let mut buffer = self.buffer.lock().unwrap();
+        let mut buffer = self.buffer.lock();
         buffer.push(message);
         let overflow = buffer.len().saturating_sub(size);
         if overflow > 0 {
@@ -435,13 +436,13 @@ impl LoggerService {
 
     /// The current message buffer.
     pub fn buffer(&self) -> Vec<Message> {
-        self.buffer.lock().unwrap().clone()
+        self.buffer.lock().clone()
     }
 
     /// Adjusts the buffer size.
     pub fn set_buffer_size(&self, size: usize) {
         self.buffer_size.store(size, Ordering::Relaxed);
-        let mut buffer = self.buffer.lock().unwrap();
+        let mut buffer = self.buffer.lock();
         let overflow = buffer.len().saturating_sub(size);
         if overflow > 0 {
             buffer.drain(..overflow);
@@ -458,7 +459,7 @@ struct BufferExporter {
 impl LoggerExporter for BufferExporter {
     fn export(&self, message: &Message) {
         let size = self.buffer_size.load(Ordering::Relaxed);
-        let mut buffer = self.buffer.lock().unwrap();
+        let mut buffer = self.buffer.lock();
         buffer.push(message.clone());
         let overflow = buffer.len().saturating_sub(size);
         if overflow > 0 {
@@ -783,7 +784,6 @@ impl LoggerService {
     pub fn error_count(&self) -> usize {
         self.buffer
             .lock()
-            .unwrap()
             .iter()
             .filter(|message| message.r#type == LoggerType::Error)
             .count()

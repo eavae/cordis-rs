@@ -113,7 +113,7 @@ async fn get_tasks_and_await() {
             assert!(tree.get_tasks() > 0, "pending init must be counted");
             tree.await_tree().await;
             assert_eq!(tree.get_tasks(), 0);
-            assert!(entry.fiber.lock().unwrap().is_some());
+            assert!(entry.fiber.lock().is_some());
         })
         .await;
 }

@@ -1,7 +1,7 @@
 //! Cross-FFI async bridge (host drives plugin futures).
 
+use parking_lot::Mutex;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use cordis_loader::SoPlugin;
 use cordis_sdk::PLUGIN_API_VERSION;
@@ -39,25 +39,17 @@ extern "C" fn log_message(message: *const std::ffi::c_char) {
     let text = unsafe { std::ffi::CStr::from_ptr(message) }
         .to_string_lossy()
         .to_string();
-    LOGGED.lock().unwrap().push(text);
+    LOGGED.lock().push(text);
 }
 
 async fn wait_logged(needle: &str) {
     for _ in 0..1000 {
-        if LOGGED
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|line| line.contains(needle))
-        {
+        if LOGGED.lock().iter().any(|line| line.contains(needle)) {
             return;
         }
         tokio::task::yield_now().await;
     }
-    panic!(
-        "log line {needle:?} never appeared: {:?}",
-        LOGGED.lock().unwrap()
-    );
+    panic!("log line {needle:?} never appeared: {:?}", LOGGED.lock());
 }
 
 /// A plugin spawns a future through the host vtable; the host drives it to
@@ -65,7 +57,7 @@ async fn wait_logged(needle: &str) {
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn host_drives_spawned_future_to_completion() {
-    let _serial = SERIAL.lock().unwrap();
+    let _serial = SERIAL.lock();
     reset_counters();
     let local = tokio::task::LocalSet::new();
     local
@@ -74,7 +66,7 @@ async fn host_drives_spawned_future_to_completion() {
             let handle = unsafe { plugin.create(log_message) };
             assert!(!handle.is_null());
 
-            LOGGED.lock().unwrap().clear();
+            LOGGED.lock().clear();
             let library = unsafe { Library::new(fixture_path()) }.unwrap();
             type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle);
             let spawn: libloading::Symbol<Spawn> =
@@ -96,7 +88,7 @@ async fn host_drives_spawned_future_to_completion() {
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn dispose_cancels_pending_spawns() {
-    let _serial = SERIAL.lock().unwrap();
+    let _serial = SERIAL.lock();
     reset_counters();
     let local = tokio::task::LocalSet::new();
     local
@@ -140,7 +132,7 @@ async fn dispose_cancels_pending_spawns() {
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn unload_waits_for_pending_spawned_futures() {
-    let _serial = SERIAL.lock().unwrap();
+    let _serial = SERIAL.lock();
     reset_counters();
     let local = tokio::task::LocalSet::new();
     local
@@ -190,7 +182,7 @@ async fn unload_waits_for_pending_spawned_futures() {
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn ten_thousand_spawns_smoke() {
-    let _serial = SERIAL.lock().unwrap();
+    let _serial = SERIAL.lock();
     reset_counters();
     let local = tokio::task::LocalSet::new();
     local

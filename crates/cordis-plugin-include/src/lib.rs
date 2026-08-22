@@ -146,7 +146,6 @@ pub fn include_plugin() -> Plugin {
                     entry
                         .fiber
                         .lock()
-                        .unwrap()
                         .as_ref()
                         .is_some_and(|candidate| Arc::ptr_eq(candidate, &fiber))
                 })
@@ -237,7 +236,7 @@ pub async fn refresh_include_file(loader: &Loader, filename: &Path) -> bool {
         Err(_) => filename.to_path_buf(),
     };
     for entry in loader.tree_handle().entries() {
-        let Some(config) = entry.options.lock().unwrap().config.clone() else {
+        let Some(config) = entry.options.lock().config.clone() else {
             continue;
         };
         let Ok(config) = serde_yaml_ng::from_value::<IncludeConfig>(config) else {
@@ -283,7 +282,7 @@ impl IncludeWriteState {
         let entries: Vec<EntryOptions> = subgroup
             .entries
             .iter()
-            .map(|entry| entry.options.lock().unwrap().clone())
+            .map(|entry| entry.options.lock().clone())
             .collect();
         let serialized = serialize_config(&entries)?;
         atomic_write(&self.filename, &serialized)

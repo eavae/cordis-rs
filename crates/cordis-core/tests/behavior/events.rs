@@ -1,9 +1,9 @@
 //! Ported cases from `packages/core/tests/events.spec.ts`.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::error::Error;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use cordis_core::{
@@ -263,9 +263,9 @@ async fn events_ctx_parallel_async_fan_out() {
             event_listener_async(move |_args, _next| {
                 let log = log.clone();
                 async move {
-                    log.lock().unwrap().push(format!("start-{index}"));
+                    log.lock().push(format!("start-{index}"));
                     tokio::task::yield_now().await;
-                    log.lock().unwrap().push(format!("end-{index}"));
+                    log.lock().push(format!("end-{index}"));
                     Ok(None)
                 }
             }),
@@ -276,7 +276,7 @@ async fn events_ctx_parallel_async_fan_out() {
 
     root.parallel("async-event", &[], None).await.unwrap();
     assert_eq!(
-        log.lock().unwrap().as_slice(),
+        log.lock().as_slice(),
         &["start-1", "start-2", "end-1", "end-2"],
         "all listeners must start before any continuation (concurrent fan-out)"
     );
@@ -342,9 +342,9 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
             event_listener_async(move |_args, _next| {
                 let log = log.clone();
                 async move {
-                    log.lock().unwrap().push("one-start".to_string());
+                    log.lock().push("one-start".to_string());
                     tokio::task::yield_now().await;
-                    log.lock().unwrap().push("one-end".to_string());
+                    log.lock().push("one-end".to_string());
                     Ok(None)
                 }
             }),
@@ -359,9 +359,9 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
             event_listener_async(move |_args, _next| {
                 let log = log.clone();
                 async move {
-                    log.lock().unwrap().push("two-start".to_string());
+                    log.lock().push("two-start".to_string());
                     tokio::task::yield_now().await;
-                    log.lock().unwrap().push("two-end".to_string());
+                    log.lock().push("two-end".to_string());
                     let value: Arc<dyn Any + Send + Sync> = Arc::new("b".to_string());
                     Ok(Some(value))
                 }
@@ -377,7 +377,7 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
             event_listener_async(move |_args, _next| {
                 let log = log.clone();
                 async move {
-                    log.lock().unwrap().push("three".to_string());
+                    log.lock().push("three".to_string());
                     Ok(None)
                 }
             }),
@@ -395,7 +395,7 @@ async fn events_ctx_serial_async_short_circuits_in_order() {
         Some("b")
     );
     assert_eq!(
-        log.lock().unwrap().as_slice(),
+        log.lock().as_slice(),
         &["one-start", "one-end", "two-start", "two-end"],
         "listeners are awaited in order and short-circuit on the first truthy result"
     );
@@ -729,7 +729,7 @@ async fn internal_update_hook() {
                     inject: Vec::new(),
                     apply: Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                         let value = config.downcast_ref::<Config>().expect("config").value;
-                        applied_seen.lock().unwrap().push(("apply", value));
+                        applied_seen.lock().push(("apply", value));
                         Effect::None
                     }),
                 },
@@ -746,7 +746,7 @@ async fn internal_update_hook() {
                         let hook_seen = hook_seen.clone();
                         async move {
                             let config = args[0].downcast_ref::<Config>().expect("config").value;
-                            hook_seen.lock().unwrap().push(("hook", config));
+                            hook_seen.lock().push(("hook", config));
                             let next = next.expect("next");
                             let _ = next.next().await;
                             Ok(None)
@@ -762,7 +762,7 @@ async fn internal_update_hook() {
                 .await
                 .unwrap();
             assert_eq!(
-                seen.lock().unwrap().as_slice(),
+                seen.lock().as_slice(),
                 &[("apply", 1), ("hook", 2), ("apply", 2)]
             );
         })

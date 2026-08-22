@@ -5,9 +5,9 @@
 //! table) instead of `tokio::time`, so that it works both for plain spawned
 //! tasks and for `LocalSet`-scheduled fiber tasks.
 
+use parking_lot::Mutex;
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::task::{Poll, Waker};
 
 pub mod associate;
@@ -57,7 +57,7 @@ impl Timers {
         let mut remaining = ms;
         loop {
             let due_wakers = {
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock();
                 let target = state.now_ms + remaining;
                 let earliest = state
                     .waiters
@@ -107,10 +107,10 @@ impl Timers {
     /// advanced far enough.
     pub fn sleep(&self, ms: u64) -> impl Future<Output = ()> {
         let state = self.state.clone();
-        let deadline = state.lock().unwrap().now_ms + ms;
+        let deadline = state.lock().now_ms + ms;
         let mut id: Option<u64> = None;
         poll_fn(move |cx| {
-            let mut state = state.lock().unwrap();
+            let mut state = state.lock();
             if state.now_ms >= deadline {
                 return Poll::Ready(());
             }
@@ -138,7 +138,7 @@ impl Timers {
 
     /// The current fake-clock value in milliseconds since the clock started.
     pub fn now(&self) -> u64 {
-        self.state.lock().unwrap().now_ms
+        self.state.lock().now_ms
     }
 }
 

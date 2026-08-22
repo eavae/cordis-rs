@@ -1,11 +1,11 @@
 //! File watching, debounce, ignored globs and include refresh.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use cordis_core::{Context, Effect, EventOptions, event_callback};
 use cordis_loader::{EntryOptions, Loader};
@@ -71,7 +71,7 @@ async fn change_event_and_ignored() {
                         let changes = changes.clone();
                         move |args| {
                             if let Some(path) = args[0].downcast_ref::<String>() {
-                                changes.lock().unwrap().push(path.clone());
+                                changes.lock().push(path.clone());
                             }
                             Ok(None)
                         }
@@ -96,25 +96,17 @@ async fn change_event_and_ignored() {
             fs::write(dir.join("node_modules/pkg.js"), "x").unwrap();
             fs::write(dir.join("src.js"), "hello").unwrap();
 
-            wait_for(|| !changes.lock().unwrap().is_empty()).await;
+            wait_for(|| !changes.lock().is_empty()).await;
             watcher.stop();
             assert!(
-                changes
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|p| p.ends_with("src.js")),
+                changes.lock().iter().any(|p| p.ends_with("src.js")),
                 "src.js change must emit hmr/change: {:?}",
-                changes.lock().unwrap()
+                changes.lock()
             );
             assert!(
-                !changes
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|p| p.contains("node_modules")),
+                !changes.lock().iter().any(|p| p.contains("node_modules")),
                 "ignored files must not emit: {:?}",
-                changes.lock().unwrap()
+                changes.lock()
             );
             fs::remove_dir_all(&dir).unwrap();
         })
@@ -162,7 +154,7 @@ async fn include_config_refresh() {
                     event_callback({
                         let changes = changes.clone();
                         move |_args| {
-                            *changes.lock().unwrap() += 1;
+                            *changes.lock() += 1;
                             Ok(None)
                         }
                     }),
@@ -238,7 +230,7 @@ async fn include_config_refresh() {
                 "include config change must refresh the tree"
             );
             assert_eq!(
-                *changes.lock().unwrap(),
+                *changes.lock(),
                 0,
                 "config file changes must not emit hmr/change"
             );

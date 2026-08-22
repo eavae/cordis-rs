@@ -14,8 +14,12 @@ workspace = true
 arc-swap.workspace = true
 cordis-macros = { path = "../cordis-macros" }
 futures-util.workspace = true
+parking_lot.workspace = true
 serde.workspace = true
 tokio.workspace = true
+
+[features]
+deadlock-detection = ["parking_lot/deadlock_detection"]
 
 [dev-dependencies]
 # `test-util` enables tokio's fake clock (time::pause / time::advance),

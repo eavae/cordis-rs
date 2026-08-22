@@ -2,9 +2,9 @@
 //! dynamic-access completion (`set` ownership, `get` three states, `has`,
 //! `accessor`).
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use cordis_core::{Context, Effect, FiberState, Plugin, ReflectService, Service, event_callback};
@@ -128,7 +128,7 @@ async fn reflect_set_ownership_check() {
                     event_callback(move |args: &[Arc<dyn Any + Send + Sync>]| {
                         let name = args[0].downcast_ref::<String>().unwrap().clone();
                         let value = args[1].downcast_ref::<i32>().copied().unwrap_or_default();
-                        updates.lock().unwrap().push(format!("{name}={value}"));
+                        updates.lock().push(format!("{name}={value}"));
                         Ok(None)
                     }),
                     cordis_core::EventOptions::default(),
@@ -165,12 +165,9 @@ async fn reflect_set_ownership_check() {
                 "owning fiber must update the value"
             );
             assert!(
-                service_updates
-                    .lock()
-                    .unwrap()
-                    .contains(&"foo=2".to_string()),
+                service_updates.lock().contains(&"foo=2".to_string()),
                 "set must notify through internal/service: {:?}",
-                service_updates.lock().unwrap()
+                service_updates.lock()
             );
         })
         .await;

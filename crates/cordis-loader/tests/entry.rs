@@ -1,9 +1,9 @@
 //! Entry and EntryOptions (basic loader cases).
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{Context, Effect};
@@ -35,7 +35,7 @@ fn counter_plugin(count: Arc<AtomicU32>) -> cordis_core::ApplyFn {
 fn capture_plugin(sink: Arc<Mutex<Option<String>>>) -> cordis_core::ApplyFn {
     Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
         if let Some(value) = config.downcast_ref::<serde_yaml_ng::Value>() {
-            *sink.lock().unwrap() = value.as_str().map(String::from);
+            *sink.lock() = value.as_str().map(String::from);
         }
         Effect::None
     })
@@ -64,11 +64,11 @@ async fn config_expr_is_evaluated_at_apply() {
                     ..opts("", "greeter", false)
                 }])
                 .await;
-            assert_eq!(sink.lock().unwrap().as_deref(), Some("Hello"));
+            assert_eq!(sink.lock().as_deref(), Some("Hello"));
 
             // `base_url()` comes from the loader's base url.
             loader.set_base_url("https://example.com");
-            *sink.lock().unwrap() = None;
+            *sink.lock() = None;
             loader
                 .read(vec![EntryOptions {
                     id: "2".to_string(),
@@ -77,10 +77,7 @@ async fn config_expr_is_evaluated_at_apply() {
                     ..opts("", "greeter", false)
                 }])
                 .await;
-            assert_eq!(
-                sink.lock().unwrap().as_deref(),
-                Some("https://example.com/data")
-            );
+            assert_eq!(sink.lock().as_deref(), Some("https://example.com/data"));
         })
         .await;
 }

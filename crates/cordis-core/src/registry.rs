@@ -4,10 +4,11 @@
 //! the full plugin contract (invalid-plugin errors, inject declaration
 //! forms, registry queries).
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
 use crate::context::{Context, ContextInner, OverlayLayer};
 use crate::error::ConfigValidator;
@@ -66,7 +67,7 @@ pub struct Runtime {
 impl Runtime {
     /// Number of live fibers of this runtime.
     pub fn fiber_count(&self) -> usize {
-        self.fibers.lock().unwrap().len()
+        self.fibers.lock().len()
     }
 }
 
@@ -98,7 +99,7 @@ impl Service for RegistryService {
 impl std::fmt::Debug for RegistryService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegistryService")
-            .field("size", &self.runtimes.lock().unwrap().len())
+            .field("size", &self.runtimes.lock().len())
             .finish()
     }
 }
@@ -139,7 +140,7 @@ impl RegistryService {
         let callback = plugin.apply.clone();
         let key = Arc::as_ptr(&callback) as *const () as usize;
         let registry_rc = parent.get::<Self>().expect("registry service");
-        let mut runtimes = self.runtimes.lock().unwrap();
+        let mut runtimes = self.runtimes.lock();
         let runtime = runtimes
             .entry(key)
             .or_insert_with(|| {
@@ -190,18 +191,14 @@ impl RegistryService {
             .fiber()
             .effect(
                 move || {
-                    runtime
-                        .fibers
-                        .lock()
-                        .unwrap()
-                        .push(fiber_for_effect.clone());
+                    runtime.fibers.lock().push(fiber_for_effect.clone());
                     let _ = parent_events_emit(parent, &fiber_for_effect);
                     if let Some(error) = validation_error.clone() {
                         fiber_for_effect
                             .log_error(&format!("{error} at <{}>", fiber_for_effect.name()));
-                        *fiber_for_effect.error.lock().unwrap() =
+                        *fiber_for_effect.error.lock() =
                             Some(Box::new(crate::fiber::FiberError::new(error.to_string())));
-                        *fiber_for_effect.epoch.lock().unwrap() = Epoch::Inactive;
+                        *fiber_for_effect.epoch.lock() = Epoch::Inactive;
                         fiber_for_effect.update_state(Some(FiberState::Failed));
                         let fiber = fiber_for_effect;
                         return Effect::Disposer(Box::new(move || {
@@ -216,13 +213,8 @@ impl RegistryService {
                     // `inject` belongs to the registry snapshot lock group
                     // and must not be held while `check_impl` touches
                     // `resolved` or runs user-provided check closures.
-                    let inject_names: Vec<String> = fiber_for_effect
-                        .inject
-                        .lock()
-                        .unwrap()
-                        .keys()
-                        .cloned()
-                        .collect();
+                    let inject_names: Vec<String> =
+                        fiber_for_effect.inject.lock().keys().cloned().collect();
                     for name in &inject_names {
                         fiber_for_effect.check_impl(name);
                     }
@@ -239,7 +231,7 @@ impl RegistryService {
                 "ctx.plugin()",
             )
             .expect("parent fiber must be active");
-        *fiber.dispose.lock().unwrap() = Some(handle);
+        *fiber.dispose.lock() = Some(handle);
         let _ = parent_events_emit(parent, &fiber);
         fiber
     }
@@ -253,36 +245,35 @@ impl RegistryService {
     pub fn has(&self, plugin: &Plugin) -> bool {
         self.runtimes
             .lock()
-            .unwrap()
             .contains_key(&Self::runtime_key(&plugin.apply))
     }
 
     /// Number of registered runtimes.
     pub fn size(&self) -> usize {
-        self.runtimes.lock().unwrap().len()
+        self.runtimes.lock().len()
     }
 
     /// The keys (callback addresses) of registered runtimes.
     pub fn keys(&self) -> Vec<usize> {
-        self.runtimes.lock().unwrap().keys().copied().collect()
+        self.runtimes.lock().keys().copied().collect()
     }
 
     /// The registered runtimes.
     pub fn values(&self) -> Vec<Arc<Runtime>> {
-        self.runtimes.lock().unwrap().values().cloned().collect()
+        self.runtimes.lock().values().cloned().collect()
     }
 
     /// Deletes a plugin runtime, disposing all of its fibers (mirrors
     /// `registry.delete`).
     pub fn delete(&self, plugin: &Plugin) {
         let runtime = {
-            let runtimes = self.runtimes.lock().unwrap();
+            let runtimes = self.runtimes.lock();
             runtimes.get(&Self::runtime_key(&plugin.apply)).cloned()
         };
         let Some(runtime) = runtime else {
             return;
         };
-        let fibers = runtime.fibers.lock().unwrap().clone();
+        let fibers = runtime.fibers.lock().clone();
         for fiber in fibers {
             tokio::task::spawn_local(fiber.dispose());
         }
@@ -299,12 +290,12 @@ impl RegistryService {
     pub(crate) fn notify(&self, name: &str, provider: &Context) -> Vec<Arc<Fiber>> {
         let provider_label = provider.inner.isolate_label(name);
         let affected = {
-            let runtimes = self.runtimes.lock().unwrap();
+            let runtimes = self.runtimes.lock();
             let mut affected = Vec::new();
             for runtime in runtimes.values() {
-                let fibers = runtime.fibers.lock().unwrap();
+                let fibers = runtime.fibers.lock();
                 for fiber in fibers.iter() {
-                    if !fiber.inject.lock().unwrap().contains_key(name) {
+                    if !fiber.inject.lock().contains_key(name) {
                         continue;
                     }
                     if provider_label != fiber.ctx.isolate_label(name) {
@@ -357,12 +348,12 @@ impl RegistryService {
         labels: &[crate::Label],
     ) -> Vec<Arc<Fiber>> {
         let affected = {
-            let runtimes = self.runtimes.lock().unwrap();
+            let runtimes = self.runtimes.lock();
             let mut affected = Vec::new();
             for runtime in runtimes.values() {
-                let fibers = runtime.fibers.lock().unwrap();
+                let fibers = runtime.fibers.lock();
                 for fiber in fibers.iter() {
-                    if !fiber.inject.lock().unwrap().contains_key(name) {
+                    if !fiber.inject.lock().contains_key(name) {
                         continue;
                     }
                     let label = fiber.ctx.isolate_label(name);
@@ -386,7 +377,7 @@ impl RegistryService {
 
     /// Removes a runtime by callback key once its last fiber is disposed.
     pub(crate) fn remove_runtime_by_key(&self, key: usize) {
-        self.runtimes.lock().unwrap().remove(&key);
+        self.runtimes.lock().remove(&key);
     }
 }
 
@@ -409,7 +400,7 @@ fn build_child_inner(
     Arc::new(ContextInner {
         overlay,
         store: parent.inner.store.clone(),
-        meta: Mutex::new(parent.inner.meta.lock().unwrap().clone()),
+        meta: Mutex::new(parent.inner.meta.lock().clone()),
         props: parent.inner.props.clone(),
     })
 }
@@ -427,11 +418,11 @@ async fn unregister_dispose(fiber: Arc<Fiber>) {
         let Some(runtime) = runtime else {
             return;
         };
-        let mut fibers = runtime.fibers.lock().unwrap();
+        let mut fibers = runtime.fibers.lock();
         if let Some(position) = fibers.iter().position(|f| Arc::ptr_eq(f, &fiber)) {
             fibers.remove(position);
         }
-        let registry = runtime.registry.lock().unwrap().clone();
+        let registry = runtime.registry.lock().clone();
         let key = Arc::as_ptr(&runtime.callback) as *const () as usize;
         (fibers.is_empty(), registry, key)
     };

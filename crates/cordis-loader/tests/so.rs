@@ -4,8 +4,8 @@
 //! before these tests open them, so a plain `cargo test --workspace` works
 //! on a clean checkout.
 
+use parking_lot::{Mutex, MutexGuard};
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
 
 use cordis_loader::{LoadError, SoPlugin, is_plugin_path};
 use cordis_sdk::PLUGIN_API_VERSION;
@@ -17,7 +17,7 @@ static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 
 fn lock_fixture() -> MutexGuard<'static, ()> {
-    FIXTURE_LOCK.lock().unwrap()
+    FIXTURE_LOCK.lock()
 }
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -38,7 +38,7 @@ extern "C" fn log_message(message: *const std::ffi::c_char) {
     let text = unsafe { std::ffi::CStr::from_ptr(message) }
         .to_string_lossy()
         .to_string();
-    LOGGED.lock().unwrap().push(text);
+    LOGGED.lock().push(text);
 }
 
 /// Loading succeeds, `create` returns a callable handle and the lifecycle
@@ -56,12 +56,12 @@ fn load_create_and_drop_disposes() {
     assert_eq!(plugin.version(), PLUGIN_API_VERSION);
     assert_eq!(plugin.path(), path);
 
-    LOGGED.lock().unwrap().clear();
+    LOGGED.lock().clear();
     // SAFETY: `vtable` outlives the call and the fixture expects it.
     let handle = unsafe { plugin.create(log_message) };
     assert!(!handle.is_null(), "plugin_create must return a handle");
     assert_eq!(
-        LOGGED.lock().unwrap().as_slice(),
+        LOGGED.lock().as_slice(),
         &["hello from fixture plugin".to_string()]
     );
 

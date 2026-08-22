@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 cordis-core = { path = "../cordis-core" }
+parking_lot.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

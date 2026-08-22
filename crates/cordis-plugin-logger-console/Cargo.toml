@@ -12,4 +12,5 @@ workspace = true
 
 [dependencies]
 cordis-core = { path = "../cordis-core" }
+parking_lot.workspace = true
 serde.workspace = true

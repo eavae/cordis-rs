@@ -1,9 +1,9 @@
 //! Ported cases from `packages/core/tests/service.spec.ts` and
 //! `decorator.spec.ts`.
 
+use parking_lot::Mutex;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::task::{Poll, Waker};
 
@@ -30,7 +30,7 @@ impl Gate {
     fn wait(&self) -> impl Future<Output = ()> {
         let gate = self.clone();
         std::future::poll_fn(move |cx| {
-            *gate.waker.lock().unwrap() = Some(cx.waker().clone());
+            *gate.waker.lock() = Some(cx.waker().clone());
             if gate.fired.load(Ordering::SeqCst) {
                 Poll::Ready(())
             } else {
@@ -41,7 +41,7 @@ impl Gate {
 
     fn fire(&self) {
         self.fired.store(true, Ordering::SeqCst);
-        if let Some(waker) = self.waker.lock().unwrap().take() {
+        if let Some(waker) = self.waker.lock().take() {
             waker.wake();
         }
     }

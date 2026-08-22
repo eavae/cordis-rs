@@ -1,9 +1,9 @@
 //! Entry-level `inject` merging and `noSave` write-back skipping.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use cordis_core::{Context, Effect, Fiber, FiberState, Plugin};
 use cordis_loader::{EntryOptions, Loader};
@@ -60,7 +60,7 @@ async fn entry_inject_keeps_fiber_pending_until_provider() {
                 Arc::new({
                     let applied = applied.clone();
                     move |_ctx: &Context, _config| {
-                        *applied.lock().unwrap() += 1;
+                        *applied.lock() += 1;
                         Effect::None
                     }
                 }),
@@ -80,12 +80,8 @@ async fn entry_inject_keeps_fiber_pending_until_provider() {
                 .read(vec![opts("1", "needs", Some(vec!["slot".to_string()]))])
                 .await;
             let fiber = loader.expect_fiber("1");
-            assert_eq!(
-                applied.lock().unwrap().clone(),
-                0,
-                "missing dependency blocks apply"
-            );
-            assert!(fiber.inject.lock().unwrap().contains_key("slot"));
+            assert_eq!(applied.lock().clone(), 0, "missing dependency blocks apply");
+            assert!(fiber.inject.lock().contains_key("slot"));
             assert_eq!(fiber.state(), FiberState::Pending);
 
             // Provide `slot` by adding the provider entry; the pending entry
@@ -98,7 +94,7 @@ async fn entry_inject_keeps_fiber_pending_until_provider() {
                 .await;
             loader.tree.await_tree().await;
             wait_until(|| fiber.state() == FiberState::Active).await;
-            assert_eq!(applied.lock().unwrap().clone(), 1);
+            assert_eq!(applied.lock().clone(), 1);
             assert_eq!(fiber.state(), FiberState::Active);
         })
         .await;
@@ -157,7 +153,7 @@ async fn child_fiber_does_not_write_back() {
                 "parent",
                 Arc::new(move |ctx: &Context, _config| {
                     let fiber = ctx.plugin(&child_plugin, None);
-                    *child_slot.lock().unwrap() = Some(fiber);
+                    *child_slot.lock() = Some(fiber);
                     Effect::None
                 }),
             );
@@ -165,11 +161,7 @@ async fn child_fiber_does_not_write_back() {
             options.config = Some(yaml_value(&[("a", 1)]));
             loader.read(vec![options]).await;
 
-            let child = child
-                .lock()
-                .unwrap()
-                .clone()
-                .expect("child fiber must be created");
+            let child = child.lock().clone().expect("child fiber must be created");
             child
                 .update_with(
                     Some(Arc::new(yaml_value(&[("x", 9)])) as Arc<dyn Any + Send + Sync>),

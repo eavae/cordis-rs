@@ -52,7 +52,7 @@ async fn entry_reload_reapplies_with_new_plugin() {
             let entry = tree.create(opts("p"), None, 0);
             tree.await_tree().await;
             assert_eq!(applied.load(Ordering::SeqCst), 1);
-            let config_before = entry.options.lock().unwrap().config.clone();
+            let config_before = entry.options.lock().config.clone();
 
             // Swap in a new apply and reload the entry.
             loader.tree.plugins.rcu(|plugins| {
@@ -67,7 +67,7 @@ async fn entry_reload_reapplies_with_new_plugin() {
                 "reload must re-apply the entry"
             );
             assert_eq!(
-                entry.options.lock().unwrap().config,
+                entry.options.lock().config,
                 config_before,
                 "entry options (config) must be preserved"
             );

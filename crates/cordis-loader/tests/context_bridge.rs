@@ -4,11 +4,11 @@
 //! `effect_disposer`) end to end through the loader, plus entry-level
 //! isolate visibility and the host-thread discipline.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use cordis_core::{Context, FiberState};
 use cordis_loader::{EntryOptions, IsolateValue, Loader, SoPlugin, context_bridge};
@@ -33,7 +33,7 @@ extern "C" fn log_message(message: *const std::ffi::c_char) {
     let text = unsafe { std::ffi::CStr::from_ptr(message) }
         .to_string_lossy()
         .to_string();
-    LOGGED.lock().unwrap().push(text);
+    LOGGED.lock().push(text);
 }
 
 fn opts(greeting: &str) -> EntryOptions {
@@ -96,7 +96,7 @@ fn reset_fixture() {
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn provide_get_event_and_disposers() {
-    let _guard = FIXTURE_LOCK.lock().unwrap();
+    let _guard = FIXTURE_LOCK.lock();
     reset_fixture();
     let local = tokio::task::LocalSet::new();
     local
@@ -108,11 +108,11 @@ async fn provide_get_event_and_disposers() {
             assert!(!handle.is_null());
             loader.register_so_plugin(&plugin).expect("register");
 
-            LOGGED.lock().unwrap().clear();
+            LOGGED.lock().clear();
             let tree = loader.tree_handle();
             let entry = tree.create(opts("hi"), None, 0);
             tree.await_tree().await;
-            let fiber = entry.fiber.lock().unwrap().clone().expect("fiber created");
+            let fiber = entry.fiber.lock().clone().expect("fiber created");
             assert_eq!(fiber.state(), FiberState::Active);
 
             // Host reads the service the plugin provided in apply.
@@ -124,7 +124,7 @@ async fn provide_get_event_and_disposers() {
                 .cloned()
                 .expect("greeting is a serde value");
             assert_eq!(greeting.as_str(), Some("hi"));
-            let logged = LOGGED.lock().unwrap().clone();
+            let logged = LOGGED.lock().clone();
             assert!(
                 logged
                     .iter()
@@ -138,7 +138,7 @@ async fn provide_get_event_and_disposers() {
             let args: Arc<dyn Any + Send + Sync> =
                 Arc::new(serde_yaml_ng::Value::String("world".to_string()));
             entry.ctx.emit("demo/event", &[args]);
-            let logged = LOGGED.lock().unwrap().clone();
+            let logged = LOGGED.lock().clone();
             assert!(
                 logged
                     .iter()
@@ -165,7 +165,7 @@ async fn provide_get_event_and_disposers() {
             let (_, _, first_order, second_order) = fixture_helpers();
             assert_eq!(second_order, 0, "second-registered disposer runs first");
             assert_eq!(first_order, 1, "first-registered disposer runs second");
-            let logged = LOGGED.lock().unwrap().clone();
+            let logged = LOGGED.lock().clone();
             assert!(
                 logged
                     .iter()
@@ -187,7 +187,7 @@ async fn provide_get_event_and_disposers() {
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn isolate_scopes_provide_get() {
-    let _guard = FIXTURE_LOCK.lock().unwrap();
+    let _guard = FIXTURE_LOCK.lock();
     reset_fixture();
     let local = tokio::task::LocalSet::new();
     local
@@ -249,7 +249,7 @@ async fn isolate_scopes_provide_get() {
             // The isolated entry's fiber resolves the same label as its
             // entry context (the .so plugin provided under the isolated
             // label, not the root one).
-            let isolated_fiber = isolated_entry.fiber.lock().unwrap().clone().unwrap();
+            let isolated_fiber = isolated_entry.fiber.lock().clone().unwrap();
             let isolated_label = isolated_entry.ctx.isolate_label("greeting");
             let fiber_label = isolated_fiber.context().isolate_label("greeting");
             assert_eq!(isolated_label, fiber_label);
@@ -268,7 +268,7 @@ async fn isolate_scopes_provide_get() {
 /// deferred callbacks are skipped instead of calling into freed code.
 #[test]
 fn host_thread_discipline_and_live_handle_guard() {
-    let _guard = FIXTURE_LOCK.lock().unwrap();
+    let _guard = FIXTURE_LOCK.lock();
     reset_fixture();
     let root = Context::new();
     let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
@@ -320,7 +320,7 @@ fn host_thread_discipline_and_live_handle_guard() {
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn disposed_plugin_event_callback_is_skipped() {
-    let _guard = FIXTURE_LOCK.lock().unwrap();
+    let _guard = FIXTURE_LOCK.lock();
     reset_fixture();
     let local = tokio::task::LocalSet::new();
     local
@@ -332,7 +332,7 @@ async fn disposed_plugin_event_callback_is_skipped() {
             assert!(!handle.is_null());
             loader.register_so_plugin(&plugin).expect("register");
 
-            LOGGED.lock().unwrap().clear();
+            LOGGED.lock().clear();
             let tree = loader.tree_handle();
             let entry = tree.create(opts("hi"), None, 0);
             tree.await_tree().await;
@@ -345,7 +345,7 @@ async fn disposed_plugin_event_callback_is_skipped() {
 
             // Disposing the fiber runs the disposers, which are skipped the
             // same way (the handle is no longer live).
-            let fiber = entry.fiber.lock().unwrap().clone().unwrap();
+            let fiber = entry.fiber.lock().clone().unwrap();
             let _ = tokio::task::spawn_local(fiber.dispose()).await;
             let (_, _, first_order, second_order) = fixture_helpers();
             assert_eq!(first_order, -1, "disposer must be skipped");

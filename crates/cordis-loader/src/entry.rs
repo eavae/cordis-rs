@@ -1,9 +1,10 @@
 //! Entry, EntryGroup and EntryTree.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 
@@ -131,7 +132,7 @@ impl TreeState {
             let entry = current
                 .entries
                 .iter()
-                .find(|entry| entry.options.lock().unwrap().id == *part)
+                .find(|entry| entry.options.lock().id == *part)
                 .cloned()
                 .ok_or_else(|| format!("cannot resolve entry {id}"))?;
             if is_last {
@@ -283,12 +284,11 @@ impl EntryTree {
                     || entry
                         .fiber
                         .lock()
-                        .unwrap()
                         .as_ref()
                         .is_some_and(|fiber| fiber.inertia_active())
-                    || (entry.fiber.lock().unwrap().is_none()
+                    || (entry.fiber.lock().is_none()
                         && !entry.disabled()
-                        && entry.options.lock().unwrap().group != Some(true))
+                        && entry.options.lock().group != Some(true))
             })
             .count();
         self.tasks.load(Ordering::Relaxed).max(pending)
@@ -331,7 +331,7 @@ impl EntryTree {
             if !self
                 .entries()
                 .iter()
-                .any(|entry| entry.options.lock().unwrap().id == id)
+                .any(|entry| entry.options.lock().id == id)
             {
                 options.id = id.clone();
                 return id;
@@ -560,25 +560,19 @@ impl EntryTree {
         // lock so concurrent moves of the same entry stay ordered with the
         // commits.
         let fiber_to_dispose = {
-            let _guard = entry.lifecycle.lock().unwrap();
+            let _guard = entry.lifecycle.lock();
             // Names whose realm might change with the move: the plugin's
             // declared injects (entry options may leave them to the plugin),
             // plus the service it provides under its own name.
-            let mut names: Vec<String> = entry
-                .options
-                .lock()
-                .unwrap()
-                .inject
-                .clone()
-                .unwrap_or_default();
-            if let Ok(plugin) = self.import(&entry.options.lock().unwrap().name) {
+            let mut names: Vec<String> = entry.options.lock().inject.clone().unwrap_or_default();
+            if let Ok(plugin) = self.import(&entry.options.lock().name) {
                 for (name, _) in &plugin.inject {
                     if !names.contains(name) {
                         names.push(name.clone());
                     }
                 }
             }
-            let own_name = entry.options.lock().unwrap().name.clone();
+            let own_name = entry.options.lock().name.clone();
             if !names.contains(&own_name) {
                 names.push(own_name);
             }
@@ -611,9 +605,9 @@ impl EntryTree {
                 // Once the entry re-provides under the new realm, wake
                 // dependents so their inject checks re-run (mirrors the TS
                 // patch-context order).
-                let fiber = entry.fiber.lock().unwrap().clone();
-                *entry.fiber.lock().unwrap() = None;
-                if !entry.disabled() && entry.options.lock().unwrap().group != Some(true) {
+                let fiber = entry.fiber.lock().clone();
+                *entry.fiber.lock() = None;
+                if !entry.disabled() && entry.options.lock().group != Some(true) {
                     entry.init_task.store(true, Ordering::Release);
                     let this = entry.clone();
                     let notify: Vec<(String, Vec<cordis_core::Label>)> = changed
@@ -639,12 +633,10 @@ impl EntryTree {
                 }
                 fiber
             } else if entry.disabled() {
-                let fiber = entry.fiber.lock().unwrap().clone();
-                *entry.fiber.lock().unwrap() = None;
+                let fiber = entry.fiber.lock().clone();
+                *entry.fiber.lock() = None;
                 fiber
-            } else if entry.fiber.lock().unwrap().is_none()
-                && entry.options.lock().unwrap().group != Some(true)
-            {
+            } else if entry.fiber.lock().is_none() && entry.options.lock().group != Some(true) {
                 entry.init_task.store(true, Ordering::Release);
                 let this = entry.clone();
                 tokio::task::spawn_local(async move {
@@ -668,9 +660,9 @@ impl EntryTree {
             .resolve_path(id)
             .unwrap_or_else(|error| panic!("{error}"));
         entry.update(options, false, false);
-        if entry.fiber.lock().unwrap().is_none()
+        if entry.fiber.lock().is_none()
             && !entry.disabled()
-            && entry.options.lock().unwrap().disabled != Some(true)
+            && entry.options.lock().disabled != Some(true)
         {
             entry.init_task.store(true, Ordering::Release);
             let this = entry;
@@ -695,7 +687,6 @@ impl EntryTree {
                     entry
                         .fiber
                         .lock()
-                        .unwrap()
                         .as_ref()
                         .filter(|fiber| fiber.inertia_active())
                         .cloned()
@@ -1067,10 +1058,10 @@ impl Entry {
     /// serialized with init via the lifecycle lock, so a pending init task
     /// never starts a fiber on a removed entry.
     pub(crate) fn detach_and_clear_fiber(&self) -> Option<Arc<Fiber>> {
-        let _guard = self.lifecycle.lock().unwrap();
+        let _guard = self.lifecycle.lock();
         self.detached.store(true, Ordering::Release);
-        let fiber = self.fiber.lock().unwrap().clone();
-        *self.fiber.lock().unwrap() = None;
+        let fiber = self.fiber.lock().clone();
+        *self.fiber.lock() = None;
         fiber
     }
 
@@ -1078,10 +1069,10 @@ impl Entry {
     /// (mirrors `Inject.resolve(entry.options.inject, fiber.inject)`; the
     /// entry's declaration wins on conflicts).
     pub(crate) fn merge_inject_into(&self, fiber: &Arc<Fiber>) {
-        let Some(names) = self.options.lock().unwrap().inject.clone() else {
+        let Some(names) = self.options.lock().inject.clone() else {
             return;
         };
-        let mut inject = fiber.inject.lock().unwrap();
+        let mut inject = fiber.inject.lock();
         for name in names {
             inject.insert(name, None);
         }
@@ -1093,21 +1084,9 @@ impl Entry {
     /// single atomic snapshot store ([`Context::apply_overlay`]), so readers
     /// never observe a half-applied overlay reconfiguration.
     fn apply_overlay_layers(&self) {
-        let isolate = self
-            .options
-            .lock()
-            .unwrap()
-            .isolate
-            .clone()
-            .unwrap_or_default();
-        let id = self.options.lock().unwrap().id.clone();
-        let intercept = self
-            .options
-            .lock()
-            .unwrap()
-            .intercept
-            .clone()
-            .unwrap_or_default();
+        let isolate = self.options.lock().isolate.clone().unwrap_or_default();
+        let id = self.options.lock().id.clone();
+        let intercept = self.options.lock().intercept.clone().unwrap_or_default();
         let mut isolate_map: HashMap<String, cordis_core::Label> = HashMap::new();
         for (name, value) in isolate {
             let label = match value {
@@ -1133,7 +1112,7 @@ impl Entry {
 
     /// The full id, prefixed by ancestor entry ids (mirrors `entry.id`).
     pub fn id(&self) -> String {
-        let id = self.options.lock().unwrap().id.clone();
+        let id = self.options.lock().id.clone();
         match self.ancestor_entry() {
             Some(ancestor) => format!("{}{}{}", ancestor.id(), EntryTree::SEP, id),
             None => id,
@@ -1148,15 +1127,15 @@ impl Entry {
 
     /// Whether the entry (or an ancestor) is disabled (mirrors `entry.disabled`).
     pub fn disabled(&self) -> bool {
-        if self.options.lock().unwrap().group == Some(true) {
+        if self.options.lock().group == Some(true) {
             return false;
         }
-        if self.options.lock().unwrap().disabled == Some(true) {
+        if self.options.lock().disabled == Some(true) {
             return true;
         }
         let mut entry = self.ancestor_entry();
         while let Some(current) = entry {
-            if current.options.lock().unwrap().disabled == Some(true) {
+            if current.options.lock().disabled == Some(true) {
                 return true;
             }
             entry = current.ancestor_entry();
@@ -1171,9 +1150,9 @@ impl Entry {
         create: bool,
         clear_missing: bool,
     ) {
-        let legacy = self.options.lock().unwrap().clone();
+        let legacy = self.options.lock().clone();
         {
-            let mut current = self.options.lock().unwrap();
+            let mut current = self.options.lock();
             if create {
                 *current = options.into_options(current.id.clone(), current.name.clone());
             } else if clear_missing {
@@ -1185,30 +1164,24 @@ impl Entry {
 
         // Groups are always "enabled" per `disabled()`, but explicitly
         // disabling a group entry still stops its subtree.
-        let group_disabled = self.options.lock().unwrap().group == Some(true)
-            && self.options.lock().unwrap().disabled == Some(true);
+        let group_disabled =
+            self.options.lock().group == Some(true) && self.options.lock().disabled == Some(true);
         if group_disabled || self.disabled() {
-            let fiber = self.fiber.lock().unwrap().clone();
+            let fiber = self.fiber.lock().clone();
             if let Some(fiber) = fiber {
                 self.tree.spawn_dispose(fiber);
             }
-            *self.fiber.lock().unwrap() = None;
+            *self.fiber.lock() = None;
             return;
         }
 
-        let changed = self.options.lock().unwrap().diff(&legacy);
+        let changed = self.options.lock().diff(&legacy);
         if changed
             .iter()
             .any(|key| *key == "isolate" || *key == "intercept")
         {
             let old_isolate = legacy.isolate.clone().unwrap_or_default();
-            let new_isolate = self
-                .options
-                .lock()
-                .unwrap()
-                .isolate
-                .clone()
-                .unwrap_or_default();
+            let new_isolate = self.options.lock().isolate.clone().unwrap_or_default();
             let changed_names: Vec<String> = new_isolate
                 .keys()
                 .chain(old_isolate.keys())
@@ -1226,8 +1199,8 @@ impl Entry {
                 })
                 .collect();
             self.apply_overlay_layers();
-            let fiber = self.fiber.lock().unwrap().clone();
-            let is_group = self.options.lock().unwrap().group == Some(true);
+            let fiber = self.fiber.lock().clone();
+            let is_group = self.options.lock().group == Some(true);
             if is_group
                 && let Some(fiber) = &fiber
                 && fiber.uid().is_some()
@@ -1261,7 +1234,7 @@ impl Entry {
             return;
         }
 
-        let has_fiber = self.fiber.lock().unwrap().is_some();
+        let has_fiber = self.fiber.lock().is_some();
         if has_fiber {
             if changed.is_empty() {
                 return;
@@ -1274,7 +1247,7 @@ impl Entry {
     fn patch_context(&self) {
         // Clone out of the lock first: the config resolution below must not
         // run while the fiber guard is held (re-entry would self-deadlock).
-        let fiber = self.fiber.lock().unwrap().clone();
+        let fiber = self.fiber.lock().clone();
         if let Some(fiber) = fiber {
             let config = self.resolve_applied_config();
 
@@ -1286,7 +1259,7 @@ impl Entry {
     /// TS `_resolveConfig(this.fiber.runtime!.callback)`), falling back to the
     /// raw config when the plugin cannot be re-imported.
     fn resolve_applied_config(&self) -> Option<Arc<dyn Any + Send + Sync>> {
-        let name = self.options.lock().unwrap().name.clone();
+        let name = self.options.lock().name.clone();
 
         match self.tree.import(&name) {
             Ok(plugin) => match self.resolve_config_value(&plugin) {
@@ -1313,7 +1286,7 @@ impl Entry {
         }
         // Non-group plugins: evaluate `!expr` in the config (mirrors the TS
         // `_resolveConfig` interpolation).
-        let Some(config) = self.options.lock().unwrap().config.clone() else {
+        let Some(config) = self.options.lock().config.clone() else {
             return Ok(None);
         };
         let Some(loader) = self.tree.ctx.get::<crate::Loader>() else {
@@ -1327,7 +1300,6 @@ impl Entry {
     fn raw_config(&self) -> Option<Arc<dyn Any + Send + Sync>> {
         self.options
             .lock()
-            .unwrap()
             .config
             .clone()
             .map(|value| Arc::new(value) as Arc<dyn Any + Send + Sync>)
@@ -1348,14 +1320,14 @@ impl Entry {
     pub async fn reload(self: &Arc<Self>) -> Result<(), String> {
         // Clear the fiber first so the loader's self-dispose hook does not
         // mistake this intentional reload for a plugin self-dispose.
-        let fiber = self.fiber.lock().unwrap().clone();
-        *self.fiber.lock().unwrap() = None;
+        let fiber = self.fiber.lock().clone();
+        *self.fiber.lock() = None;
         if let Some(fiber) = fiber {
             let _ = tokio::task::spawn_local(fiber.dispose()).await;
         }
         self.init_task.store(false, Ordering::Release);
         self.init().await;
-        match self.fiber.lock().unwrap().clone() {
+        match self.fiber.lock().clone() {
             Some(fiber) if fiber.state() == cordis_core::FiberState::Failed => {
                 Err(format!("entry {} failed to reload", self.id()))
             }
@@ -1398,14 +1370,14 @@ impl Entry {
     /// ends up with a running fiber. The returned fiber is awaited by the
     /// caller outside the lock.
     fn prepare_fiber(self: &Arc<Self>) -> Option<Arc<Fiber>> {
-        let _guard = self.lifecycle.lock().unwrap();
+        let _guard = self.lifecycle.lock();
         if self.disabled() || self.detached.load(Ordering::Acquire) {
             return None;
         }
         // The plugin is always resolved by `options.name` (mirrors the TS
         // `entry._init`, which imports `this.options.name`). `group: true`
         // only carries the lifecycle semantics of being a group container.
-        let plugin = match self.tree.import(&self.options.lock().unwrap().name) {
+        let plugin = match self.tree.import(&self.options.lock().name) {
             Ok(plugin) => plugin,
             Err(error) => {
                 self.ctx.logger().error(error);
@@ -1426,7 +1398,7 @@ impl Entry {
         // held).
         let ctx = self.ctx.clone();
         let fiber = ctx.registry_plugin(&plugin, config);
-        *self.fiber.lock().unwrap() = Some(fiber.clone());
+        *self.fiber.lock() = Some(fiber.clone());
         if let Some(loader) = ctx.get::<crate::Loader>() {
             loader.show_log("apply", self);
         }
@@ -1437,13 +1409,13 @@ impl Entry {
     pub fn get_outer_stack(&self) -> Vec<String> {
         let mut result = Vec::new();
         let mut entry: Option<Arc<Self>> = self.ancestor_entry();
-        let mut own_id = self.options.lock().unwrap().id.clone();
+        let mut own_id = self.options.lock().id.clone();
         loop {
             let base = "cordis";
             result.push(format!("    at {base}#{own_id}"));
             match entry {
                 Some(current) => {
-                    own_id = current.options.lock().unwrap().id.clone();
+                    own_id = current.options.lock().id.clone();
                     entry = current.ancestor_entry();
                 }
                 None => break,
@@ -1457,7 +1429,7 @@ impl std::fmt::Debug for Entry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Entry")
             .field("id", &self.id())
-            .field("name", &self.options.lock().unwrap().name)
+            .field("name", &self.options.lock().name)
             .field("disabled", &self.disabled())
             .finish()
     }

@@ -13,9 +13,10 @@
 //! unloads and dropping a plugin with pending tasks would otherwise call
 //! into unmapped code.
 
+use parking_lot::Mutex;
 use std::cell::Cell;
 use std::ffi::c_void;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use cordis_sdk::{BoxedFuture, RcWaker, WakerData};
@@ -46,7 +47,7 @@ impl HostRuntime {
 
     /// Cancels and drops every pending task (plugin instance disposed).
     pub fn cancel_all(&mut self) {
-        let tasks = std::mem::take(&mut *self.tasks.lock().unwrap());
+        let tasks = std::mem::take(&mut *self.tasks.lock());
         for task in tasks {
             task.abort();
         }
@@ -74,7 +75,7 @@ pub unsafe extern "C" fn host_spawn(data: *mut c_void, future: *mut c_void) {
         _library: runtime.library.clone(),
     };
     let handle = tokio::task::spawn_local(task);
-    runtime.tasks.lock().unwrap().push(handle);
+    runtime.tasks.lock().push(handle);
 }
 
 /// A host task: polls a plugin boxed future until it completes.

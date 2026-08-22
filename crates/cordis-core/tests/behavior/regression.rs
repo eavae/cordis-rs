@@ -1,8 +1,8 @@
 //! Core integration regression: fiber × events × registry × logger
 //! interacting in one scenario.
 
+use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{
@@ -39,9 +39,7 @@ async fn core_integration_scenario() {
                         formatters: None,
                         handler: {
                             let logs = logs.clone();
-                            Arc::new(move |message| {
-                                logs.lock().unwrap().push(message.args[0].inspect())
-                            })
+                            Arc::new(move |message| logs.lock().push(message.args[0].inspect()))
                         },
                     }))
                     .unwrap(),
@@ -123,11 +121,10 @@ async fn core_integration_scenario() {
             );
             assert!(
                 logs.lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("counter incremented")),
                 "{:?}",
-                logs.lock().unwrap()
+                logs.lock()
             );
 
             // Disposing the provider unloads the consumer and its disposer.

@@ -1,8 +1,8 @@
 //! Ported cases from `packages/core/tests/plugin.spec.ts`.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{
@@ -30,7 +30,7 @@ async fn apply_functional_plugin() {
                 let calls = calls.clone();
                 Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                     let options = config.downcast_ref::<Options>().expect("config").foo;
-                    calls.lock().unwrap().push(options);
+                    calls.lock().push(options);
                     Effect::None
                 })
             };
@@ -44,7 +44,7 @@ async fn apply_functional_plugin() {
                 Some(Arc::new(Options { foo: "bar" })),
             );
             fiber.wait().await.unwrap();
-            assert_eq!(calls.lock().unwrap().as_slice(), &["bar"]);
+            assert_eq!(calls.lock().as_slice(), &["bar"]);
         })
         .await;
 }
@@ -66,14 +66,14 @@ async fn apply_object_plugin() {
                     let calls = calls.clone();
                     Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                         let bar = config.downcast_ref::<BarOptions>().expect("config").bar;
-                        calls.lock().unwrap().push(bar);
+                        calls.lock().push(bar);
                         Effect::None
                     })
                 },
             };
             let fiber = root.plugin(&plugin, Some(Arc::new(BarOptions { bar: "foo" })));
             fiber.wait().await.unwrap();
-            assert_eq!(calls.lock().unwrap().as_slice(), &["foo"]);
+            assert_eq!(calls.lock().as_slice(), &["foo"]);
         })
         .await;
 }

@@ -4,9 +4,9 @@
 //! schedules fiber state-machine tasks on a `LocalSet` (`spawn_local`), so
 //! these tests run inside one and observe the same state transitions.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{
@@ -308,7 +308,7 @@ async fn fiber_update_config_on_wrapped_fiber() {
                 let calls = calls.clone();
                 Arc::new(move |_ctx: &Context, config: &Arc<dyn Any + Send + Sync>| {
                     let msg = config.downcast_ref::<Msg>().expect("config").msg;
-                    calls.lock().unwrap().push(msg);
+                    calls.lock().push(msg);
                     Effect::None
                 })
             };
@@ -322,22 +322,22 @@ async fn fiber_update_config_on_wrapped_fiber() {
                 Some(Arc::new(Msg { msg: "hello" })),
             );
             fiber.wait().await.unwrap();
-            assert_eq!(calls.lock().unwrap().len(), 1);
-            assert_eq!(calls.lock().unwrap()[0], "hello");
+            assert_eq!(calls.lock().len(), 1);
+            assert_eq!(calls.lock()[0], "hello");
 
             fiber
                 .update(Some(Arc::new(Msg { msg: "world" })))
                 .await
                 .unwrap();
-            assert_eq!(calls.lock().unwrap().len(), 2);
-            assert_eq!(calls.lock().unwrap()[1], "world");
+            assert_eq!(calls.lock().len(), 2);
+            assert_eq!(calls.lock()[1], "world");
 
             fiber
                 .update(Some(Arc::new(Msg { msg: "!!!" })))
                 .await
                 .unwrap();
-            assert_eq!(calls.lock().unwrap().len(), 3);
-            assert_eq!(calls.lock().unwrap()[2], "!!!");
+            assert_eq!(calls.lock().len(), 3);
+            assert_eq!(calls.lock()[2], "!!!");
         })
         .await;
 }
@@ -647,7 +647,7 @@ async fn fiber_update_config_while_injected_service_reloads() {
                         .expect("config")
                         .mode;
                     let value = ctx.get::<Provider>().expect("provider").value;
-                    applied.lock().unwrap().push((value, mode));
+                    applied.lock().push((value, mode));
                     Effect::None
                 })
             };
@@ -661,7 +661,7 @@ async fn fiber_update_config_while_injected_service_reloads() {
                 Some(Arc::new(ConsumerConfig { mode: "old" })),
             );
             consumer.wait().await.unwrap();
-            assert_eq!(applied.lock().unwrap().as_slice(), &[(1, "old")]);
+            assert_eq!(applied.lock().as_slice(), &[(1, "old")]);
 
             let provider_update = provider.update(Some(Arc::new(ProviderConfig { value: 2 })));
             let consumer_update = consumer.update(Some(Arc::new(ConsumerConfig { mode: "new" })));
@@ -669,10 +669,7 @@ async fn fiber_update_config_while_injected_service_reloads() {
             provider_result.unwrap();
             consumer_result.unwrap();
 
-            assert_eq!(
-                applied.lock().unwrap().as_slice(),
-                &[(1, "old"), (2, "new")]
-            );
+            assert_eq!(applied.lock().as_slice(), &[(1, "old"), (2, "new")]);
             assert_eq!(consumer.state(), FiberState::Active);
         })
         .await;

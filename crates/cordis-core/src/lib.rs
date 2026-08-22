@@ -5,6 +5,7 @@
 //! single-threaded tokio runtime.
 
 pub mod context;
+pub mod deadlock;
 pub mod error;
 pub mod events;
 pub mod fiber;

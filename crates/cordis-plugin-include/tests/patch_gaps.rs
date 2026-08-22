@@ -1,10 +1,10 @@
 //! Include patch gap regressions (8 cases).
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use cordis_core::{Context, Effect, LoggerLevel, SimpleExporter};
@@ -70,7 +70,7 @@ fn entry_by_id(loader: &Loader, id: &str) -> Arc<cordis_loader::Entry> {
         .tree_handle()
         .entries()
         .into_iter()
-        .find(|entry| entry.options.lock().unwrap().id == id)
+        .find(|entry| entry.options.lock().id == id)
         .unwrap_or_else(|| panic!("entry {id} not found"))
 }
 
@@ -128,9 +128,7 @@ async fn mount_and_capture(
                 formatters: None,
                 handler: {
                     let captured = captured.clone();
-                    Arc::new(move |message| {
-                        captured.lock().unwrap().push(message.args[0].inspect())
-                    })
+                    Arc::new(move |message| captured.lock().push(message.args[0].inspect()))
                 },
             }))
             .unwrap(),
@@ -178,7 +176,7 @@ async fn patch_overrides_group_inject_intercept_isolate() {
             )
             .await;
 
-            let options = entry_by_id(&loader, "1").options.lock().unwrap().clone();
+            let options = entry_by_id(&loader, "1").options.lock().clone();
             assert_eq!(options.group, Some(true));
             assert_eq!(options.inject.as_deref(), Some(&["foo".to_string()][..]));
             assert_eq!(
@@ -216,7 +214,7 @@ async fn patch_writes_arbitrary_extra_key_and_round_trips() {
             )
             .await;
 
-            let options = entry_by_id(&loader, "1").options.lock().unwrap().clone();
+            let options = entry_by_id(&loader, "1").options.lock().clone();
             assert_eq!(
                 options.extra.get("custom"),
                 Some(&Value::String("x".to_string()))
@@ -314,7 +312,7 @@ async fn patch_inserts_into_nested_subgroup() {
                     .tree_handle()
                     .entries()
                     .iter()
-                    .any(|entry| entry.options.lock().unwrap().id == "added"),
+                    .any(|entry| entry.options.lock().id == "added"),
                 "inserted entry missing"
             );
             assert_eq!(greeting(&root).as_deref(), Some("before"));
@@ -344,7 +342,7 @@ async fn patch_null_clears_disabled_and_config() {
             )
             .await;
 
-            let options = entry_by_id(&loader, "1").options.lock().unwrap().clone();
+            let options = entry_by_id(&loader, "1").options.lock().clone();
             assert_eq!(options.disabled, None);
             assert_eq!(options.config, None);
             // Cleared config falls back to the plugin default.
@@ -397,7 +395,7 @@ async fn patch_after_root_insert_matches_js_semantics() {
             .await;
 
             assert_eq!(greeting(&root).as_deref(), Some("updated"));
-            let inserted = entry_by_id(&loader, "new1").options.lock().unwrap().clone();
+            let inserted = entry_by_id(&loader, "new1").options.lock().clone();
             assert_eq!(
                 inserted.config,
                 Some(config_value("original")),
@@ -431,11 +429,10 @@ async fn patch_name_mismatch_warns_and_skips() {
             assert!(
                 captured
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("name mismatch")),
                 "{:?}",
-                captured.lock().unwrap()
+                captured.lock()
             );
             assert_eq!(greeting(&root).as_deref(), Some("hello"), "patch skipped");
             drop(root);
@@ -466,11 +463,10 @@ async fn patch_matching_name_applies() {
             assert!(
                 !captured
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("name mismatch")),
                 "{:?}",
-                captured.lock().unwrap()
+                captured.lock()
             );
             assert_eq!(greeting(&root), None, "matching-name patch must apply");
             drop(root);
@@ -500,11 +496,10 @@ async fn patch_nonexistent_id_warns() {
             assert!(
                 captured
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("entry nope not found")),
                 "{:?}",
-                captured.lock().unwrap()
+                captured.lock()
             );
             assert_eq!(greeting(&root).as_deref(), Some("hello"));
             drop(root);
@@ -544,19 +539,17 @@ async fn patch_insert_into_non_group_warns() {
             assert!(
                 captured
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("is not a group")),
                 "{:?}",
-                captured.lock().unwrap()
+                captured.lock()
             );
             assert!(
-                !loader.tree_handle().entries().iter().any(|entry| entry
-                    .options
-                    .lock()
-                    .unwrap()
-                    .id
-                    == "extra"),
+                !loader
+                    .tree_handle()
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.options.lock().id == "extra"),
                 "inserted entry must not be mounted"
             );
             assert_eq!(greeting(&root).as_deref(), Some("hello"));

@@ -1,8 +1,9 @@
 //! The Loader service.
 
+use parking_lot::Mutex;
 use std::any::Any;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use cordis_core::{
     ApplyFn, Context, Effect, EventOptions, Fiber, Plugin, Service, event_callback,
@@ -93,14 +94,14 @@ impl Loader {
     pub fn eval_env(&self) -> EvalEnv {
         EvalEnv {
             platform: platform_name(),
-            base_url: self.base_url.lock().unwrap().clone(),
+            base_url: self.base_url.lock().clone(),
             env_vars: std::env::vars().collect(),
         }
     }
 
     /// Overrides the base url used by `!expr` `base_url()`.
     pub fn set_base_url(&self, base_url: impl Into<String>) {
-        *self.base_url.lock().unwrap() = base_url.into();
+        *self.base_url.lock() = base_url.into();
     }
 
     /// Returns the underlying tree handle.
@@ -130,9 +131,9 @@ impl Loader {
                                 && let Ok(config) =
                                     args[0].clone().downcast::<serde_yaml_ng::Value>()
                             {
-                                let mut options = entry.options.lock().unwrap().clone();
+                                let mut options = entry.options.lock().clone();
                                 options.config = Some((*config).clone());
-                                *entry.options.lock().unwrap() = options;
+                                *entry.options.lock() = options;
                                 entry.tree.write();
                             }
                             let _ = next.next().await;
@@ -209,7 +210,7 @@ impl Loader {
                         if entry.disabled() {
                             return Ok(None);
                         }
-                        entry.options.lock().unwrap().disabled = Some(true);
+                        entry.options.lock().disabled = Some(true);
                         entry.tree.write();
                         Ok(None)
                     }),
@@ -224,7 +225,6 @@ impl Loader {
             entry
                 .fiber
                 .lock()
-                .unwrap()
                 .as_ref()
                 .is_some_and(|candidate| Arc::ptr_eq(candidate, fiber))
         })
@@ -244,7 +244,7 @@ impl Loader {
     /// `fiber.parent.fiber?.entry === fiber.entry`: child fibers under the
     /// same entry must not write back to the entry's config).
     fn fiber_is_root_of(&self, entry: &Arc<Entry>, fiber: &Arc<Fiber>) -> bool {
-        let Some(root) = entry.fiber.lock().unwrap().clone() else {
+        let Some(root) = entry.fiber.lock().clone() else {
             return false;
         };
         fiber
@@ -291,11 +291,11 @@ impl Loader {
                                 let entries: Vec<Arc<Entry>> =
                                     subgroup.entries.iter().cloned().collect();
                                 for entry in entries {
-                                    let fiber = entry.fiber.lock().unwrap().clone();
+                                    let fiber = entry.fiber.lock().clone();
                                     if let Some(fiber) = fiber {
                                         tokio::task::spawn_local(fiber.dispose());
                                     }
-                                    *entry.fiber.lock().unwrap() = None;
+                                    *entry.fiber.lock() = None;
                                 }
                             }))
                         },
@@ -397,7 +397,7 @@ impl Loader {
                 to_init.extend(
                     next_entries
                         .iter()
-                        .filter(|entry| entry.fiber.lock().unwrap().is_none())
+                        .filter(|entry| entry.fiber.lock().is_none())
                         .cloned(),
                 );
                 Arc::new(TreeState {
@@ -414,7 +414,7 @@ impl Loader {
             entry.update(options, false, true);
         }
         for entry in &created {
-            let options = PartialEntryOptions::from_options(&entry.options.lock().unwrap().clone());
+            let options = PartialEntryOptions::from_options(&entry.options.lock().clone());
             entry.update(options, true, false);
         }
         for entry in &removed {
@@ -436,10 +436,10 @@ impl Loader {
             .iter()
             .find(|entry| {
                 if !options.id.is_empty() {
-                    entry.options.lock().unwrap().id == options.id
+                    entry.options.lock().id == options.id
                 } else {
-                    entry.options.lock().unwrap().name == options.name
-                        && entry.options.lock().unwrap().group == options.group
+                    entry.options.lock().name == options.name
+                        && entry.options.lock().group == options.group
                 }
             })
             .cloned()
@@ -535,7 +535,7 @@ impl Loader {
             .entries()
             .into_iter()
             .find(|entry| entry.id() == id)
-            .and_then(|entry| entry.fiber.lock().unwrap().clone())
+            .and_then(|entry| entry.fiber.lock().clone())
             .expect("entry fiber")
     }
 
@@ -544,7 +544,7 @@ impl Loader {
         self.tree
             .entries()
             .iter()
-            .map(|entry| entry.options.lock().unwrap().clone())
+            .map(|entry| entry.options.lock().clone())
             .collect()
     }
 
@@ -554,7 +554,6 @@ impl Loader {
             let matches = entry
                 .fiber
                 .lock()
-                .unwrap()
                 .as_ref()
                 .is_some_and(|candidate| Arc::ptr_eq(candidate, fiber));
             if matches { Some(entry.id()) } else { None }
@@ -573,14 +572,14 @@ impl Loader {
 
     /// Logs an apply/reload message when logs are enabled.
     pub fn show_log(&self, r#type: &str, entry: &Entry) {
-        let is_group = entry.options.lock().unwrap().group == Some(true);
+        let is_group = entry.options.lock().group == Some(true);
         if is_group || !self.enable_logs {
             return;
         }
-        self.ctx.logger().named("loader").info(format!(
-            "{type} plugin {}",
-            entry.options.lock().unwrap().name
-        ));
+        self.ctx
+            .logger()
+            .named("loader")
+            .info(format!("{type} plugin {}", entry.options.lock().name));
     }
 }
 

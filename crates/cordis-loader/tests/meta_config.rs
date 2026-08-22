@@ -1,9 +1,9 @@
 //! `.so` plugin metadata, config validation and the apply bridge.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use cordis_core::{Context, Effect, FiberState};
 use cordis_loader::{EntryOptions, EvalEnv, Loader, MinijinjaEvaluator, SoPlugin, evaluate_config};
@@ -27,7 +27,7 @@ extern "C" fn log_message(message: *const std::ffi::c_char) {
     let text = unsafe { std::ffi::CStr::from_ptr(message) }
         .to_string_lossy()
         .to_string();
-    LOGGED.lock().unwrap().push(text);
+    LOGGED.lock().push(text);
 }
 
 fn opts(name: &str, config: serde_yaml_ng::Value) -> EntryOptions {
@@ -49,7 +49,7 @@ fn opts(name: &str, config: serde_yaml_ng::Value) -> EntryOptions {
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn meta_config_apply_and_validation() {
-    let _guard = FIXTURE_LOCK.lock().unwrap();
+    let _guard = FIXTURE_LOCK.lock();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -72,7 +72,7 @@ async fn meta_config_apply_and_validation() {
             let name = loader.register_so_plugin(&plugin).expect("register");
             assert_eq!(name, "cordis-meta");
 
-            LOGGED.lock().unwrap().clear();
+            LOGGED.lock().clear();
             let tree = loader.tree_handle();
             let entry = tree.create(
                 opts(
@@ -83,26 +83,24 @@ async fn meta_config_apply_and_validation() {
                 0,
             );
             tree.await_tree().await;
-            let fiber = entry.fiber.lock().unwrap().clone().expect("fiber created");
+            let fiber = entry.fiber.lock().clone().expect("fiber created");
             assert_eq!(fiber.state(), FiberState::Active);
             assert!(
-                fiber.inject.lock().unwrap().contains_key("logger"),
+                fiber.inject.lock().contains_key("logger"),
                 "metadata inject must flow into the fiber"
             );
             assert!(
                 LOGGED
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("meta applied with value 7")),
                 "apply must run through the FFI bridge: {:?}",
-                LOGGED.lock().unwrap()
+                LOGGED.lock()
             );
             // Spawn: the apply-spawned task is driven by the host runtime.
             for _ in 0..500 {
                 if LOGGED
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("meta spawned task ran (config value 7)"))
                 {
@@ -113,17 +111,16 @@ async fn meta_config_apply_and_validation() {
             assert!(
                 LOGGED
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("meta spawned task ran")),
                 "apply-spawned task must run on the host runtime: {:?}",
-                LOGGED.lock().unwrap()
+                LOGGED.lock()
             );
 
             // `!expr` configs are evaluated before they reach the `.so` apply.
             // SAFETY: the test is single-threaded (current_thread runtime).
             unsafe { std::env::set_var("CORDIS_META_EXPR", "11") };
-            LOGGED.lock().unwrap().clear();
+            LOGGED.lock().clear();
             let raw = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(
                 "value: !expr env(\"CORDIS_META_EXPR\") or 1",
             )
@@ -142,25 +139,19 @@ async fn meta_config_apply_and_validation() {
             .expect("evaluable");
             let expr_entry = tree.create(opts("cordis-meta", evaluated), None, 0);
             tree.await_tree().await;
-            let expr_fiber = expr_entry
-                .fiber
-                .lock()
-                .unwrap()
-                .clone()
-                .expect("fiber created");
+            let expr_fiber = expr_entry.fiber.lock().clone().expect("fiber created");
             assert_eq!(expr_fiber.state(), FiberState::Active);
             assert!(
                 LOGGED
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("meta applied with value 11")),
                 "!expr value must reach apply: {:?}",
-                LOGGED.lock().unwrap()
+                LOGGED.lock()
             );
 
             // Invalid configs are rejected by the plugin's validator.
-            LOGGED.lock().unwrap().clear();
+            LOGGED.lock().clear();
             let bad = tree.create(
                 opts(
                     "cordis-meta",
@@ -170,16 +161,15 @@ async fn meta_config_apply_and_validation() {
                 0,
             );
             tree.await_tree().await;
-            let bad_fiber = bad.fiber.lock().unwrap().clone().expect("fiber created");
+            let bad_fiber = bad.fiber.lock().clone().expect("fiber created");
             assert_eq!(bad_fiber.state(), FiberState::Failed);
             assert!(
                 !LOGGED
                     .lock()
-                    .unwrap()
                     .iter()
                     .any(|line| line.contains("meta applied")),
                 "rejected config must not reach apply: {:?}",
-                LOGGED.lock().unwrap()
+                LOGGED.lock()
             );
         })
         .await;
@@ -190,7 +180,7 @@ async fn meta_config_apply_and_validation() {
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn same_plugin_two_entries_independent() {
-    let _guard = FIXTURE_LOCK.lock().unwrap();
+    let _guard = FIXTURE_LOCK.lock();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -201,7 +191,7 @@ async fn same_plugin_two_entries_independent() {
             assert!(!handle.is_null());
             loader.register_so_plugin(&plugin).expect("register");
 
-            LOGGED.lock().unwrap().clear();
+            LOGGED.lock().clear();
             let tree = loader.tree_handle();
             let first = tree.create(
                 opts(
@@ -221,15 +211,15 @@ async fn same_plugin_two_entries_independent() {
             );
             tree.await_tree().await;
 
-            let f1 = first.fiber.lock().unwrap().clone().expect("fiber");
-            let f2 = second.fiber.lock().unwrap().clone().expect("fiber");
+            let f1 = first.fiber.lock().clone().expect("fiber");
+            let f2 = second.fiber.lock().clone().expect("fiber");
             assert_eq!(f1.state(), FiberState::Active);
             assert_eq!(f2.state(), FiberState::Active);
             assert!(
                 !Arc::ptr_eq(&f1, &f2),
                 "two entries must have independent fibers"
             );
-            let logged = LOGGED.lock().unwrap().clone();
+            let logged = LOGGED.lock().clone();
             assert!(
                 logged
                     .iter()

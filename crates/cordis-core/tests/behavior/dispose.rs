@@ -1,9 +1,9 @@
 //! Ported cases from `packages/core/tests/dispose.spec.ts`.
 
+use parking_lot::Mutex;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context as TaskContext, Poll};
 
@@ -27,11 +27,11 @@ impl Seq {
     }
 
     fn push(&self, value: i32) {
-        self.values.lock().unwrap().push(value);
+        self.values.lock().push(value);
     }
 
     fn get(&self) -> Vec<i32> {
-        self.values.lock().unwrap().clone()
+        self.values.lock().clone()
     }
 }
 

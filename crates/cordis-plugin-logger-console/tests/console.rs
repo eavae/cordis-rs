@@ -1,7 +1,7 @@
 //! Logger-console plugin.
 
+use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use cordis_core::{LogValue, LoggerLevel, LoggerType, Message};
 use cordis_plugin_logger_console::{Align, ConsoleConfig, ConsoleExporter, LabelStyle};
@@ -21,7 +21,7 @@ fn exporter(config: ConsoleConfig, lines: Arc<Mutex<Vec<String>>>) -> Arc<Consol
     let lines2 = lines;
     let exporter = ConsoleExporter::new(
         config,
-        Arc::new(move |line| lines2.lock().unwrap().push(line.to_string())),
+        Arc::new(move |line| lines2.lock().push(line.to_string())),
     );
     // Reset the diff baseline for deterministic output.
     let base = Message::now_millis();
@@ -90,7 +90,6 @@ fn custom_formatter_and_escaped_percent() {
     );
     exp.formatters
         .lock()
-        .unwrap()
         .insert('x', Arc::new(|_| "custom".to_string()));
     let rendered = exp.render(&message(
         LoggerType::Info,
@@ -147,10 +146,10 @@ fn export_filters_by_level() {
             )])),
             ..Default::default()
         },
-        Arc::new(move |line| lines2.lock().unwrap().push(line.to_string())),
+        Arc::new(move |line| lines2.lock().push(line.to_string())),
     );
     root.logger().exporter(exporter).unwrap();
     root.logger().named("test").debug("hidden");
     root.logger().named("test").info("shown");
-    assert_eq!(lines.lock().unwrap().as_slice(), &["[I] test shown"]);
+    assert_eq!(lines.lock().as_slice(), &["[I] test shown"]);
 }

@@ -1,7 +1,7 @@
 //! Timer plugin.
 
+use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -152,7 +152,7 @@ async fn throttle_first_immediate_then_delayed() {
                 &root,
                 {
                     let calls = calls.clone();
-                    Arc::new(move || calls.lock().unwrap().push(tokio::time::Instant::now()))
+                    Arc::new(move || calls.lock().push(tokio::time::Instant::now()))
                 },
                 TICK * 2,
                 false,
@@ -161,20 +161,14 @@ async fn throttle_first_immediate_then_delayed() {
             let start = tokio::time::Instant::now();
             throttled();
             tokio::task::yield_now().await;
-            assert_eq!(calls.lock().unwrap().len(), 1, "first call is immediate");
+            assert_eq!(calls.lock().len(), 1, "first call is immediate");
             throttled();
             throttled();
             tokio::task::yield_now().await;
-            assert_eq!(
-                calls.lock().unwrap().len(),
-                1,
-                "calls within the window are delayed"
-            );
+            assert_eq!(calls.lock().len(), 1, "calls within the window are delayed");
             advance_and_run(Duration::from_millis(TICK * 3)).await;
-            assert_eq!(calls.lock().unwrap().len(), 2, "one trailing call runs");
-            assert!(
-                calls.lock().unwrap()[1].duration_since(start) >= Duration::from_millis(TICK * 2)
-            );
+            assert_eq!(calls.lock().len(), 2, "one trailing call runs");
+            assert!(calls.lock()[1].duration_since(start) >= Duration::from_millis(TICK * 2));
         })
         .await;
 }

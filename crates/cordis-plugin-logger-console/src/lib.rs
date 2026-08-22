@@ -3,9 +3,10 @@
 //! Port of `@cordisjs/plugin-logger-console`: renders log messages in the
 //! console format.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
 use cordis_core::{
     LogFormatter, LoggerExporter, LoggerLevel, LoggerService, LoggerType, Message, format_message,
@@ -154,7 +155,7 @@ impl ConsoleExporter {
         // `LogFormatter` closures run inside `format_message`, and calling
         // them while holding the lock would self-deadlock if a formatter
         // touches the exporter again.
-        let formatters = self.formatters.lock().unwrap().clone();
+        let formatters = self.formatters.lock().clone();
         let formatted = format_message(message, self, &formatters);
         output.push_str(&formatted.replace('\n', &format!("\n{}", " ".repeat(indent))));
 
@@ -196,7 +197,7 @@ impl LoggerExporter for ConsoleExporter {
     }
 
     fn formatters(&self) -> Option<Arc<HashMap<char, LogFormatter>>> {
-        Some(Arc::new(self.formatters.lock().unwrap().clone()))
+        Some(Arc::new(self.formatters.lock().clone()))
     }
 
     fn export(&self, message: &Message) {

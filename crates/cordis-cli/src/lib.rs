@@ -247,13 +247,13 @@ pub async fn run(options: &CliOptions) -> anyhow::Result<()> {
         .entries()
         .into_iter()
         .filter_map(|entry| {
-            let fiber = entry.fiber.lock().unwrap().clone()?;
+            let fiber = entry.fiber.lock().clone()?;
             if fiber.state() == cordis_core::FiberState::Failed {
                 Some(format!(
                     "    at {base}#{id} (plugin {name})",
                     base = "cordis",
                     id = entry.id(),
-                    name = entry.options.lock().unwrap().name,
+                    name = entry.options.lock().name,
                 ))
             } else {
                 None

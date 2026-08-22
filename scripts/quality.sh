@@ -9,7 +9,7 @@ echo "== fmt =="
 cargo fmt --all --check
 
 echo "== clippy =="
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --features deadlock-detection -- -D warnings
 
 echo "== build fixtures =="
 # Build fixture cdylibs up front so the tests below never race nested
@@ -19,9 +19,9 @@ echo "== build fixtures =="
 cargo build -p cordis-fixture-hello -p cordis-fixture-bad-version -p cordis-fixture-not-a-plugin -p cordis-fixture-spawn -p cordis-fixture-meta -p cordis-fixture-context
 
 echo "== test =="
-cargo test --workspace
+cargo test --workspace --features deadlock-detection
 
 echo "== doc =="
-cargo doc --workspace --no-deps
+cargo doc --workspace --no-deps --features deadlock-detection
 
 echo "== all quality gates passed =="

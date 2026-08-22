@@ -1,9 +1,9 @@
 //! Ported cases from `packages/core/tests/logger.spec.ts` plus the
 //! formatting/color behaviors of `logger.ts`.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use cordis_core::{
     COLOR_16, COLOR_256, Context, Effect, LogValue, LoggerIntercept, LoggerLevel, LoggerService,
@@ -24,7 +24,7 @@ fn setup() -> (Context, Arc<Mutex<Vec<Message>>>) {
         formatters: None,
         handler: {
             let captured = captured.clone();
-            Arc::new(move |message| captured.lock().unwrap().push(message.clone()))
+            Arc::new(move |message| captured.lock().push(message.clone()))
         },
     };
     ctx.logger().exporter(Arc::new(exporter)).unwrap();
@@ -121,12 +121,12 @@ async fn disposes_the_exporter_that_registered_the_disposer() {
 
     dispose_first.dispose().await.unwrap();
     logger.info("test");
-    assert_eq!(first.lock().unwrap().len(), 0);
-    assert_eq!(second.lock().unwrap().len(), 1);
+    assert_eq!(first.lock().len(), 0);
+    assert_eq!(second.lock().len(), 1);
 
     dispose_second.dispose().await.unwrap();
     logger.info("test");
-    assert_eq!(second.lock().unwrap().len(), 1);
+    assert_eq!(second.lock().len(), 1);
 }
 
 #[tokio::test]
@@ -136,7 +136,6 @@ async fn uses_fiber_name_when_called_outside_any_service() {
     assert_eq!(
         captured
             .lock()
-            .unwrap()
             .iter()
             .map(|message| message.name.clone())
             .collect::<Vec<_>>(),
@@ -151,7 +150,6 @@ async fn honours_explicit_name_argument() {
     assert_eq!(
         captured
             .lock()
-            .unwrap()
             .iter()
             .map(|message| message.name.clone())
             .collect::<Vec<_>>(),
@@ -173,7 +171,6 @@ async fn honours_intercept_name() {
     assert_eq!(
         captured
             .lock()
-            .unwrap()
             .iter()
             .map(|message| message.name.clone())
             .collect::<Vec<_>>(),
@@ -196,7 +193,6 @@ async fn uses_service_name_inside_service_method() {
             ctx.foo_service().expect("foo").action();
             let names: Vec<String> = captured
                 .lock()
-                .unwrap()
                 .iter()
                 .map(|message| message.name.clone())
                 .collect();
@@ -227,7 +223,6 @@ async fn lets_outer_caller_intercept_override_service_name() {
             intercepted.foo_service().expect("foo").action();
             let names: Vec<String> = captured
                 .lock()
-                .unwrap()
                 .iter()
                 .map(|message| message.name.clone())
                 .collect();
@@ -258,7 +253,6 @@ async fn uses_innermost_service_name_and_restores_outer() {
             ctx.nested_foo_service().expect("foo").action();
             let pairs: Vec<(String, String)> = captured
                 .lock()
-                .unwrap()
                 .iter()
                 .map(|message| (message.name.clone(), arg0(message)))
                 .collect();
@@ -297,7 +291,6 @@ async fn uses_service_name_in_apply() {
 
             let names: Vec<String> = captured
                 .lock()
-                .unwrap()
                 .iter()
                 .map(|message| message.name.clone())
                 .collect();
@@ -321,7 +314,6 @@ async fn intercept_overrides_explicit_name() {
     assert_eq!(
         captured
             .lock()
-            .unwrap()
             .iter()
             .map(|message| message.name.clone())
             .collect::<Vec<_>>(),
@@ -348,7 +340,7 @@ async fn formats_specifiers() {
             LogValue::Str("z".to_string()),
         ],
     );
-    let message = captured.lock().unwrap().last().unwrap().clone();
+    let message = captured.lock().last().unwrap().clone();
     let rendered = format_message(&message, &message_exporter(), &HashMap::new());
     assert_eq!(
         rendered,
@@ -375,7 +367,7 @@ async fn formats_error_first_argument_as_stack() {
         "oops",
         vec![LogValue::Error("Error: boom\n    at test".to_string())],
     );
-    let message = captured.lock().unwrap().last().unwrap().clone();
+    let message = captured.lock().last().unwrap().clone();
     let rendered = format_message(&message, &message_exporter(), &HashMap::new());
     assert!(rendered.contains("Error: boom"), "{rendered}");
 }
@@ -385,7 +377,7 @@ async fn formats_non_string_first_argument_as_object() {
     let (ctx, captured) = setup();
     let logger = ctx.logger();
     logger.log_args(LoggerType::Info, "", vec![LogValue::Num(1.0)]);
-    let message = captured.lock().unwrap().last().unwrap().clone();
+    let message = captured.lock().last().unwrap().clone();
     let rendered = format_message(&message, &message_exporter(), &HashMap::new());
     assert!(rendered.contains("1"), "{rendered}");
 }
@@ -427,7 +419,7 @@ async fn level_filtering() {
         formatters: None,
         handler: {
             let captured = captured.clone();
-            Arc::new(move |message| captured.lock().unwrap().push(message.clone()))
+            Arc::new(move |message| captured.lock().push(message.clone()))
         },
     };
     ctx.logger().exporter(Arc::new(exporter)).unwrap();
@@ -435,9 +427,9 @@ async fn level_filtering() {
     ctx.logger().debug("hidden");
     ctx.logger().info("shown");
     ctx.logger().error("oops");
-    assert_eq!(captured.lock().unwrap().len(), 2);
-    assert_eq!(arg0(&captured.lock().unwrap()[0]), "shown");
-    assert_eq!(arg0(&captured.lock().unwrap()[1]), "oops");
+    assert_eq!(captured.lock().len(), 2);
+    assert_eq!(arg0(&captured.lock()[0]), "shown");
+    assert_eq!(arg0(&captured.lock()[1]), "oops");
 }
 
 #[tokio::test]
