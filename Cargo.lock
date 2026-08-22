@@ -92,6 +92,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-ffi"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39cd9de47399986d5b216c6bef9434dfff1689ab61ba8d1e2720dc5fe5c84083"
+
+[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -274,6 +280,7 @@ version = "4.0.0-rc.8"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "async-ffi",
  "cordis-core",
  "cordis-fixture-builder",
  "cordis-sdk",
@@ -357,6 +364,7 @@ dependencies = [
 name = "cordis-sdk"
 version = "4.0.0-rc.8"
 dependencies = [
+ "async-ffi",
  "cordis-core",
  "cordis-fixture-builder",
  "cordis-macros",

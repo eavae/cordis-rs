@@ -4,30 +4,34 @@
 //! handles allocated by the plugin side, and allocation never crosses the
 //! boundary. The async bridge lets plugins hand boxed
 //! futures to the host runtime; the host polls and drops them via function
-//! pointers, so no future object or allocator crosses the boundary.
+//! pointers (`async_ffi::FfiFuture`), so no future object or allocator
+//! crosses the boundary. The waker the host hands into each poll is adapted
+//! by `async-ffi` into an FFI-safe borrowed context; ownership and
+//! refcounting stay inside the `std::task::Waker` on each side.
 
 use std::ffi::{CString, c_char};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context as TaskContext, Poll, RawWaker, RawWakerVTable, Waker};
+use std::task::{Context as TaskContext, Poll};
 
+use async_ffi::{FfiFuture, FutureExt};
 use tokio::sync::oneshot;
 
 /// The ABI version implemented by this SDK.
 ///
 /// v3 adds the Context bridge (`provide`/`get`/`on`/`emit`/
 /// `effect_disposer`) to the host vtable.
-pub const PLUGIN_API_VERSION: u32 = 3;
+/// v4 moves the async bridge to `async-ffi`: `spawn` hands the host an
+/// `FfiFuture<()>` instead of a hand-rolled boxed future with a shared
+/// refcounted waker cell.
+pub const PLUGIN_API_VERSION: u32 = 4;
 
-/// Polls a plugin-owned boxed future.
-pub type BoxedPoll = unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void) -> u8;
-
-/// Drops a plugin-owned boxed future.
-pub type BoxedDrop = unsafe extern "C" fn(*mut std::ffi::c_void);
-
-/// Spawns a plugin-owned boxed future on the host runtime.
-pub type HostSpawn = unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void);
+/// Spawns a plugin-owned future on the host runtime.
+///
+/// `future` is an `FfiFuture<()>` produced by the SDK's [`spawn`]; the host
+/// polls it as a normal tokio task and drops it (through async-ffi's plugin
+/// drop function) on completion or cancellation.
+pub type HostSpawn = unsafe extern "C" fn(*mut std::ffi::c_void, FfiFuture<()>);
 
 /// Validates a config payload (JSON string); 0 = valid, non-zero = invalid.
 pub type ValidateConfig = unsafe extern "C" fn(*const c_char) -> i32;
@@ -74,26 +78,12 @@ pub type HostEmit = unsafe extern "C" fn(*mut PluginHandle, *const c_char, *cons
 /// fiber unloads, in reverse registration order.
 pub type HostEffectDisposer = unsafe extern "C" fn(*mut PluginHandle, PluginDisposer);
 
-/// A future owned by the plugin, polled by the host.
-///
-/// `data` is an opaque pointer allocated on the plugin side; `poll` and
-/// `drop` are plugin functions the host calls back into.
-#[repr(C)]
-pub struct BoxedFuture {
-    /// Plugin-side allocation (the boxed future + completion state).
-    pub data: *mut std::ffi::c_void,
-    /// Polls the future; returns 1 on `Ready`, 0 on `Pending`.
-    pub poll: BoxedPoll,
-    /// Drops the plugin-side allocation.
-    pub drop: BoxedDrop,
-}
-
 /// Host callbacks the plugin can use.
 #[repr(C)]
 pub struct HostVtable {
     /// Logs a message through the host logger.
     pub log: extern "C" fn(message: *const c_char),
-    /// Spawns a boxed plugin future on the host runtime.
+    /// Spawns a plugin future on the host runtime (see [`HostSpawn`]).
     pub spawn: HostSpawn,
     /// Provides a service from plugin apply.
     pub provide: HostProvide,
@@ -192,177 +182,6 @@ pub unsafe extern "C" fn plugin_apply(_handle: *mut PluginHandle, _config: *cons
     0
 }
 
-/// The waker shared between the host and a spawned plugin future.
-///
-/// The host allocates one per spawned task and hands a clone (an owned raw
-/// pointer) to the plugin; both sides refcount it. The plugin side converts
-/// the raw pointer into a [`Waker`] with [`waker_from_raw`].
-#[repr(C)]
-pub struct WakerData {
-    refs: AtomicUsize,
-    /// Opaque host context handed back to `wake`; owned by the cell and
-    /// released through `drop_data` when the last waker reference drops
-    /// (e.g. a per-task slot holding the tokio waker that re-schedules the
-    /// task).
-    data: *mut std::ffi::c_void,
-    wake: unsafe extern "C" fn(*mut std::ffi::c_void),
-    /// Releases `data` once the last waker reference is gone.
-    drop_data: unsafe extern "C" fn(*mut std::ffi::c_void),
-}
-
-impl WakerData {
-    /// Creates a waker data cell owned by the caller; `data` is passed back
-    /// to `wake` and released through `drop_data` when the cell is freed.
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(
-        data: *mut std::ffi::c_void,
-        wake: unsafe extern "C" fn(*mut std::ffi::c_void),
-        drop_data: unsafe extern "C" fn(*mut std::ffi::c_void),
-    ) -> RcWaker {
-        RcWaker(Box::into_raw(Box::new(Self {
-            refs: AtomicUsize::new(1),
-            data,
-            wake,
-            drop_data,
-        })))
-    }
-}
-
-/// An owning raw pointer to [`WakerData`] (one reference).
-pub struct RcWaker(*mut WakerData);
-
-// SAFETY: wakers may be moved between threads by futures that require Send;
-// the refcount is atomic and the host wake callback re-schedules the task
-// from any thread.
-unsafe impl Send for RcWaker {}
-unsafe impl Sync for RcWaker {}
-
-impl RcWaker {
-    /// The raw pointer for FFI hand-off (ownership transfers to the caller).
-    pub fn leak(self) -> *mut WakerData {
-        let ptr = self.0;
-        std::mem::forget(self);
-        ptr
-    }
-
-    /// A borrowed raw pointer (the caller keeps ownership).
-    pub fn as_ptr(&self) -> *mut WakerData {
-        self.0
-    }
-}
-
-impl Clone for RcWaker {
-    fn clone(&self) -> Self {
-        // SAFETY: `self.0` is a valid WakerData with at least one reference.
-        unsafe {
-            (*self.0).refs.fetch_add(1, Ordering::AcqRel);
-        }
-        Self(self.0)
-    }
-}
-
-impl Drop for RcWaker {
-    fn drop(&mut self) {
-        // SAFETY: `self.0` is a valid WakerData with at least one reference.
-        unsafe {
-            if (*self.0).refs.fetch_sub(1, Ordering::AcqRel) == 1 {
-                drop(Box::from_raw(self.0));
-            }
-        }
-    }
-}
-
-unsafe fn waker_clone(ptr: *const ()) -> RawWaker {
-    // SAFETY: the pointer came from `waker_from_raw` / the host.
-    let data = unsafe { &*(ptr as *const WakerData) };
-    data.refs.fetch_add(1, Ordering::AcqRel);
-    RawWaker::new(ptr.cast(), &WAKER_VTABLE)
-}
-
-unsafe fn waker_wake(ptr: *const ()) {
-    // SAFETY: the pointer is a valid WakerData.
-    let data = unsafe { &*(ptr as *const WakerData) };
-    // SAFETY: the wake callback was provided by the host.
-    unsafe { (data.wake)(data.data) };
-}
-
-unsafe fn waker_wake_by_ref(ptr: *const ()) {
-    // SAFETY: the pointer is a valid WakerData.
-    let data = unsafe { &*(ptr as *const WakerData) };
-    // SAFETY: the wake callback was provided by the host.
-    unsafe { (data.wake)(data.data) };
-}
-
-unsafe fn waker_drop(ptr: *const ()) {
-    // SAFETY: the pointer was produced by `waker_clone` / `waker_from_raw`.
-    let data = unsafe { &*(ptr as *const WakerData) };
-    if data.refs.fetch_sub(1, Ordering::AcqRel) == 1 {
-        // SAFETY: the last reference frees the context and the allocation.
-        unsafe { (data.drop_data)(data.data) };
-        drop(unsafe { Box::from_raw(ptr as *mut WakerData) });
-    }
-}
-
-/// The raw waker vtable shared by host and plugin.
-pub static WAKER_VTABLE: RawWakerVTable =
-    RawWakerVTable::new(waker_clone, waker_wake, waker_wake_by_ref, waker_drop);
-
-/// Converts a raw waker pointer (from the host) into a [`Waker`].
-///
-/// # Safety
-///
-/// `ptr` must come from the host and be valid for the returned waker's
-/// lifetime; the waker data is refcounted, so clones keep it alive.
-pub unsafe fn waker_from_raw(ptr: *const std::ffi::c_void) -> Waker {
-    // SAFETY: the pointer was produced by the host and matches WAKER_VTABLE.
-    let data = unsafe { &*(ptr as *const WakerData) };
-    data.refs.fetch_add(1, Ordering::AcqRel);
-    unsafe { Waker::from_raw(RawWaker::new(ptr.cast(), &WAKER_VTABLE)) }
-}
-
-/// Shared completion state of a spawned task (plugin side).
-struct SpawnState<T> {
-    result: Option<oneshot::Sender<T>>,
-}
-
-/// Wraps a plugin future so the host can poll it through [`BoxedFuture`].
-struct BoxedPluginFuture<F, T> {
-    future: F,
-    state: SpawnState<T>,
-}
-
-unsafe extern "C" fn boxed_poll<F, T>(
-    data: *mut std::ffi::c_void,
-    waker: *const std::ffi::c_void,
-) -> u8
-where
-    F: Future<Output = T>,
-{
-    // SAFETY: `data` is a Box<BoxedPluginFuture<F, T>> allocated by `spawn`.
-    let this = unsafe { &mut *(data as *mut BoxedPluginFuture<F, T>) };
-    // SAFETY: the host passes a valid raw waker pointer.
-    let waker = unsafe { waker_from_raw(waker) };
-    let mut cx = TaskContext::from_waker(&waker);
-    // SAFETY: the future is pinned in place inside the box.
-    match unsafe { Pin::new_unchecked(&mut this.future).poll(&mut cx) } {
-        Poll::Ready(value) => {
-            if let Some(sender) = this.state.result.take() {
-                let _ = sender.send(value);
-            }
-            1
-        }
-        Poll::Pending => 0,
-    }
-}
-
-unsafe extern "C" fn boxed_drop<F, T>(data: *mut std::ffi::c_void)
-where
-    F: Future<Output = T>,
-{
-    // SAFETY: `data` is a Box<BoxedPluginFuture<F, T>> allocated by `spawn`.
-    drop(unsafe { Box::from_raw(data as *mut BoxedPluginFuture<F, T>) });
-}
-
 /// A future that resolves to the result of a task spawned on the host.
 ///
 /// The completion is delivered through a oneshot channel and the poll
@@ -395,29 +214,32 @@ impl<T> Future for Spawned<T> {
 
 /// Spawns a future on the host runtime.
 ///
+/// Wraps `future` as an [`FfiFuture`] (one plugin-side allocation) and
+/// hands it to the host through the vtable. The completion value is
+/// delivered back through a oneshot channel: `Spawned` registers the
+/// caller's waker while pending, so the awaiting side resumes as soon as
+/// the host task completes (on any runtime thread).
+///
 /// # Safety
 ///
 /// `vtable` must be the host vtable the plugin received from `plugin_create`.
 pub unsafe fn spawn<F>(vtable: &HostVtable, future: F) -> Spawned<F::Output>
 where
-    F: Future + 'static,
+    F: Future + Send + 'static,
+    F::Output: Send,
 {
     let (sender, receiver) = oneshot::channel();
-    let boxed = Box::new(BoxedPluginFuture {
-        future,
-        state: SpawnState {
-            result: Some(sender),
-        },
-    });
-    let data: *mut std::ffi::c_void = Box::into_raw(boxed).cast();
-    let wrapped = BoxedFuture {
-        data,
-        poll: boxed_poll::<F, F::Output>,
-        drop: boxed_drop::<F, F::Output>,
-    };
-    // SAFETY: the caller guarantees the vtable; `wrapped` is transferred to
-    // the host (dropped by the host through `BoxedFuture.drop`).
-    unsafe { (vtable.spawn)(vtable.data, Box::into_raw(Box::new(wrapped)).cast()) };
+    // The oneshot sender moves with the future: dropping the task (cancel)
+    // drops the sender and wakes the receiver with an error.
+    let ffi: FfiFuture<()> = async move {
+        let value = future.await;
+        let _ = sender.send(value);
+    }
+    .into_ffi();
+    // SAFETY: the caller guarantees the vtable; `ffi` is transferred to the
+    // host (polled and dropped by the host through async-ffi's function
+    // pointers).
+    unsafe { (vtable.spawn)(vtable.data, ffi) };
     Spawned {
         receiver: Some(receiver),
     }

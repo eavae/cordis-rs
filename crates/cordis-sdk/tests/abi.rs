@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use std::ffi::c_char;
 use std::path::PathBuf;
 
-use cordis_sdk::{HostVtable, PLUGIN_API_VERSION, PluginHandle};
+use cordis_sdk::{FfiFuture, HostVtable, PLUGIN_API_VERSION, PluginHandle};
 use libloading::Library;
 
 static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -65,7 +65,7 @@ fn host_loads_fixture_and_round_trips() {
     unsafe { dispose(handle) };
 }
 
-unsafe extern "C" fn noop_spawn(_data: *mut std::ffi::c_void, _future: *mut std::ffi::c_void) {}
+unsafe extern "C" fn noop_spawn(_data: *mut std::ffi::c_void, _future: FfiFuture<()>) {}
 
 #[test]
 fn host_rejects_version_mismatch() {

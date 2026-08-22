@@ -18,10 +18,13 @@
 | `plugin_validate_config` | `fn(*const c_char) -> i32` | (可选)配置校验,0 通过、非 0 拒绝 |
 | `plugin_apply` | `fn(*mut PluginHandle, *const c_char) -> i32` | (可选)应用配置;在 host 会话内执行 |
 
-当前版本:`PLUGIN_API_VERSION = 3`。
+当前版本:`PLUGIN_API_VERSION = 4`。
 
 - v2:入口协议 + async 桥(`log`/`spawn`)。
 - v3:vtable 新增 `provide`/`get`/`on`/`emit`/`effect_disposer` 五个 Context 桥入口。
+- v4:async 桥迁移到 `async-ffi`——`spawn` 交给 host 的不再是手写的
+  boxed future + 共享引用计数 waker cell,而是一个 `FfiFuture<()>`
+  (`#[repr(C)]` 句柄,内含 poll/drop 函数指针)。
 
 `deps` 声明插件链接的 host crate/服务,HMR 插件用它做依赖分类。
 
@@ -72,6 +75,21 @@ unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, config: *const c_ch
 }
 ```
 
+### async 桥(`spawn`)
+
+SDK 的 `spawn(vtable, future)` 把 future 包装成 `async_ffi::FfiFuture<()>`
+(插件侧一次分配),按值交给 host。host 把它当作普通 tokio 任务驱动,并在
+任务完成或插件实例销毁时通过 async-ffi 的插件 drop 函数释放它。
+
+- `FfiFuture` 句柄是 `#[repr(C)]`(不透明数据指针 + poll/drop 函数指针);
+  future 本体由插件分配,host 只通过函数指针 poll 它。分配不跨界。
+- waker 由 async-ffi 适配:每次 poll 携带一个借用的 `FfiContext`;waker
+  clone 是 host 侧分配、包裹 host 真实 tokio `Waker` 的盒子,所以任意插件
+  线程的 wake 都能重新调度 host 任务,取消之后的迟到 wake 也安全(tokio
+  会忽略已完成任务的 waker)。边界上不再共享任何引用计数状态。
+- 插件 future 在 poll 中 panic 会被 async-ffi 捕获(`FfiPoll::Panicked`)
+  并在 host 侧重新抛出,而不是跨 FFI 边界展开。
+
 ## 3. 会话模型(handle → Context)
 
 `plugin_apply` 以及 host 回调插件的事件监听/disposer 时,host 在调用前压入一个**会话**:
@@ -110,6 +128,8 @@ unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, config: *const c_ch
 - 事件参数由 host 序列化为 JSON 数组;不可序列化的参数(`Rc<dyn Any>` 对象)编码为 `null`。
 - 非 JSON 对象服务(如 host 侧 Rust 服务)无法跨边界,`get` 返回 null;
   插件应通过元数据 `inject` 声明依赖,由 host 侧完成解析。
+- 派生的 future 以 `FfiFuture<()>` 句柄跨界:future 盒子由插件分配、由插件
+  释放(经 async-ffi 的 drop 函数);waker clone 由 host 分配、由 host 释放。
 
 ## 6. 线程模型
 
@@ -118,7 +138,8 @@ host 任务为 `Send`,运行在 tokio worker 池上(多线程化计划阶段 2):
 - 编译期:host 与 SDK 状态均为 `Send + Sync`(`Arc`、原子类型、无锁快照和短临界区
   `Mutex`)。
 - **插件 Send 契约(阶段 3 决策)**:经 `spawn` 交给 host 的插件 future 必须是
-  `Send` 且与线程无关。host 可能在任意 runtime 线程上 poll 插件 future,并在
+  `Send` 且与线程无关(SDK 通过 `async-ffi` 在编译期强制,包括经 oneshot
+  回传的完成值)。host 可能在任意 runtime 线程上 poll 插件 future,并在
   await 点之间把它迁移到其他线程;插件代码不得依赖 thread-local 状态或某个固定
   host 线程。
 - 运行期:会话在当前驱动 host→plugin 调用的线程上压栈;没有会话的线程调用 vtable

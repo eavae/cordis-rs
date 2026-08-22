@@ -11,12 +11,13 @@ pub use cordis_macros::{inject, service};
 
 pub mod abi;
 pub use abi::{
-    BoxedFuture, ContextBridge, HostVtable, PLUGIN_API_VERSION, PluginDisposer,
-    PluginEventCallback, PluginHandle, RcWaker, Spawned, WAKER_VTABLE, WakerData, spawn,
-    waker_from_raw,
+    ContextBridge, HostVtable, PLUGIN_API_VERSION, PluginDisposer, PluginEventCallback,
+    PluginHandle, Spawned, spawn,
 };
 #[cfg(feature = "abi-exports")]
 pub use abi::{plugin_api_version, plugin_create, plugin_dispose};
+/// FFI-safe future handle used by the async bridge (`spawn` / vtable `spawn`).
+pub use async_ffi::FfiFuture;
 
 #[cfg(test)]
 mod tests {
@@ -24,7 +25,7 @@ mod tests {
 
     extern "C" fn noop_log(_message: *const std::ffi::c_char) {}
 
-    unsafe extern "C" fn noop_spawn(_data: *mut std::ffi::c_void, _future: *mut std::ffi::c_void) {}
+    unsafe extern "C" fn noop_spawn(_data: *mut std::ffi::c_void, _future: FfiFuture<()>) {}
 
     unsafe extern "C" fn noop_provide(
         _handle: *mut PluginHandle,

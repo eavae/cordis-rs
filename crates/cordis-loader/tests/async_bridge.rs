@@ -96,8 +96,8 @@ async fn host_drives_spawned_future_to_completion() {
     .await;
 }
 
-/// Disposing the plugin handle cancels pending futures (their boxed futures
-/// are dropped through the plugin's drop function).
+/// Disposing the plugin handle cancels pending futures (their `FfiFuture`
+/// handles are dropped through async-ffi's plugin drop function).
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn dispose_cancels_pending_spawns() {
@@ -320,9 +320,10 @@ async fn handshake_works_on_multi_thread_runtime() {
 }
 
 /// A plugin future hands its waker to a std thread that wakes it long after
-/// the host cancelled the task (plugin disposed): the wake slot is owned by
-/// the waker data, so the late wake is safe and the pending future is still
-/// dropped through the plugin's drop function.
+/// the host cancelled the task (plugin disposed): the waker clone is a
+/// host-side box wrapping the host's tokio waker, so the late wake is safe
+/// (tokio ignores wakers of finished tasks) and the pending future is still
+/// dropped through async-ffi's plugin drop function.
 #[tokio::test(flavor = "current_thread")]
 #[allow(clippy::await_holding_lock)]
 async fn late_wake_after_cancel_is_safe() {

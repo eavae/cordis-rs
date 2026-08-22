@@ -21,11 +21,14 @@ version mismatches:
 | `plugin_validate_config` | `fn(*const c_char) -> i32` | (optional) Config validation; 0 = valid, non-zero = rejected |
 | `plugin_apply` | `fn(*mut PluginHandle, *const c_char) -> i32` | (optional) Applies a config; runs inside a host session |
 
-Current version: `PLUGIN_API_VERSION = 3`.
+Current version: `PLUGIN_API_VERSION = 4`.
 
 - v2: entry protocol + async bridge (`log`/`spawn`).
 - v3: the vtable gains five Context bridge entries:
   `provide`/`get`/`on`/`emit`/`effect_disposer`.
+- v4: the async bridge moves to `async-ffi` — `spawn` hands the host an
+  `FfiFuture<()>` (a `#[repr(C)]` handle with poll/drop function pointers)
+  instead of a hand-rolled boxed future with a shared refcounted waker cell.
 
 `deps` declares the host crates/services the plugin links against; the HMR
 plugin uses it for dependency classification.
@@ -78,6 +81,26 @@ unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, config: *const c_ch
 }
 ```
 
+### Async bridge (`spawn`)
+
+The SDK's `spawn(vtable, future)` wraps the future as an
+`async_ffi::FfiFuture<()>` (one plugin-side allocation) and passes it by
+value to the host. The host drives it as a normal tokio task and drops it
+through async-ffi's plugin drop function when it completes or when the
+plugin instance is disposed.
+
+- The `FfiFuture` handle is `#[repr(C)]` (opaque data pointer + poll/drop
+  function pointers); the plugin allocates the boxed future and the host
+  only ever polls it through those pointers. Allocation never crosses the
+  boundary.
+- The waker is adapted by async-ffi: each poll carries a borrowed
+  `FfiContext`; waker clones are host-side boxes wrapping the host's real
+  tokio `Waker`, so a wake from any plugin thread re-schedules the host task
+  and late wakes after cancellation are safe (tokio ignores wakers of
+  finished tasks). No refcounted state is shared across the boundary.
+- A panicking plugin future is caught by async-ffi (`FfiPoll::Panicked`)
+  and re-raised on the host, instead of unwinding across the FFI boundary.
+
 ## 3. Session model (handle → Context)
 
 Before calling into the plugin (apply, event listener, or disposer), the host
@@ -128,6 +151,9 @@ Key points:
 - Non-JSON object services (e.g. host-side Rust services) cannot cross the
   boundary; `get` returns null. Plugins should declare dependencies via the
   metadata `inject` field and let the host resolve them.
+- Spawned futures cross as `FfiFuture<()>` handles: the future box is
+  allocated plugin-side and freed plugin-side (through async-ffi's drop
+  function); waker clones are allocated host-side and freed host-side.
 
 ## 6. Threading model
 
@@ -137,10 +163,12 @@ multithreading plan):
 - Compile time: host and SDK state is `Send + Sync` (`Arc`, atomics, lock-free
   snapshots and short-scoped `Mutex`es).
 - **Plugin Send contract (stage 3 decision)**: plugin futures handed to the
-  host through `spawn` must be `Send` and thread-agnostic. The host may poll
-  a plugin future on any runtime thread and may migrate it between threads
-  across await points, so plugin code must not depend on thread-local state
-  or on a fixed host thread.
+  host through `spawn` must be `Send` (the SDK enforces this at compile time
+  via `async-ffi`, including the completion value that travels back through
+  the oneshot channel) and thread-agnostic. The host may poll a plugin
+  future on any runtime thread and may migrate it between threads across
+  await points, so plugin code must not depend on thread-local state or on
+  a fixed host thread.
 - Runtime: sessions are pushed on the thread driving the current host→plugin
   call, so vtable calls from a thread without a session fail gracefully
   instead of panicking. The live-handle registry is process-wide, so

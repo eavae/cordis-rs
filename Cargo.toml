@@ -34,6 +34,7 @@ repository = "https://github.com/cordisjs/cordis-rs"
 [workspace.dependencies]
 # Runtime / async
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync", "signal"] }
+async-ffi = "0.5.1"
 parking_lot = "0.12"
 arc-swap = "1"
 im = "15"

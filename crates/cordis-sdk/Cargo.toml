@@ -22,6 +22,7 @@ all = "warn"
 cordis-core = { path = "../cordis-core" }
 cordis-macros = { path = "../cordis-macros" }
 tokio = { workspace = true, features = ["sync"] }
+async-ffi.workspace = true
 
 [dev-dependencies]
 libloading.workspace = true

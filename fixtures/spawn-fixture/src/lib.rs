@@ -161,8 +161,8 @@ pub unsafe extern "C" fn plugin_spawn_and_await(handle: *mut PluginHandle) {
 }
 
 /// Spawns a task that returns `Pending` once, then is woken from a std
-/// thread: the cross-thread wake goes through the host `wake_task` path and
-/// the future completes on the next poll.
+/// thread: the cross-thread wake re-schedules the host task through
+/// async-ffi's adapted host waker and the future completes on the next poll.
 ///
 /// # Safety
 ///
