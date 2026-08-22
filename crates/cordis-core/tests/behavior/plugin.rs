@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use cordis_core::{
-    Context, Effect, EventOptions, Plugin, RegistryService, event_listener, sync_disposer,
+    Context, Effect, EventOptions, FiberState, Plugin, PluginOutput, RegistryService,
+    event_listener, plugin_async, plugin_sync, sync_disposer,
 };
 
 #[derive(Debug)]
@@ -509,6 +510,108 @@ async fn shared_runtime_multiple_fibers() {
         assert_eq!(registry.size(), 1);
         fiber2.dispose().await;
         assert_eq!(registry.size(), 0, "runtime removed after last fiber");
+    }
+    .await;
+}
+
+/// The `plugin_sync` adapter: typed config is delivered to the closure and
+/// its `PluginOutput` disposer runs on unload.
+#[tokio::test(flavor = "current_thread")]
+async fn plugin_sync_typed_config_and_cleanup() {
+    async {
+        let root = Context::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let cleaned = Arc::new(AtomicU32::new(0));
+        let spec = plugin_sync::<Options, _, _, _>("typed", Vec::<&str>::new(), {
+            let seen = seen.clone();
+            let cleaned = cleaned.clone();
+            move |_ctx: &Context, config: &Arc<Options>| {
+                seen.lock().push(config.foo);
+                let cleaned = cleaned.clone();
+                Ok(PluginOutput::infallible(move || {
+                    cleaned.store(1, Ordering::SeqCst);
+                }))
+            }
+        });
+
+        let fiber = spec.register(&root, Some(Arc::new(Options { foo: "bar" })));
+        fiber.wait().await.unwrap();
+        assert_eq!(fiber.state(), FiberState::Active);
+        assert_eq!(seen.lock().as_slice(), &["bar"]);
+
+        fiber.dispose().await;
+        tokio::task::yield_now().await;
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+    }
+    .await;
+}
+
+/// A wrong-typed update on a `plugin_sync` plugin fails validation and leaves
+/// the running instance untouched (the type check is attached to the spec).
+#[tokio::test(flavor = "current_thread")]
+async fn plugin_sync_wrong_config_type_keeps_running_instance() {
+    async {
+        let root = Context::new();
+        let applies = Arc::new(AtomicU32::new(0));
+        let spec = plugin_sync::<Options, _, _, _>("typed", Vec::<&str>::new(), {
+            let applies = applies.clone();
+            move |_ctx: &Context, _config: &Arc<Options>| {
+                applies.store(applies.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+                Ok(PluginOutput::none())
+            }
+        });
+
+        let fiber = spec.register(&root, Some(Arc::new(Options { foo: "ok" })));
+        fiber.wait().await.unwrap();
+        assert_eq!(applies.load(Ordering::SeqCst), 1);
+
+        let error = fiber.update(Some(Arc::new(7_u32))).await.unwrap_err();
+        assert!(error.to_string().contains("invalid config"), "{error}");
+        assert_eq!(fiber.state(), FiberState::Active);
+        assert_eq!(
+            applies.load(Ordering::SeqCst),
+            1,
+            "the running instance is untouched"
+        );
+    }
+    .await;
+}
+
+/// The `plugin_async` adapter: the fiber stays Loading until the apply future
+/// resolves, and the returned disposer runs on unload.
+#[tokio::test(flavor = "current_thread")]
+async fn plugin_async_waits_for_apply_and_cleans_up() {
+    async {
+        let root = Context::new();
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let cleaned = Arc::new(AtomicU32::new(0));
+        let spec = plugin_async::<Options, _, _, _, _>("async", Vec::<&str>::new(), {
+            let ready = ready.clone();
+            let cleaned = cleaned.clone();
+            move |_ctx: &Context, config: &Arc<Options>| {
+                assert_eq!(config.foo, "bar");
+                let ready = ready.clone();
+                let cleaned = cleaned.clone();
+                async move {
+                    ready.notified().await;
+                    Ok(PluginOutput::infallible(move || {
+                        cleaned.store(1, Ordering::SeqCst);
+                    }))
+                }
+            }
+        });
+
+        let fiber = spec.register(&root, Some(Arc::new(Options { foo: "bar" })));
+        tokio::task::yield_now().await;
+        assert_eq!(fiber.state(), FiberState::Loading);
+
+        ready.notify_one();
+        fiber.wait().await.unwrap();
+        assert_eq!(fiber.state(), FiberState::Active);
+
+        fiber.dispose().await;
+        tokio::task::yield_now().await;
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1);
     }
     .await;
 }

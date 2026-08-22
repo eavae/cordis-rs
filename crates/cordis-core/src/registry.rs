@@ -7,14 +7,15 @@
 use parking_lot::Mutex;
 use std::any::Any;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use crate::context::{Context, ContextInner, OverlayLayer};
-use crate::error::ConfigValidator;
+use crate::error::{ConfigValidator, ValidationError};
 use crate::events::EventFilter;
 use crate::fiber::{Epoch, Fiber, FiberState};
-use crate::service::{ApplyFn, Effect, Service};
+use crate::service::{ApplyFn, BoxError, Effect, PluginOutput, Service};
 
 /// The realm filter used by the `internal/service` broadcast: a listener
 /// only receives the event when its own isolate label for the service name
@@ -54,6 +55,147 @@ impl Plugin {
     pub fn inject_names(&self) -> impl Iterator<Item = &str> {
         self.inject.iter().map(|(name, _)| name.as_str())
     }
+}
+
+/// A [`Plugin`] bundled with its config validator, produced by the
+/// [`plugin_sync`] and [`plugin_async`] adapters.
+///
+/// Register it with [`PluginSpec::register`], which routes the config through
+/// the validator so a wrong-typed update fails validation instead of tearing
+/// down the running instance.
+#[derive(Clone)]
+pub struct PluginSpec {
+    plugin: Plugin,
+    validator: Option<ConfigValidator>,
+}
+
+impl PluginSpec {
+    /// Wraps a plugin and its optional config validator.
+    pub fn new(plugin: Plugin, validator: Option<ConfigValidator>) -> Self {
+        Self { plugin, validator }
+    }
+
+    /// Registers the plugin on `ctx` with the given config.
+    pub fn register(
+        &self,
+        ctx: &Context,
+        config: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Arc<Fiber> {
+        ctx.plugin_with_validator(&self.plugin, config, self.validator.clone())
+    }
+
+    /// The wrapped plugin.
+    pub fn plugin(&self) -> &Plugin {
+        &self.plugin
+    }
+
+    /// The wrapped config validator.
+    pub fn validator(&self) -> Option<&ConfigValidator> {
+        self.validator.as_ref()
+    }
+}
+
+/// A config validator that rejects configs whose concrete type is not `C`.
+///
+/// Used by [`plugin_sync`] / [`plugin_async`] so a wrong-typed update fails
+/// validation before the running instance is touched.
+pub fn typed_validator<C: Any + Send + Sync + 'static>() -> ConfigValidator {
+    Arc::new(|config: &Arc<dyn Any + Send + Sync>| {
+        if config.downcast_ref::<C>().is_some() {
+            Ok(())
+        } else {
+            Err(ValidationError::new(format!(
+                "expected config of type {}",
+                std::any::type_name::<C>()
+            )))
+        }
+    })
+}
+
+/// Adapts a typed synchronous closure to a [`PluginSpec`].
+///
+/// The closure receives the strongly typed config and returns cleanup as a
+/// [`PluginOutput`]; effects registered through `ctx` inside the closure stay
+/// owned by the plugin's fiber.
+pub fn plugin_sync<C, I, N, F>(name: impl Into<String>, inject: I, callback: F) -> PluginSpec
+where
+    C: Any + Send + Sync + 'static,
+    I: IntoIterator<Item = N>,
+    N: Into<String>,
+    F: Fn(&Context, &Arc<C>) -> Result<PluginOutput, BoxError> + Send + Sync + 'static,
+{
+    let inject = inject
+        .into_iter()
+        .map(|name| (name.into(), None))
+        .collect::<Vec<_>>();
+    let apply: ApplyFn = Arc::new(move |ctx, config| {
+        let typed = match config.clone().downcast::<C>() {
+            Ok(typed) => typed,
+            Err(_) => {
+                return Effect::Error(Box::new(std::io::Error::other(format!(
+                    "expected config of type {}",
+                    std::any::type_name::<C>()
+                ))));
+            }
+        };
+        match callback(ctx, &typed) {
+            Ok(output) => output.into_effect(),
+            Err(error) => Effect::Error(error),
+        }
+    });
+    PluginSpec::new(
+        Plugin {
+            is_group: false,
+            name: Some(name.into()),
+            inject,
+            apply,
+        },
+        Some(typed_validator::<C>()),
+    )
+}
+
+/// Adapts a typed asynchronous closure to a [`PluginSpec`].
+///
+/// The fiber stays `Loading` until the returned future resolves; its
+/// [`PluginOutput`] disposers run when the fiber unloads.
+pub fn plugin_async<C, I, N, F, Fut>(name: impl Into<String>, inject: I, callback: F) -> PluginSpec
+where
+    C: Any + Send + Sync + 'static,
+    I: IntoIterator<Item = N>,
+    N: Into<String>,
+    F: Fn(&Context, &Arc<C>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<PluginOutput, BoxError>> + Send + 'static,
+{
+    let inject = inject
+        .into_iter()
+        .map(|name| (name.into(), None))
+        .collect::<Vec<_>>();
+    let apply: ApplyFn = Arc::new(move |ctx, config| {
+        let typed = match config.clone().downcast::<C>() {
+            Ok(typed) => typed,
+            Err(_) => {
+                return Effect::Error(Box::new(std::io::Error::other(format!(
+                    "expected config of type {}",
+                    std::any::type_name::<C>()
+                ))));
+            }
+        };
+        let ctx = ctx.clone();
+        let future = callback(&ctx, &typed);
+        Effect::Async(Box::pin(async move {
+            let output = future.await?;
+            Ok(output.into_disposer())
+        }))
+    });
+    PluginSpec::new(
+        Plugin {
+            is_group: false,
+            name: Some(name.into()),
+            inject,
+            apply,
+        },
+        Some(typed_validator::<C>()),
+    )
 }
 
 /// A plugin runtime shared by all fibers of the same plugin.

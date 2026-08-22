@@ -30,8 +30,10 @@ pub use logger::{
     format_message, hyphenate,
 };
 pub use reflect::ReflectService;
-pub use registry::{Plugin, RegistryService};
+pub use registry::{
+    Plugin, PluginSpec, RegistryService, plugin_async, plugin_sync, typed_validator,
+};
 pub use service::{
     ApplyFn, AsyncDisposerStream, BoxError, BoxFuture, Config, Disposer, Effect, EffectItem,
-    Service, async_disposer, sync_disposer,
+    PluginOutput, Service, async_disposer, sync_disposer,
 };

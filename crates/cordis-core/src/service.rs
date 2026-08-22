@@ -74,6 +74,105 @@ pub enum EffectItem {
     Nested(Arc<EffectHandle>),
 }
 
+/// Cleanup returned by a typed plugin closure ([`plugin_sync`](crate::plugin_sync) /
+/// [`plugin_async`](crate::plugin_async)).
+///
+/// Carries zero or more disposers that run when the plugin's fiber unloads,
+/// in reverse registration order. The synchronous adapter converts it into
+/// an [`Effect`]; the asynchronous adapter awaits the closure and delivers a
+/// combined disposer.
+#[derive(Default)]
+pub struct PluginOutput {
+    disposers: Vec<Disposer>,
+}
+
+impl PluginOutput {
+    /// No additional cleanup (effects registered through `ctx` are still
+    /// owned by the fiber).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// One fallible synchronous disposer.
+    pub fn disposer<F>(dispose: F) -> Self
+    where
+        F: FnOnce() -> Result<(), BoxError> + Send + 'static,
+    {
+        Self::default().with_disposer(dispose)
+    }
+
+    /// One infallible synchronous disposer.
+    pub fn infallible<F>(dispose: F) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        Self::default().with_disposer(move || {
+            dispose();
+            Ok(())
+        })
+    }
+
+    /// One asynchronous disposer.
+    pub fn async_disposer<F, Fut>(dispose: F) -> Self
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), BoxError>> + Send + 'static,
+    {
+        let mut output = Self::default();
+        output.disposers.push(Box::new(move || Box::pin(dispose())));
+        output
+    }
+
+    /// Appends another disposer.
+    pub fn with_disposer<F>(mut self, dispose: F) -> Self
+    where
+        F: FnOnce() -> Result<(), BoxError> + Send + 'static,
+    {
+        self.disposers
+            .push(Box::new(move || Box::pin(async move { dispose() })));
+        self
+    }
+
+    /// The number of disposers.
+    pub fn len(&self) -> usize {
+        self.disposers.len()
+    }
+
+    /// Whether any disposer is present.
+    pub fn is_empty(&self) -> bool {
+        self.disposers.is_empty()
+    }
+
+    pub(crate) fn into_effect(self) -> Effect {
+        let mut disposers = self.disposers;
+        match disposers.len() {
+            0 => Effect::None,
+            1 => Effect::Disposer(disposers.pop().expect("len checked")),
+            _ => Effect::Iterable(
+                disposers
+                    .into_iter()
+                    .map(|disposer| Ok(EffectItem::Disposer(disposer)))
+                    .collect(),
+            ),
+        }
+    }
+
+    pub(crate) fn into_disposer(self) -> Disposer {
+        let mut disposers = self.disposers;
+        if disposers.len() == 1 {
+            return disposers.pop().expect("len checked");
+        }
+        Box::new(move || {
+            Box::pin(async move {
+                for disposer in disposers {
+                    disposer().await?;
+                }
+                Ok(())
+            })
+        })
+    }
+}
+
 /// An asynchronous iterator over disposers.
 pub trait AsyncDisposerStream {
     /// Polls the stream for the next disposer.
