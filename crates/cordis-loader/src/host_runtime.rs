@@ -18,8 +18,9 @@ use std::ffi::c_void;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
 
-use cordis_sdk::FfiFuture;
+use async_ffi::{FfiFuture, FutureExt};
 use libloading::Library;
 
 /// The per-plugin-instance host runtime: owns every task the plugin spawned.
@@ -71,6 +72,60 @@ pub unsafe extern "C" fn host_spawn(data: *mut c_void, future: FfiFuture<()>) {
     };
     let handle = tokio::task::spawn(task);
     runtime.tasks.lock().push(handle);
+}
+
+/// Sleeps on the host runtime (vtable `sleep` entry).
+///
+/// Must be called from a runtime context: the host timer is created here
+/// (`tokio::time::sleep`), and the plugin's caller is inside the runtime by
+/// contract (host callback or spawned async code).
+pub extern "C" fn host_sleep(_data: *mut c_void, millis: u64) -> FfiFuture<()> {
+    tokio::time::sleep(Duration::from_millis(millis)).into_ffi()
+}
+
+/// Runs a plugin blocking callback on the host's blocking pool (vtable
+/// `spawn_blocking` entry).
+///
+/// # Safety
+///
+/// `data` must be the runtime pointer baked into the vtable; `work` is
+/// called exactly once on a blocking-pool thread with `arg`; ownership of
+/// `arg` transfers to `work`. The library `Arc` is captured by the task so
+/// the plugin image stays mapped until the callback returns.
+pub unsafe extern "C" fn host_spawn_blocking(
+    data: *mut c_void,
+    work: unsafe extern "C" fn(*mut c_void),
+    arg: *mut c_void,
+) {
+    // SAFETY: the vtable data pointer was created by `HostRuntime::new` and
+    // the caller keeps the runtime alive.
+    let runtime = unsafe { &*(data as *const HostRuntime) };
+    let library = runtime.library.clone();
+    let call = BlockingCall { work, arg };
+    tokio::task::spawn_blocking(move || run_blocking_call(library, call));
+}
+
+/// A `Send` carrier for the blocking callback: the raw pointers are only
+/// dereferenced inside the blocking task that owns this value, so moving
+/// them to the blocking pool is sound.
+struct BlockingCall {
+    work: unsafe extern "C" fn(*mut c_void),
+    arg: *mut c_void,
+}
+
+// SAFETY: `work` is plugin code kept mapped by the task's library Arc and
+// `arg` is owned by the callback; both are used exactly once inside the
+// blocking task.
+unsafe impl Send for BlockingCall {}
+
+/// Runs a blocking callback, keeping the plugin library mapped for the
+/// duration of the call.
+fn run_blocking_call(library: Option<Arc<Library>>, call: BlockingCall) {
+    let _library = library;
+    let BlockingCall { work, arg } = call;
+    // SAFETY: `work` is plugin code and stays mapped through `_library`;
+    // `arg` is owned by the callback.
+    unsafe { work(arg) };
 }
 
 /// A host task: polls a plugin [`FfiFuture`] until it completes.

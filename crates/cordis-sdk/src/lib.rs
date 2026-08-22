@@ -11,8 +11,8 @@ pub use cordis_macros::{inject, service};
 
 pub mod abi;
 pub use abi::{
-    ContextBridge, HostVtable, PLUGIN_API_VERSION, PluginDisposer, PluginEventCallback,
-    PluginHandle, Spawned, spawn,
+    ContextBridge, HostVtable, Interval, PLUGIN_API_VERSION, PluginDisposer, PluginEventCallback,
+    PluginHandle, Spawned, sleep, spawn, spawn_blocking, timeout,
 };
 #[cfg(feature = "abi-exports")]
 pub use abi::{plugin_api_version, plugin_create, plugin_dispose};
@@ -26,6 +26,18 @@ mod tests {
     extern "C" fn noop_log(_message: *const std::ffi::c_char) {}
 
     unsafe extern "C" fn noop_spawn(_data: *mut std::ffi::c_void, _future: FfiFuture<()>) {}
+
+    extern "C" fn noop_sleep(_data: *mut std::ffi::c_void, _millis: u64) -> FfiFuture<()> {
+        use async_ffi::FutureExt;
+        async {}.into_ffi()
+    }
+
+    unsafe extern "C" fn noop_spawn_blocking(
+        _data: *mut std::ffi::c_void,
+        _work: unsafe extern "C" fn(*mut std::ffi::c_void),
+        _arg: *mut std::ffi::c_void,
+    ) {
+    }
 
     unsafe extern "C" fn noop_provide(
         _handle: *mut PluginHandle,
@@ -71,6 +83,8 @@ mod tests {
         let vtable = abi::HostVtable {
             log: noop_log,
             spawn: noop_spawn,
+            sleep: noop_sleep,
+            spawn_blocking: noop_spawn_blocking,
             provide: noop_provide,
             get: noop_get,
             on: noop_on,

@@ -24,7 +24,9 @@ use tokio::sync::oneshot;
 /// v4 moves the async bridge to `async-ffi`: `spawn` hands the host an
 /// `FfiFuture<()>` instead of a hand-rolled boxed future with a shared
 /// refcounted waker cell.
-pub const PLUGIN_API_VERSION: u32 = 4;
+/// v5 adds two host async services to the vtable: `sleep` (host timer) and
+/// `spawn_blocking` (host blocking pool), both `FfiFuture`-based.
+pub const PLUGIN_API_VERSION: u32 = 5;
 
 /// Spawns a plugin-owned future on the host runtime.
 ///
@@ -32,6 +34,26 @@ pub const PLUGIN_API_VERSION: u32 = 4;
 /// polls it as a normal tokio task and drops it (through async-ffi's plugin
 /// drop function) on completion or cancellation.
 pub type HostSpawn = unsafe extern "C" fn(*mut std::ffi::c_void, FfiFuture<()>);
+
+/// Sleeps on the host runtime.
+///
+/// Returns an `FfiFuture<()>` built host-side from `tokio::time::sleep`;
+/// the plugin awaits it like any future and dropping it cancels the timer.
+/// Must be called from a runtime context (host callback or spawned async
+/// code), like [`HostSpawn`].
+pub type HostSleep = extern "C" fn(*mut std::ffi::c_void, u64) -> FfiFuture<()>;
+
+/// Runs a blocking callback on the host's blocking pool.
+///
+/// `work` is called exactly once on a blocking-pool thread with `arg`;
+/// ownership of `arg` transfers to `work`, which must free it (or leak).
+/// The plugin library stays mapped until the callback returns. Must be
+/// called from a runtime context, like [`HostSpawn`].
+pub type HostSpawnBlocking = unsafe extern "C" fn(
+    *mut std::ffi::c_void,
+    unsafe extern "C" fn(*mut std::ffi::c_void),
+    *mut std::ffi::c_void,
+);
 
 /// Validates a config payload (JSON string); 0 = valid, non-zero = invalid.
 pub type ValidateConfig = unsafe extern "C" fn(*const c_char) -> i32;
@@ -85,6 +107,11 @@ pub struct HostVtable {
     pub log: extern "C" fn(message: *const c_char),
     /// Spawns a plugin future on the host runtime (see [`HostSpawn`]).
     pub spawn: HostSpawn,
+    /// Sleeps on the host runtime (see [`HostSleep`]).
+    pub sleep: HostSleep,
+    /// Runs a blocking callback on the host's blocking pool (see
+    /// [`HostSpawnBlocking`]).
+    pub spawn_blocking: HostSpawnBlocking,
     /// Provides a service from plugin apply.
     pub provide: HostProvide,
     /// Reads a service back into the plugin.
@@ -242,6 +269,120 @@ where
     unsafe { (vtable.spawn)(vtable.data, ffi) };
     Spawned {
         receiver: Some(receiver),
+    }
+}
+
+/// Sleeps on the host runtime.
+///
+/// The returned future is host-built (`tokio::time::sleep` on the host's
+/// runtime); awaiting it suspends until `duration` elapses and dropping it
+/// cancels the timer. Must be *called* from a runtime context (host
+/// callback or spawned async code), like [`spawn`].
+pub fn sleep(vtable: &HostVtable, duration: std::time::Duration) -> FfiFuture<()> {
+    let millis = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    (vtable.sleep)(vtable.data, millis)
+}
+
+/// Runs a blocking closure on the host's blocking pool.
+///
+/// The closure runs on a host blocking-pool thread and its result is
+/// delivered back through a oneshot channel (see [`Spawned`]). Unlike
+/// `spawn`, a blocking task cannot be cancelled once started; dropping the
+/// returned future only drops the receiver.
+///
+/// The closure (and its output) must be `Send`: the host may run it on any
+/// blocking-pool thread.
+pub fn spawn_blocking<F, T>(vtable: &HostVtable, f: F) -> Spawned<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (sender, receiver) = oneshot::channel();
+    let arg = Box::into_raw(Box::new(BlockingArg { f: Some(f), sender }));
+    // SAFETY: the caller guarantees the vtable; `arg` is owned by the
+    // callback (`run_blocking`), which frees it exactly once.
+    unsafe { (vtable.spawn_blocking)(vtable.data, run_blocking::<F, T>, arg.cast()) };
+    Spawned {
+        receiver: Some(receiver),
+    }
+}
+
+/// The plugin-side argument handed to the host's blocking-pool callback.
+struct BlockingArg<F, T> {
+    f: Option<F>,
+    sender: oneshot::Sender<T>,
+}
+
+/// Runs a blocking closure and forwards its result through the oneshot.
+///
+/// Owns `arg` (freed exactly once) and runs on a host blocking-pool thread.
+unsafe extern "C" fn run_blocking<F, T>(arg: *mut std::ffi::c_void)
+where
+    F: FnOnce() -> T,
+{
+    // SAFETY: `arg` is a Box<BlockingArg<F, T>> allocated by `spawn_blocking`
+    // and owned by this callback.
+    let arg = unsafe { Box::from_raw(arg as *mut BlockingArg<F, T>) };
+    let BlockingArg { f, sender } = *arg;
+    if let Some(f) = f {
+        let _ = sender.send(f());
+    }
+}
+
+/// Awaits `future`, timing out after `duration` on the host runtime.
+///
+/// Returns `Err(())` if the timer elapses first; the inner future is then
+/// dropped (cancelled). Composes the host `sleep` service with the plugin
+/// future — no additional ABI surface.
+pub async fn timeout<F>(
+    vtable: &HostVtable,
+    duration: std::time::Duration,
+    future: F,
+) -> Result<F::Output, ()>
+where
+    F: std::future::Future,
+{
+    let mut timer = Box::pin(sleep(vtable, duration));
+    let mut future = Box::pin(future);
+    std::future::poll_fn(move |cx| {
+        // The inner future wins when both are ready in the same poll.
+        if let Poll::Ready(output) = future.as_mut().poll(cx) {
+            return Poll::Ready(Ok(output));
+        }
+        match timer.as_mut().poll(cx) {
+            Poll::Ready(()) => Poll::Ready(Err(())),
+            Poll::Pending => Poll::Pending,
+        }
+    })
+    .await
+}
+
+/// A periodic timer driven by the host runtime.
+///
+/// Built from the host `sleep` service: each `tick` waits until the next
+/// period boundary, so ticks do not drift with the work done between them.
+pub struct Interval<'a> {
+    vtable: &'a HostVtable,
+    period: std::time::Duration,
+    deadline: Option<std::time::Instant>,
+}
+
+impl<'a> Interval<'a> {
+    /// Creates an interval whose first tick fires after `period`.
+    pub fn new(vtable: &'a HostVtable, period: std::time::Duration) -> Self {
+        Interval {
+            vtable,
+            period,
+            deadline: None,
+        }
+    }
+
+    /// Waits until the next tick.
+    pub async fn tick(&mut self) {
+        let now = std::time::Instant::now();
+        let deadline = self.deadline.unwrap_or(now + self.period);
+        self.deadline = Some(deadline + self.period);
+        sleep(self.vtable, deadline.saturating_duration_since(now)).await;
     }
 }
 

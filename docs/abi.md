@@ -21,7 +21,7 @@ version mismatches:
 | `plugin_validate_config` | `fn(*const c_char) -> i32` | (optional) Config validation; 0 = valid, non-zero = rejected |
 | `plugin_apply` | `fn(*mut PluginHandle, *const c_char) -> i32` | (optional) Applies a config; runs inside a host session |
 
-Current version: `PLUGIN_API_VERSION = 4`.
+Current version: `PLUGIN_API_VERSION = 5`.
 
 - v2: entry protocol + async bridge (`log`/`spawn`).
 - v3: the vtable gains five Context bridge entries:
@@ -29,6 +29,8 @@ Current version: `PLUGIN_API_VERSION = 4`.
 - v4: the async bridge moves to `async-ffi` — `spawn` hands the host an
   `FfiFuture<()>` (a `#[repr(C)]` handle with poll/drop function pointers)
   instead of a hand-rolled boxed future with a shared refcounted waker cell.
+- v5: the vtable gains two host async services, `sleep` (host timer) and
+  `spawn_blocking` (host blocking pool), both `FfiFuture`-based.
 
 `deps` declares the host crates/services the plugin links against; the HMR
 plugin uses it for dependency classification.
@@ -43,6 +45,8 @@ pointers are only invoked on the host thread (single-thread discipline, §6).
 pub struct HostVtable {
     pub log: extern "C" fn(message: *const c_char),          // logging
     pub spawn: HostSpawn,                                    // async bridge
+    pub sleep: HostSleep,                                    // host timer service
+    pub spawn_blocking: HostSpawnBlocking,                   // host blocking pool
     pub provide: HostProvide,                                // register a service
     pub get: HostGet,                                        // read a service
     pub on: HostOn,                                          // register an event listener
@@ -100,6 +104,32 @@ plugin instance is disposed.
   finished tasks). No refcounted state is shared across the boundary.
 - A panicking plugin future is caught by async-ffi (`FfiPoll::Panicked`)
   and re-raised on the host, instead of unwinding across the FFI boundary.
+
+### Async services (`sleep` / `spawn_blocking`)
+
+The vtable exposes two host-owned async services so plugin code can use the
+host runtime instead of spawning its own threads or timers:
+
+- `sleep(millis) -> FfiFuture<()>`: builds `tokio::time::sleep` on the host
+  and returns the future handle. The plugin awaits it like any future;
+  dropping it cancels the timer. The SDK wrapper is
+  `cordis_sdk::sleep(vtable, duration)`.
+- `spawn_blocking(work, arg)`: runs `work(arg)` exactly once on the host's
+  blocking pool. **Ownership of `arg` transfers to `work`**, which must free
+  it (or leak); the plugin must not touch `arg` after the call. The host
+  keeps the plugin library mapped until the callback returns, and the SDK
+  wrapper (`cordis_sdk::spawn_blocking(vtable, closure)`) delivers the
+  result back through the same oneshot handshake as `spawn`. A blocking
+  task cannot be cancelled once started.
+- The SDK composes two more helpers on top of `sleep`, with no extra ABI:
+  `cordis_sdk::timeout(vtable, duration, future)` races a future against the
+  host timer, and `cordis_sdk::Interval::new(vtable, period)` yields
+  drift-free periodic ticks.
+
+All three vtable entries must be called from a **runtime context** (a host
+callback or spawned async code): they touch tokio's `Handle::current()`, so
+calling them from a plugin-owned thread outside the runtime is an error,
+exactly like `spawn`.
 
 ## 3. Session model (handle → Context)
 
@@ -199,6 +229,10 @@ vtable plus `ContextBridge`:
 | `Effect::Disposer(d)` | `bridge.effect_disposer(fn)` | Runs in reverse registration order on unload |
 | `ctx.logger()` | vtable `log` | String-only logging, no structured logger |
 | `tokio::task::spawn_local` | SDK `spawn(vtable, future)` | The host runtime drives the task |
+| `tokio::time::sleep` | SDK `sleep(vtable, duration)` | Host timer; dropping cancels |
+| `tokio::time::timeout` | SDK `timeout(vtable, duration, future)` | Composed from `sleep` |
+| `tokio::time::interval` | SDK `Interval::new(vtable, period)` | Drift-free periodic ticks |
+| `tokio::task::spawn_blocking` | SDK `spawn_blocking(vtable, closure)` | Host blocking pool |
 
 Limitations:
 

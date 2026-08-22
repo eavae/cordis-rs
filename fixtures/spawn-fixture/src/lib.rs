@@ -235,6 +235,112 @@ pub unsafe extern "C" fn plugin_pending_wake_later(handle: *mut PluginHandle, de
     });
 }
 
+/// Spawns a task that awaits the host `sleep` service and logs on
+/// completion: the timer fires on the host runtime, not on a plugin thread.
+///
+/// # Safety
+///
+/// `handle` must come from `plugin_create` and stay alive for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn plugin_sleep_then_log(handle: *mut PluginHandle, millis: u64) {
+    let instance = unsafe { instance(handle) };
+    // SAFETY: the host vtable outlives the plugin instance (host contract).
+    let vtable = unsafe { &*instance.vtable };
+    // SAFETY: the vtable is the one the host provided.
+    let vtable: &'static HostVtable = unsafe { std::mem::transmute(vtable) };
+    // SAFETY: the vtable is the one the host provided.
+    drop(unsafe {
+        spawn(vtable, async move {
+            cordis_sdk::sleep(vtable, Duration::from_millis(millis)).await;
+            let message = std::ffi::CString::new(format!("sleep {millis}ms completed")).unwrap();
+            (vtable.log)(message.as_ptr());
+            COMPLETED.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+}
+
+/// Spawns a task that runs a closure on the host's blocking pool and logs
+/// the result.
+///
+/// # Safety
+///
+/// `handle` must come from `plugin_create` and stay alive for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn plugin_spawn_blocking_log(handle: *mut PluginHandle) {
+    let instance = unsafe { instance(handle) };
+    // SAFETY: the host vtable outlives the plugin instance (host contract).
+    let vtable = unsafe { &*instance.vtable };
+    // SAFETY: the vtable is the one the host provided.
+    let vtable: &'static HostVtable = unsafe { std::mem::transmute(vtable) };
+    // SAFETY: the vtable is the one the host provided.
+    drop(unsafe {
+        spawn(vtable, async move {
+            let result = cordis_sdk::spawn_blocking(vtable, || 6 * 7)
+                .await
+                .unwrap_or(0);
+            let message =
+                std::ffi::CString::new(format!("spawn_blocking result: {result}")).unwrap();
+            (vtable.log)(message.as_ptr());
+            COMPLETED.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+}
+
+/// Spawns a task that times out a never-ready future via the SDK `timeout`
+/// helper (composed from the host `sleep` service).
+///
+/// # Safety
+///
+/// `handle` must come from `plugin_create` and stay alive for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn plugin_timeout_elapses(handle: *mut PluginHandle) {
+    let instance = unsafe { instance(handle) };
+    // SAFETY: the host vtable outlives the plugin instance (host contract).
+    let vtable = unsafe { &*instance.vtable };
+    // SAFETY: the vtable is the one the host provided.
+    let vtable: &'static HostVtable = unsafe { std::mem::transmute(vtable) };
+    // SAFETY: the vtable is the one the host provided.
+    drop(unsafe {
+        spawn(vtable, async move {
+            let timed_out = cordis_sdk::timeout(
+                vtable,
+                Duration::from_millis(20),
+                std::future::pending::<u32>(),
+            )
+            .await
+            .is_err();
+            let message = std::ffi::CString::new(format!("timeout fired: {timed_out}")).unwrap();
+            (vtable.log)(message.as_ptr());
+            COMPLETED.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+}
+
+/// Spawns a task that awaits two ticks of an SDK `Interval` and logs.
+///
+/// # Safety
+///
+/// `handle` must come from `plugin_create` and stay alive for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn plugin_interval_ticks(handle: *mut PluginHandle) {
+    let instance = unsafe { instance(handle) };
+    // SAFETY: the host vtable outlives the plugin instance (host contract).
+    let vtable = unsafe { &*instance.vtable };
+    // SAFETY: the vtable is the one the host provided.
+    let vtable: &'static HostVtable = unsafe { std::mem::transmute(vtable) };
+    // SAFETY: the vtable is the one the host provided.
+    drop(unsafe {
+        spawn(vtable, async move {
+            let mut interval = cordis_sdk::Interval::new(vtable, Duration::from_millis(20));
+            interval.tick().await;
+            interval.tick().await;
+            let message = std::ffi::CString::new("interval ticked twice").unwrap();
+            (vtable.log)(message.as_ptr());
+            COMPLETED.fetch_add(1, Ordering::SeqCst);
+        })
+    });
+}
+
 /// Host test helpers.
 #[unsafe(no_mangle)]
 pub extern "C" fn plugin_create_count() -> u32 {

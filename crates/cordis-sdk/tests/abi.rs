@@ -47,6 +47,8 @@ fn host_loads_fixture_and_round_trips() {
     let vtable = HostVtable {
         log: log_message,
         spawn: noop_spawn,
+        sleep: noop_sleep,
+        spawn_blocking: noop_spawn_blocking,
         provide: noop_provide,
         get: noop_get,
         on: noop_on,
@@ -67,6 +69,18 @@ fn host_loads_fixture_and_round_trips() {
 
 unsafe extern "C" fn noop_spawn(_data: *mut std::ffi::c_void, _future: FfiFuture<()>) {}
 
+extern "C" fn noop_sleep(_data: *mut std::ffi::c_void, _millis: u64) -> FfiFuture<()> {
+    use async_ffi::FutureExt;
+    async {}.into_ffi()
+}
+
+unsafe extern "C" fn noop_spawn_blocking(
+    _data: *mut std::ffi::c_void,
+    _work: unsafe extern "C" fn(*mut std::ffi::c_void),
+    _arg: *mut std::ffi::c_void,
+) {
+}
+
 #[test]
 fn host_rejects_version_mismatch() {
     // SAFETY: fixture built by the workspace.
@@ -83,6 +97,8 @@ fn host_rejects_version_mismatch() {
     let vtable = HostVtable {
         log: noop_log,
         spawn: noop_spawn,
+        sleep: noop_sleep,
+        spawn_blocking: noop_spawn_blocking,
         provide: noop_provide,
         get: noop_get,
         on: noop_on,

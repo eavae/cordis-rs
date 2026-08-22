@@ -358,6 +358,110 @@ async fn late_wake_after_cancel_is_safe() {
     .await;
 }
 
+/// A plugin future awaits the host `sleep` service: the timer fires on the
+/// host runtime and the task completes after the requested duration.
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn host_sleep_service_completes_after_duration() {
+    let _serial = SERIAL.lock();
+    reset_counters();
+    async {
+        let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
+        let handle = unsafe { plugin.create(log_message) };
+        assert!(!handle.is_null());
+
+        LOGGED.lock().clear();
+        let library = unsafe { Library::new(fixture_path()) }.unwrap();
+        type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle, u64);
+        let spawn: libloading::Symbol<Spawn> =
+            unsafe { library.get(b"plugin_sleep_then_log") }.unwrap();
+        unsafe { spawn(handle, 30) };
+
+        wait_logged_timeout("sleep 30ms completed", std::time::Duration::from_secs(2)).await;
+        drop(plugin);
+    }
+    .await;
+}
+
+/// A plugin closure runs on the host's blocking pool and its result comes
+/// back through the SDK handshake.
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn spawn_blocking_runs_on_host_pool() {
+    let _serial = SERIAL.lock();
+    reset_counters();
+    async {
+        let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
+        let handle = unsafe { plugin.create(log_message) };
+        assert!(!handle.is_null());
+
+        LOGGED.lock().clear();
+        let library = unsafe { Library::new(fixture_path()) }.unwrap();
+        type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle);
+        let spawn: libloading::Symbol<Spawn> =
+            unsafe { library.get(b"plugin_spawn_blocking_log") }.unwrap();
+        unsafe { spawn(handle) };
+
+        wait_logged_timeout(
+            "spawn_blocking result: 42",
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+        drop(plugin);
+    }
+    .await;
+}
+
+/// The SDK `timeout` helper (composed from the host `sleep` service) fires
+/// when the inner future stays pending past the deadline.
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn sdk_timeout_fires_when_inner_future_is_pending() {
+    let _serial = SERIAL.lock();
+    reset_counters();
+    async {
+        let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
+        let handle = unsafe { plugin.create(log_message) };
+        assert!(!handle.is_null());
+
+        LOGGED.lock().clear();
+        let library = unsafe { Library::new(fixture_path()) }.unwrap();
+        type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle);
+        let spawn: libloading::Symbol<Spawn> =
+            unsafe { library.get(b"plugin_timeout_elapses") }.unwrap();
+        unsafe { spawn(handle) };
+
+        wait_logged_timeout("timeout fired: true", std::time::Duration::from_secs(2)).await;
+        drop(plugin);
+    }
+    .await;
+}
+
+/// The SDK `Interval` helper ticks on the host timer without drifting with
+/// the work between ticks.
+#[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn sdk_interval_ticks_on_host_timer() {
+    let _serial = SERIAL.lock();
+    reset_counters();
+    async {
+        let mut plugin = unsafe { SoPlugin::load(&fixture_path()) }.unwrap();
+        let handle = unsafe { plugin.create(log_message) };
+        assert!(!handle.is_null());
+
+        LOGGED.lock().clear();
+        let library = unsafe { Library::new(fixture_path()) }.unwrap();
+        type Spawn = unsafe extern "C" fn(*mut cordis_sdk::PluginHandle);
+        let spawn: libloading::Symbol<Spawn> =
+            unsafe { library.get(b"plugin_interval_ticks") }.unwrap();
+        unsafe { spawn(handle) };
+
+        wait_logged_timeout("interval ticked twice", std::time::Duration::from_secs(2)).await;
+        drop(plugin);
+    }
+    .await;
+}
+
 /// The vtable is version-checked by the fixture.
 #[test]
 fn fixture_exports_current_abi_version() {

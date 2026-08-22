@@ -11,7 +11,7 @@ use cordis_sdk::{
 use libloading::{Library, Symbol};
 
 use crate::context_bridge;
-use crate::host_runtime::{HostRuntime, host_spawn};
+use crate::host_runtime::{HostRuntime, host_sleep, host_spawn, host_spawn_blocking};
 use crate::plugin_meta::PluginMeta;
 
 type ApiVersion = unsafe extern "C" fn() -> u32;
@@ -288,6 +288,8 @@ pub fn host_vtable(
     HostVtable {
         log,
         spawn: host_spawn,
+        sleep: host_sleep,
+        spawn_blocking: host_spawn_blocking,
         provide: context_bridge::host_provide,
         get: context_bridge::host_get,
         on: context_bridge::host_on,

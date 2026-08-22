@@ -18,13 +18,15 @@
 | `plugin_validate_config` | `fn(*const c_char) -> i32` | (可选)配置校验,0 通过、非 0 拒绝 |
 | `plugin_apply` | `fn(*mut PluginHandle, *const c_char) -> i32` | (可选)应用配置;在 host 会话内执行 |
 
-当前版本:`PLUGIN_API_VERSION = 4`。
+当前版本:`PLUGIN_API_VERSION = 5`。
 
 - v2:入口协议 + async 桥(`log`/`spawn`)。
 - v3:vtable 新增 `provide`/`get`/`on`/`emit`/`effect_disposer` 五个 Context 桥入口。
 - v4:async 桥迁移到 `async-ffi`——`spawn` 交给 host 的不再是手写的
   boxed future + 共享引用计数 waker cell,而是一个 `FfiFuture<()>`
   (`#[repr(C)]` 句柄,内含 poll/drop 函数指针)。
+- v5:vtable 新增两个 host 异步服务:`sleep`(host 定时器)与
+  `spawn_blocking`(host 阻塞线程池),均为 `FfiFuture` 形态。
 
 `deps` 声明插件链接的 host crate/服务,HMR 插件用它做依赖分类。
 
@@ -37,6 +39,8 @@
 pub struct HostVtable {
     pub log: extern "C" fn(message: *const c_char),          // 日志
     pub spawn: HostSpawn,                                    // 异步桥
+    pub sleep: HostSleep,                                    // host 定时器服务
+    pub spawn_blocking: HostSpawnBlocking,                   // host 阻塞线程池
     pub provide: HostProvide,                                // 注册服务
     pub get: HostGet,                                        // 读取服务
     pub on: HostOn,                                          // 注册事件监听
@@ -89,6 +93,27 @@ SDK 的 `spawn(vtable, future)` 把 future 包装成 `async_ffi::FfiFuture<()>`
   会忽略已完成任务的 waker)。边界上不再共享任何引用计数状态。
 - 插件 future 在 poll 中 panic 会被 async-ffi 捕获(`FfiPoll::Panicked`)
   并在 host 侧重新抛出,而不是跨 FFI 边界展开。
+
+### 异步服务(`sleep` / `spawn_blocking`)
+
+vtable 暴露两个 host 拥有的异步服务,让插件代码使用 host 运行时,而不必自己
+开线程或造定时器:
+
+- `sleep(millis) -> FfiFuture<()>`:在 host 侧构造 `tokio::time::sleep` 并返回
+  future 句柄。插件像普通 future 一样 await 它;drop 即取消定时器。SDK 包装为
+  `cordis_sdk::sleep(vtable, duration)`。
+- `spawn_blocking(work, arg)`:在 host 的阻塞线程池上恰好执行一次 `work(arg)`。
+  **`arg` 的所有权转移给 `work`**,由它负责释放(或泄漏);调用之后插件不得再
+  碰 `arg`。host 会保持插件库映射到回调返回为止,SDK 包装
+  (`cordis_sdk::spawn_blocking(vtable, closure)`)通过与 `spawn` 相同的
+  oneshot 握手把结果送回。阻塞任务一旦开始就无法取消。
+- SDK 在 `sleep` 之上还组合出两个无需新增 ABI 的辅助:
+  `cordis_sdk::timeout(vtable, duration, future)` 让 future 与 host 定时器
+  赛跑;`cordis_sdk::Interval::new(vtable, period)` 提供不随负载漂移的周期 tick。
+
+这三个 vtable 入口都必须在**运行时上下文**中调用(host 回调或 spawn 出的异步
+代码):它们会触碰 tokio 的 `Handle::current()`,在插件自建线程等运行时之外的
+地方调用会出错——与 `spawn` 的限制一致。
 
 ## 3. 会话模型(handle → Context)
 
@@ -167,6 +192,10 @@ host 任务为 `Send`,运行在 tokio worker 池上(多线程化计划阶段 2):
 | `Effect::Disposer(d)` | `bridge.effect_disposer(fn)` | 随 fiber 卸载按逆序执行 |
 | `ctx.logger()` | vtable `log` | 仅字符串日志,无结构化 logger |
 | `tokio::task::spawn_local` | SDK `spawn(vtable, future)` | 异步任务交给 host runtime |
+| `tokio::time::sleep` | SDK `sleep(vtable, duration)` | host 定时器;drop 即取消 |
+| `tokio::time::timeout` | SDK `timeout(vtable, duration, future)` | 由 `sleep` 组合而成 |
+| `tokio::time::interval` | SDK `Interval::new(vtable, period)` | 不漂移的周期 tick |
+| `tokio::task::spawn_blocking` | SDK `spawn_blocking(vtable, closure)` | host 阻塞线程池 |
 
 限制:
 
