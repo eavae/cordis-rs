@@ -175,7 +175,7 @@ pub struct EventOptions {
 pub type ListenerFilter = Arc<dyn Fn(&dyn EventFilter) -> bool + Send + Sync>;
 
 /// A filter attached to a dispatch call (`thisArg` in the TS reference).
-pub trait EventFilter: Any {
+pub trait EventFilter: Any + Send + Sync {
     /// Downcasts the filter to its concrete type.
     fn as_any(&self) -> &dyn Any;
     /// Returns whether a hook registered on `hook_ctx` should run.
