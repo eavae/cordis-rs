@@ -67,9 +67,9 @@ pub unsafe extern "C" fn host_spawn(data: *mut c_void, future: *mut c_void) {
     // SAFETY: `future` is a Box<BoxedFuture> allocated by the plugin side.
     let future = unsafe { Box::from_raw(future as *mut BoxedFuture) };
 
-    let wake_slot = Arc::new(WakerSlot {
+    let wake_slot = Box::into_raw(Box::new(WakerSlot {
         waker: Mutex::new(None),
-    });
+    }));
     let task = HostTask {
         future: Some(*future),
         waker_data: None,
@@ -91,7 +91,10 @@ struct WakerSlot {
 struct HostTask {
     future: Option<BoxedFuture>,
     waker_data: Option<RcWaker>,
-    wake_slot: Arc<WakerSlot>,
+    /// The per-task waker slot; owned by the `WakerData` (freed through its
+    /// `drop_data` callback once the last waker reference drops), so a wake
+    /// from a thread holding a waker clone stays valid after the task ends.
+    wake_slot: *mut WakerSlot,
     /// Keeps the plugin library mapped until this task is dropped: the
     /// boxed future is dropped in [`Drop for HostTask`] while the library is
     /// still loaded.
@@ -106,14 +109,18 @@ impl std::future::Future for HostTask {
             return Poll::Ready(());
         };
         // Hand the runtime waker to the plugin so its future can wake us.
-        *self.wake_slot.waker.lock() = Some(cx.waker().clone());
+        // SAFETY: the slot is owned by `self.waker_data` (or about to be),
+        // and the task holds its reference for the whole poll.
+        let slot = unsafe { &*self.wake_slot };
+        *slot.waker.lock() = Some(cx.waker().clone());
         if self.waker_data.is_none() {
-            // SAFETY: the task keeps its `Arc<WakerSlot>` clone alive until
-            // the plugin future (and every waker reference it holds) has
-            // been dropped, so the raw pointer stays valid for `wake_task`.
+            // SAFETY: `WakerData` takes ownership of the slot; it is freed
+            // by `drop_waker_slot` only after the last waker reference
+            // (including this task's own) is gone.
             self.waker_data = Some(WakerData::new(
-                Arc::as_ptr(&self.wake_slot).cast_mut().cast(),
+                self.wake_slot.cast(),
                 wake_task,
+                drop_waker_slot,
             ));
         }
         let waker_ptr = self
@@ -150,16 +157,23 @@ impl Drop for HostTask {
 /// single-threaded polling loop.
 unsafe extern "C" fn wake_task(data: *mut c_void) {
     // SAFETY: `data` comes from `WakerData::new` in `HostTask::poll` and
-    // points to the task's `WakerSlot`, which stays alive until the task and
-    // all of its waker references are dropped.
+    // points to the task's `WakerSlot`, which stays alive as long as any
+    // waker reference exists (the slot is owned by the `WakerData`).
     let slot = unsafe { &*(data as *const WakerSlot) };
     if let Some(waker) = slot.waker.lock().clone() {
         waker.wake();
     }
 }
 
+/// Releases a [`WakerSlot`] allocated by `host_spawn`.
+unsafe extern "C" fn drop_waker_slot(data: *mut c_void) {
+    // SAFETY: the pointer comes from `host_spawn`'s `Box::into_raw`.
+    drop(unsafe { Box::from_raw(data as *mut WakerSlot) });
+}
+
 // SAFETY: the plugin future is opaque to the host (polled through the
 // plugin's own function pointers), so the task only moves the `BoxedFuture`
-// handle between polls. Plugin futures are assumed `Send` under the stage-2
-// contract; per-plugin thread affinity is finalized in stage 3.
+// handle between polls. Under the plugin Send contract (stage 3 decision),
+// plugin futures are `Send` and thread-agnostic: the host may poll them on
+// any runtime thread.
 unsafe impl Send for HostTask {}

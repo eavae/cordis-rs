@@ -135,9 +135,12 @@ Host tasks are `Send` and run on the tokio worker pool (stage 2 of the
 multithreading plan):
 
 - Compile time: host and SDK state is `Send + Sync` (`Arc`, atomics, lock-free
-  snapshots and short-scoped `Mutex`es). Plugin futures handed to the host
-  through `spawn` are assumed `Send`; per-plugin thread affinity is finalized
-  in stage 3.
+  snapshots and short-scoped `Mutex`es).
+- **Plugin Send contract (stage 3 decision)**: plugin futures handed to the
+  host through `spawn` must be `Send` and thread-agnostic. The host may poll
+  a plugin future on any runtime thread and may migrate it between threads
+  across await points, so plugin code must not depend on thread-local state
+  or on a fixed host thread.
 - Runtime: sessions are pushed on the thread driving the current host→plugin
   call, so vtable calls from a thread without a session fail gracefully
   instead of panicking. The live-handle registry is process-wide, so

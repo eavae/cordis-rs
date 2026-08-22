@@ -200,25 +200,30 @@ pub unsafe extern "C" fn plugin_apply(_handle: *mut PluginHandle, _config: *cons
 #[repr(C)]
 pub struct WakerData {
     refs: AtomicUsize,
-    /// Opaque host context handed back to `wake`; the host keeps it valid
-    /// for as long as any waker reference is alive (e.g. a per-task slot
-    /// holding the tokio waker that re-schedules the task).
+    /// Opaque host context handed back to `wake`; owned by the cell and
+    /// released through `drop_data` when the last waker reference drops
+    /// (e.g. a per-task slot holding the tokio waker that re-schedules the
+    /// task).
     data: *mut std::ffi::c_void,
     wake: unsafe extern "C" fn(*mut std::ffi::c_void),
+    /// Releases `data` once the last waker reference is gone.
+    drop_data: unsafe extern "C" fn(*mut std::ffi::c_void),
 }
 
 impl WakerData {
     /// Creates a waker data cell owned by the caller; `data` is passed back
-    /// to `wake` and must stay valid for the cell's lifetime.
+    /// to `wake` and released through `drop_data` when the cell is freed.
     #[allow(clippy::new_ret_no_self)]
     pub fn new(
         data: *mut std::ffi::c_void,
         wake: unsafe extern "C" fn(*mut std::ffi::c_void),
+        drop_data: unsafe extern "C" fn(*mut std::ffi::c_void),
     ) -> RcWaker {
         RcWaker(Box::into_raw(Box::new(Self {
             refs: AtomicUsize::new(1),
             data,
             wake,
+            drop_data,
         })))
     }
 }
@@ -227,7 +232,8 @@ impl WakerData {
 pub struct RcWaker(*mut WakerData);
 
 // SAFETY: wakers may be moved between threads by futures that require Send;
-// the refcount is atomic and wake is a no-op under the cooperative model.
+// the refcount is atomic and the host wake callback re-schedules the task
+// from any thread.
 unsafe impl Send for RcWaker {}
 unsafe impl Sync for RcWaker {}
 
@@ -291,7 +297,8 @@ unsafe fn waker_drop(ptr: *const ()) {
     // SAFETY: the pointer was produced by `waker_clone` / `waker_from_raw`.
     let data = unsafe { &*(ptr as *const WakerData) };
     if data.refs.fetch_sub(1, Ordering::AcqRel) == 1 {
-        // SAFETY: the last reference frees the allocation.
+        // SAFETY: the last reference frees the context and the allocation.
+        unsafe { (data.drop_data)(data.data) };
         drop(unsafe { Box::from_raw(ptr as *mut WakerData) });
     }
 }

@@ -116,8 +116,11 @@ unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, config: *const c_ch
 host 任务为 `Send`,运行在 tokio worker 池上(多线程化计划阶段 2):
 
 - 编译期:host 与 SDK 状态均为 `Send + Sync`(`Arc`、原子类型、无锁快照和短临界区
-  `Mutex`)。经 `spawn` 交给 host 的插件 future 按 `Send` 契约处理;逐插件线程
-  亲和性在阶段 3 最终确定。
+  `Mutex`)。
+- **插件 Send 契约(阶段 3 决策)**:经 `spawn` 交给 host 的插件 future 必须是
+  `Send` 且与线程无关。host 可能在任意 runtime 线程上 poll 插件 future,并在
+  await 点之间把它迁移到其他线程;插件代码不得依赖 thread-local 状态或某个固定
+  host 线程。
 - 运行期:会话在当前驱动 host→plugin 调用的线程上压栈;没有会话的线程调用 vtable
   会静默失败而不会 panic。存活句柄注册表是进程级的,任何线程上的延迟回调都会跳过
   已 dispose 的插件。

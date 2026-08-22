@@ -23,11 +23,10 @@ use parking_lot::Mutex;
 use cordis_core::{Context, Effect, EventCallback, EventOptions, WaterfallNext, sync_disposer};
 use cordis_sdk::{PluginDisposer, PluginEventCallback, PluginHandle};
 
-/// A plugin handle pointer that is `Send + Sync` under the plugin pinning
-/// contract. The pointer is only dereferenced through the vtable while the
-/// owning `SoPlugin` is alive, and all callbacks touching it are confined to
-/// the thread driving the current host→plugin call (stage 3: per-plugin
-/// pinned threads).
+/// A plugin handle pointer that is `Send + Sync` under the plugin Send
+/// contract: the pointer is only dereferenced through the vtable while the
+/// owning `SoPlugin` is alive, and each host→plugin call runs on exactly one
+/// thread (the caller's), so the pointer is never used concurrently.
 #[derive(Clone, Copy)]
 pub struct PluginHandlePtr(pub *mut PluginHandle);
 
