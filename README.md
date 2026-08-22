@@ -77,119 +77,12 @@ Run and stop:
 
 ### 4. Writing a plugin
 
-The `.so` plugin is the primary form. The `Cargo.toml` must be a cdylib and re-allow `unsafe_code`:
-
-```toml
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-cordis-sdk = { path = "...", default-features = false }
-
-[lints.rust]
-unsafe_code = "allow"
-```
-
-`src/lib.rs` exports the agreed C ABI symbols (full protocol in [docs/abi.md](docs/abi.md)):
-
-```rust
-use cordis_sdk::{HostVtable, PLUGIN_API_VERSION, PluginHandle};
-
-const META: &std::ffi::CStr =
-    c"{\"name\":\"cordis-hello\",\"version\":\"0.1.0\",\"inject\":[],\"provide\":[]}";
-
-#[unsafe(no_mangle)]
-pub extern "C" fn plugin_api_version() -> u32 {
-    PLUGIN_API_VERSION
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn plugin_create(host: *const HostVtable) -> *mut PluginHandle {
-    if host.is_null() {
-        return std::ptr::null_mut();
-    }
-    Box::into_raw(Box::new(host)).cast::<PluginHandle>()
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn plugin_dispose(handle: *mut PluginHandle) {
-    if !handle.is_null() {
-        drop(unsafe { Box::from_raw(handle as *mut *const HostVtable) });
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn plugin_meta() -> *const std::ffi::c_char {
-    META.as_ptr()
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, _config: *const std::ffi::c_char) -> i32 {
-    let vtable = unsafe { *(handle as *const *const HostVtable) };
-    let message = c"hello from cordis-rs";
-    unsafe { ((*vtable).log)(message.as_ptr()) };
-    0
-}
-```
-
-During apply, the plugin reaches Context capabilities through the SDK's `ContextBridge` (provide/get services, on/emit events, register disposers, spawn async tasks); every value crossing the boundary is a JSON string.
-
-There is also an **in-process plugin** form (linked as a library, no ABI): build a `Plugin { name, inject, apply, .. }` and call `ctx.plugin(&plugin, config)`. This suits first-party plugins shipped with the app. Full example: [crates/cordis-sdk/examples/hello.rs](crates/cordis-sdk/examples/hello.rs).
-
-## Usage differences from the JS original (for plugin authors)
-
-If you know the JS version of cordis, these are the differences you will feel directly when writing plugins.
-
-**Plugin forms**
-
-- JS: three forms — a function plugin `export function apply(ctx, config)`, a class plugin (`static inject`), and an object plugin `{ apply }`.
-- Rust: two forms — an in-process plugin built as `Plugin { name, inject, apply, .. }` (`apply: Rc<fn(&Context, &Rc<dyn Any>) -> Effect>`), or a `.so` plugin exporting C ABI symbols. There is no class form; config is `Rc<dyn Any>` in-process and JSON across the `.so` boundary.
-
-**Dependency injection (inject)**
-
-- JS: `static inject = ['timer']` or the `@Inject()` decorator.
-- Rust: the `Plugin.inject` field, `ctx.inject(&["timer"], callback)`, or the `inject: [...]` entry field in the config file. The reactive semantics are unchanged: a fiber stays pending until its dependencies are ready, starts when they come online, and unloads when they go away.
-- The `#[cordis::inject]` macro is currently a marker only; it does not transform code.
-
-**Services**
-
-- JS: `class Foo extends Service`, accessed through the `ctx.foo` proxy; accessing a service without inject throws.
-- Rust: `#[service] struct Foo;` generates the `Service` impl and a typed accessor `ctx.foo()` (returning a handle that carries the caller's context); `ctx.get::<Foo>()` / `ctx.get_str("foo")` also work. An unavailable service yields `None` instead of throwing.
-- The callable JS service `ctx.logger('name')` becomes `ctx.logger().named("name")`.
-
-**Config validation and merging**
-
-- JS: any Standard Schema V1 validator (the ecosystem commonly uses schemastery).
-- Rust: a `.so` plugin exports `plugin_validate_config` (JSON in, `0` accepts); in-process plugins use `ctx.plugin_with_validator(..)`. Config merging moves from `Object.assign` semantics to the `Config` trait's `merge` method. Neither version supports async validation.
-
-**Cleanup logic (effects)**
-
-- JS: the plugin function returns a cleanup function / generator / Promise; `ctx.effect(fn)` registers additional cleanup.
-- Rust: return an `Effect` enum (`Disposer` / `Async` / `Iterable` / …), built with the `sync_disposer()` / `async_disposer()` helpers; `ctx.effect(..)` is the same. Neither version has `ctx.onDispose` (removed upstream in v4).
-
-**Events**
-
-- The five dispatch modes keep their names and semantics: `emit` / `parallel` / `serial` / `bail` / `waterfall`; `on` / `once` are the same; listeners are removed automatically when their fiber unloads — there is no `off`.
-- Arguments are `&[Rc<dyn Any>]` instead of rest parameters; `ctx.on` returns an `EffectHandle` instead of a `() => boolean` disposer; there is no TS `declare module 'cordis' { interface Events }` augmentation — event names are plain strings.
-- On the `.so` side everything goes through `ContextBridge`, and event arguments are always serialized as a JSON array.
-- Upstream v4 core has no `ready` / `dispose` lifecycle events; this port matches that.
-
-**Timers**
-
-- JS: `ctx.timeout(cb, ms)` / `ctx.interval` / `ctx.throttle` / `ctx.debounce` (mixed into ctx).
-- Rust: associated functions such as `TimerService::timeout(&ctx, cb, ms)` with an explicit `ctx` argument; still bound to the fiber lifecycle — disposing cancels.
-
-**Config files**
-
-- Entry fields are fully aligned: `id` / `name` / `config` / `group` / `disabled` / `inject` / `isolate` / `intercept`; nested entry ids are still joined with `:`.
-- The JS `!js` expression tag becomes `!expr` (a minijinja template with three built-in functions: `env()` / `platform()` / `base_url()`), and it may only appear inside `config`.
-- The entry `name`: in JS it is an npm package name or module path; here it is the `name` from the `.so` plugin's `plugin_meta`. Built-in plugins keep the `@cordisjs/plugin-group` / `@cordisjs/plugin-include` / `@cordisjs/plugin-hmr` names so existing configs migrate cleanly.
-
-**Hot module replacement (HMR)**
-
-- JS: requires `node --expose-internals`; clears the module cache and re-imports, with source-level dependency analysis.
-- Rust: no special runtime flag needed; dependency analysis uses the declarative `deps` metadata exported by each `.so`; config-file watching, the `hmr/change` event, and rollback-on-failure semantics are preserved.
-- There is no built-in "rebuild on change" pipeline yet — rebuild and swap the artifact yourself (e.g. with `cargo watch`); on macOS, dynamic libraries with TLS are never unloaded, so reload artifacts must use content-hash names (`name@hash.so`).
+A plugin is a cdylib that speaks the plugin ABI. The protocol (exported
+symbols, metadata format) and a complete example live in
+[docs/abi.md](docs/abi.md); the `cordis-sdk` crate docs cover the authoring
+API. There is also an **in-process plugin** form (linked as a library, no
+ABI) for first-party plugins shipped with the app — see
+[crates/cordis-sdk/examples/hello.rs](crates/cordis-sdk/examples/hello.rs).
 
 ## System design differences
 
@@ -197,19 +90,25 @@ These are the architectural points where the port deliberately diverges from the
 
 **Plugin loading: in-process modules ↔ cdylib + C ABI**
 
-Upstream plugins are JS modules sharing the host process and heap, passing arbitrary objects freely. Here plugins compile to cdylibs; the host loads them via `libloading` and validates every exported symbol. A plugin only sees an opaque `PluginHandle` plus a `HostVtable` of function pointers; every value crossing the boundary is a JSON string, and **allocations never cross**. Before calling into a plugin, the host pushes a session binding the handle to the current fiber's Context, so one `.so` instance can serve many fibers without cross-talk. The cost: non-JSON object services cannot cross the boundary — a `.so` declares them in its `inject` metadata and the host resolves them.
+Upstream plugins are JS modules sharing the host process and heap, passing arbitrary objects freely. Here plugins compile to cdylibs; the host loads them via `libloading` and validates every exported symbol. A plugin only sees an opaque handle plus a host function-pointer table; every value crossing the boundary is a JSON string, and **allocations never cross**. Before calling into a plugin, the host binds a session from the handle to the current fiber's Context, so one `.so` instance can serve many fibers without cross-talk. The cost: non-JSON object services cannot cross the boundary — a `.so` declares them in its `inject` metadata and the host resolves them.
 
-**Concurrency: Node event loop ↔ tokio current-thread + LocalSet**
+**Concurrency: Node event loop ↔ multi-threaded tokio runtime**
 
-The port deliberately keeps the original's single-threaded semantics: `Rc` / `RefCell` throughout, no locks, and `Context` is `!Send`. The session registry is `thread_local`, so vtable calls from other threads fail silently instead of panicking. Plugins must not bring their own runtime; async work goes through the vtable `spawn` to be driven by the host.
+Upstream drives everything on a single event loop. This port runs on a
+multi-threaded tokio runtime: core data structures are `Send + Sync`
+(`Arc` + `parking_lot`), and lifecycle/async work is dispatched with
+`tokio::spawn` so it can run on worker threads. The loader's `.so` session
+registry is `thread_local`, so vtable calls from other threads fail silently
+instead of panicking. Plugins must not bring their own runtime; async work
+goes through the host's spawn so it is driven by the host.
 
-**Context passing: `this` closures / Proxy ↔ explicit parameters + ShadowContext**
+**Context passing: `this` closures / Proxy ↔ explicit parameters**
 
-Upstream service methods reach the root context through `this` closures, and service access goes through the dynamic `ctx[name]` proxy. The port makes everything explicit: service methods receive a `&ShadowContext` (distinguishing the service's own scope from the caller's scope, `Deref`-ing to the caller), and the `#[service]` macro generates typed accessors and traced handles in place of the proxy; dynamic string-based channels such as `get_str` remain available.
+Upstream service methods reach the root context through `this` closures, and service access goes through the dynamic `ctx[name]` proxy. The port makes everything explicit: service methods receive a shadow context that distinguishes the service's own scope from the caller's scope, and typed accessors replace the proxy; dynamic string-based access remains available.
 
 **Memory and lifetimes: GC ↔ ownership**
 
-The original relies on the GC for cycles; the port manages ownership by hand — the service store holds only weak references such as `Weak<Fiber>` to avoid `Rc` cycles, and the host keeps a liveness registry of plugin handles, checking it before invoking deferred callbacks (listeners / disposers) so freed plugin code is never called.
+The original relies on the GC for cycles; the port manages ownership by hand — the service store holds only weak references to avoid reference cycles, and the host keeps a liveness registry of plugin handles, checking it before invoking deferred callbacks (listeners / disposers) so freed plugin code is never called.
 
 **Effects and error model**
 

@@ -75,119 +75,10 @@ cp target/debug/libcordis_hello.dylib plugins/   # macOS;Linux 为 .so
 
 ### 4. 编写插件
 
-`.so` 插件是主要形态。`Cargo.toml` 必须是 cdylib,并自行放开 `unsafe_code`:
-
-```toml
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-cordis-sdk = { path = "...", default-features = false }
-
-[lints.rust]
-unsafe_code = "allow"
-```
-
-`src/lib.rs` 导出约定的 C ABI 符号(完整协议见 [docs/abi_cn.md](docs/abi_cn.md)):
-
-```rust
-use cordis_sdk::{HostVtable, PLUGIN_API_VERSION, PluginHandle};
-
-const META: &std::ffi::CStr =
-    c"{\"name\":\"cordis-hello\",\"version\":\"0.1.0\",\"inject\":[],\"provide\":[]}";
-
-#[unsafe(no_mangle)]
-pub extern "C" fn plugin_api_version() -> u32 {
-    PLUGIN_API_VERSION
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn plugin_create(host: *const HostVtable) -> *mut PluginHandle {
-    if host.is_null() {
-        return std::ptr::null_mut();
-    }
-    Box::into_raw(Box::new(host)).cast::<PluginHandle>()
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn plugin_dispose(handle: *mut PluginHandle) {
-    if !handle.is_null() {
-        drop(unsafe { Box::from_raw(handle as *mut *const HostVtable) });
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn plugin_meta() -> *const std::ffi::c_char {
-    META.as_ptr()
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, _config: *const std::ffi::c_char) -> i32 {
-    let vtable = unsafe { *(handle as *const *const HostVtable) };
-    let message = c"hello from cordis-rs";
-    unsafe { ((*vtable).log)(message.as_ptr()) };
-    0
-}
-```
-
-插件在 apply 期间通过 SDK 的 `ContextBridge` 访问 Context 能力(注册服务、读写服务、监听/发送事件、注册 disposer、spawn 异步任务),跨边界的值一律是 JSON 字符串。
-
-此外还有一种**进程内插件**形态(作为库直接链接,不走 ABI):构造 `Plugin { name, inject, apply, .. }` 再 `ctx.plugin(&plugin, config)`,适合应用自带的一等插件。完整示例见 [crates/cordis-sdk/examples/hello.rs](crates/cordis-sdk/examples/hello.rs)。
-
-## 与 JS 原版的用法差异(面向插件作者)
-
-如果你用过 JS 版 cordis,以下是写插件时会直接感受到的差异。
-
-**插件形态**
-
-- JS:三种形态 —— 函数插件 `export function apply(ctx, config)`、class 插件(`static inject`)、对象插件 `{ apply }`。
-- Rust:两种形态 —— 进程内插件构造 `Plugin { name, inject, apply, .. }`(`apply: Rc<fn(&Context, &Rc<dyn Any>) -> Effect>`);`.so` 插件导出 C ABI 符号。没有 class 形态;配置在进程内是 `Rc<dyn Any>`,在 `.so` 侧是 JSON。
-
-**依赖注入(inject)**
-
-- JS:`static inject = ['timer']` 或 `@Inject()` 装饰器。
-- Rust:`Plugin.inject` 字段、`ctx.inject(&["timer"], callback)`,或 entry 配置里的 `inject: [...]`。反应式语义不变:依赖未就绪时 fiber 处于 pending,服务上线自动启动、下线自动卸载。
-- `#[cordis::inject]` 宏目前只是标记,不改变代码。
-
-**服务(service)**
-
-- JS:`class Foo extends Service`,经 proxy `ctx.foo` 访问;未 inject 直接访问抛错。
-- Rust:`#[service] struct Foo;` 宏生成 `Service` impl 与类型化访问器 `ctx.foo()`(返回携带调用点上下文的 handle);也可 `ctx.get::<Foo>()` / `ctx.get_str("foo")`。服务未就绪返回 `Option`,不抛异常。
-- JS 的可调用服务 `ctx.logger('name')` → Rust 的 `ctx.logger().named("name")`。
-
-**配置校验与合并**
-
-- JS:任意 Standard Schema V1 校验器(生态常用 schemastery)。
-- Rust:`.so` 插件导出 `plugin_validate_config`(JSON 进,0 通过);进程内插件用 `ctx.plugin_with_validator(..)`。配置合并从 `Object.assign` 语义变为 `Config` trait 的 `merge` 方法。两个版本都不支持异步校验。
-
-**清理逻辑(effect)**
-
-- JS:插件函数返回清理函数 / generator / Promise;`ctx.effect(fn)` 注册额外清理。
-- Rust:返回 `Effect` 枚举(`Disposer` / `Async` / `Iterable` / …),用 `sync_disposer()` / `async_disposer()` 辅助构造;`ctx.effect(..)` 相同。
-
-**事件**
-
-- 五种派发模式同名同义:`emit` / `parallel` / `serial` / `bail` / `waterfall`;`on` / `once` 相同;监听器随 fiber 卸载自动移除,没有 `off`。
-- 参数是 `&[Rc<dyn Any>]` 而非 rest 参数;`ctx.on` 返回 `EffectHandle` 而非 `() => boolean`;没有 TS 的 `declare module 'cordis' { interface Events }` 类型增强,事件名就是普通字符串。
-- `.so` 插件侧走 `ContextBridge`,事件参数一律序列化为 JSON 数组。
-- 上游 v4 core 没有 `ready` / `dispose` 生命周期事件,本移植保持一致。
-
-**定时器**
-
-- JS:`ctx.timeout(cb, ms)` / `ctx.interval` / `ctx.throttle` / `ctx.debounce`(mixin 到 ctx)。
-- Rust:`TimerService::timeout(&ctx, cb, ms)` 等关联函数,显式传 `ctx`;同样绑定 fiber 生命周期,dispose 即取消。
-
-**配置文件**
-
-- entry 字段完全对齐:`id` / `name` / `config` / `group` / `disabled` / `inject` / `isolate` / `intercept`;嵌套 entry 的 id 同样用 `:` 分层。
-- JS 的 `!js` 表达式标签 → Rust 的 `!expr`(minijinja 模板,内置 `env()` / `platform()` / `base_url()` 三个函数),且只允许出现在 `config` 字段。
-- entry 的 `name`:JS 是 npm 包名或模块路径;Rust 是 `.so` 插件 `plugin_meta` 里的 name。内建插件沿用 `@cordisjs/plugin-group` / `@cordisjs/plugin-include` / `@cordisjs/plugin-hmr` 名称,便于迁移既有配置。
-
-**热重载(HMR)**
-
-- JS:需要 `node --expose-internals`,清理模块缓存后重新 import,做源码级依赖分析。
-- Rust:不需要特殊 runtime flag;依赖分析改用 `.so` 导出的声明式 `deps` 元数据;配置文件监听、`hmr/change` 事件、失败回滚语义一致。
-- 目前没有内建"改动后自动重新编译"流程,需自行用 `cargo watch` 等重建并替换产物;macOS 上含 TLS 的动态库永不卸载,重载产物需用内容哈希命名(`name@hash.so`)。
+插件是遵循插件 ABI 的 cdylib。协议(导出符号、元数据格式)与完整示例见
+[docs/abi_cn.md](docs/abi_cn.md);`cordis-sdk` crate 的文档覆盖编写 API。
+此外还有**进程内插件**形态(作为库直接链接,不走 ABI),适合应用自带的一等
+插件,示例见 [crates/cordis-sdk/examples/hello.rs](crates/cordis-sdk/examples/hello.rs)。
 
 ## 系统设计差异
 
@@ -195,19 +86,23 @@ pub unsafe extern "C" fn plugin_apply(handle: *mut PluginHandle, _config: *const
 
 **插件加载:同进程模块 ↔ cdylib + C ABI**
 
-原版插件就是 JS 模块,与宿主同进程同堆,任意对象自由互传。移植版插件编译为 cdylib,host 经 `libloading` 加载并逐一校验导出符号;插件对宿主只见不透明 `PluginHandle` 与 `HostVtable` 函数指针表,跨边界的值一律是 JSON 字符串,**分配永不跨界**。host 调用插件前压入"handle ↔ 当前 fiber Context"会话,同一个 `.so` 实例可被多个 fiber 共享而不串味。代价:非 JSON 的对象服务无法跨边界,`.so` 侧只能通过元数据 `inject` 声明依赖、由 host 解析。
+原版插件就是 JS 模块,与宿主同进程同堆,任意对象自由互传。移植版插件编译为 cdylib,host 经 `libloading` 加载并逐一校验导出符号;插件对宿主只见不透明句柄与宿主函数指针表,跨边界的值一律是 JSON 字符串,**分配永不跨界**。host 调用插件前压入"handle ↔ 当前 fiber Context"会话,同一个 `.so` 实例可被多个 fiber 共享而不串味。代价:非 JSON 的对象服务无法跨边界,`.so` 侧只能通过元数据 `inject` 声明依赖、由 host 解析。
 
-**并发模型:Node 事件循环 ↔ tokio current-thread + LocalSet**
+**并发模型:Node 事件循环 ↔ 多线程 tokio runtime**
 
-刻意保留原版的单线程语义:全链路 `Rc` / `RefCell`、无锁,`Context` 是 `!Send`。会话注册表是 `thread_local` 的,跨线程调用 vtable 会静默失败而非 panic。插件禁止自带 runtime,异步只能经 vtable `spawn` 交给 host 驱动。
+上游一切都在单事件循环上驱动。本移植跑在多线程 tokio runtime 上:核心
+数据结构 `Send + Sync`(`Arc` + `parking_lot`),生命周期与异步任务经
+`tokio::spawn` 分发到 worker 线程执行。loader 的 `.so` 会话注册表是
+`thread_local` 的,跨线程调用 vtable 会静默失败而非 panic。插件禁止自带
+runtime,异步只能经 host 的 spawn 交给宿主驱动。
 
-**上下文传递:`this` 闭包 / Proxy ↔ 显式参数 + ShadowContext**
+**上下文传递:`this` 闭包 / Proxy ↔ 显式参数**
 
-原版服务方法经 `this` 闭包拿到 root context,服务访问走 `ctx[name]` 动态 proxy。移植版全部改为显式传参:服务方法接收 `&ShadowContext`(内部区分"服务自身作用域"与"调用方作用域",`Deref` 到调用方),`#[service]` 宏生成类型化访问器与 traced handle 替代 proxy;同时保留 `get_str` 等动态字符串通道。
+原版服务方法经 `this` 闭包拿到 root context,服务访问走 `ctx[name]` 动态 proxy。移植版全部改为显式传参:服务方法接收显式的 shadow context(区分"服务自身作用域"与"调用方作用域"),以类型化访问器替代 proxy;同时保留动态字符串访问通道。
 
 **内存与生命周期:GC ↔ 所有权**
 
-原版依赖 GC 处理环;移植版用所有权手工管理——服务 store 只持有 `Weak<Fiber>` 等弱引用以避免 `Rc` 循环,host 维护存活句柄注册表,事件监听 / disposer 这类延迟回调在调用插件前检查句柄存活,绝不调用已释放的插件代码。
+原版依赖 GC 处理环;移植版用所有权手工管理——服务 store 只持有弱引用以避免引用循环,host 维护存活句柄注册表,事件监听 / disposer 这类延迟回调在调用插件前检查句柄存活,绝不调用已释放的插件代码。
 
 **Effect 与错误模型**
 
